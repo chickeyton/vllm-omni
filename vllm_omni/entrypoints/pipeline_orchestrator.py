@@ -17,7 +17,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from omegaconf import OmegaConf
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -38,15 +37,9 @@ from vllm_omni.distributed.omni_connectors.utils.initialization import (
 )
 from vllm_omni.engine.input_processor import OmniInputProcessor
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
-from vllm_omni.engine.stage_core_client import StageCoreClient
+from vllm_omni.engine.stage_core_client import StageCoreClient, _DiffusionOutput
 from vllm_omni.entrypoints.stage_utils import _to_dict
-from vllm_omni.entrypoints.utils import (
-    get_final_stage_id_for_e2e,
-    inject_omni_kv_config,
-    load_stage_configs_from_model,
-    load_stage_configs_from_yaml,
-    resolve_model_config_path,
-)
+from vllm_omni.entrypoints.utils import get_final_stage_id_for_e2e
 from vllm_omni.inputs.data import (
     OmniDiffusionSamplingParams,
     OmniPromptType,
@@ -165,7 +158,7 @@ class PipelineOrchestrator:
         # 3. Detect async_chunk mode
         self.async_chunk = self._is_async_chunk_enabled()
 
-        # 4. Create StageCoreClient for each LLM stage
+        # 4. Create StageCoreClient for each stage (LLM and diffusion)
         self._create_stage_clients()
 
         # 5. Build default sampling params and output modalities
@@ -227,20 +220,10 @@ class PipelineOrchestrator:
         return False
 
     def _create_stage_clients(self) -> None:
-        """Create StageCoreClient for each stage."""
+        """Create StageCoreClient for each stage (LLM and diffusion)."""
         from vllm_omni.engine.arg_utils import OmniEngineArgs
 
         for idx, (info, cfg) in enumerate(zip(self.stage_infos, self.stage_configs)):
-            if info.stage_type == "diffusion":
-                # Diffusion stages are handled separately
-                logger.info(
-                    "[PipelineOrchestrator] Stage-%d is diffusion, "
-                    "using DiffusionStageClient (TODO)",
-                    idx,
-                )
-                # TODO: Create DiffusionStageClient wrapping AsyncOmniDiffusion
-                continue
-
             runtime = getattr(cfg, "runtime", {})
             engine_args_raw = _to_dict(getattr(cfg, "engine_args", {}))
             devices = getattr(runtime, "devices", None)
@@ -250,75 +233,17 @@ class PipelineOrchestrator:
                 self.omni_transfer_config, idx
             )
 
-            # Inject omni_kv_config for in-engine usage
-            try:
-                omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(
-                    self.omni_transfer_config, idx
+            if info.stage_type == "diffusion":
+                client = self._create_diffusion_client(
+                    idx, info, engine_args_raw, devices,
                 )
-                if omni_conn_cfg:
-                    # Inject into engine_args_raw
-                    engine_args_raw["omni_kv_config"] = {
-                        "connector_config": omni_conn_cfg,
-                        "omni_from_stage": omni_from,
-                        "omni_to_stage": omni_to,
-                    }
-            except Exception as e:
-                logger.debug(
-                    "[PipelineOrchestrator] Failed to inject omni connector "
-                    "config into stage-%d: %s",
-                    idx,
-                    e,
+            else:
+                client = self._create_llm_client(
+                    idx, info, cfg, engine_args_raw, devices,
+                    stage_connectors_config,
                 )
 
-            # Inject async_chunk connector spec if needed
-            if engine_args_raw.get("async_chunk", False):
-                stage_connector_spec = {}
-                for v in stage_connectors_config.values():
-                    stage_connector_spec = dict(v.get("spec", {}))
-                    break
-                engine_args_raw["stage_connector_spec"] = stage_connector_spec
-                engine_args_raw["stage_id"] = idx
-
-            # Resolve worker class
-            self._resolve_worker_cls(engine_args_raw)
-
-            # Build VllmConfig from engine args
-            try:
-                omni_engine_args = OmniEngineArgs(
-                    model=self.model, **engine_args_raw
-                )
-                vllm_config = omni_engine_args.create_engine_config()
-            except Exception as e:
-                logger.error(
-                    "[PipelineOrchestrator] Failed to create VllmConfig "
-                    "for stage-%d: %s",
-                    idx,
-                    e,
-                )
-                raise
-
-            # Store vllm_config in stage info
-            info.vllm_config = vllm_config
-
-            # Determine executor class
-            executor_class = Executor.get_class(vllm_config)
-
-            # Create StageCoreClient
-            client = StageCoreClient(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=self.log_stats,
-                stage_id=idx,
-                stage_type=info.stage_type,
-                devices=str(devices) if devices is not None else None,
-                connectors_config=stage_connectors_config,
-                stage_init_timeout=self._stage_init_timeout,
-            )
             self.stage_clients.append(client)
-
-            # Initialize processors from comprehension stage
-            if info.is_comprehension:
-                self._init_processors(vllm_config, omni_engine_args)
 
         # If no comprehension stage found, try first LLM stage
         if self.input_processor is None and self.stage_clients:
@@ -327,6 +252,130 @@ class PipelineOrchestrator:
             )
             if first_llm and first_llm.vllm_config:
                 self._init_processors(first_llm.vllm_config)
+
+    def _create_llm_client(
+        self,
+        idx: int,
+        info: StageInfo,
+        cfg: Any,
+        engine_args_raw: dict[str, Any],
+        devices: Any,
+        stage_connectors_config: dict[str, Any],
+    ) -> StageCoreClient:
+        """Create a StageCoreClient for an LLM stage."""
+        from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+        # Inject omni_kv_config for in-engine usage
+        try:
+            omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(
+                self.omni_transfer_config, idx
+            )
+            if omni_conn_cfg:
+                engine_args_raw["omni_kv_config"] = {
+                    "connector_config": omni_conn_cfg,
+                    "omni_from_stage": omni_from,
+                    "omni_to_stage": omni_to,
+                }
+        except Exception as e:
+            logger.debug(
+                "[PipelineOrchestrator] Failed to inject omni connector "
+                "config into stage-%d: %s",
+                idx,
+                e,
+            )
+
+        # Inject async_chunk connector spec if needed
+        if engine_args_raw.get("async_chunk", False):
+            stage_connector_spec = {}
+            for v in stage_connectors_config.values():
+                stage_connector_spec = dict(v.get("spec", {}))
+                break
+            engine_args_raw["stage_connector_spec"] = stage_connector_spec
+            engine_args_raw["stage_id"] = idx
+
+        # Resolve worker class
+        self._resolve_worker_cls(engine_args_raw)
+
+        # Build VllmConfig from engine args
+        try:
+            omni_engine_args = OmniEngineArgs(
+                model=self.model, **engine_args_raw
+            )
+            vllm_config = omni_engine_args.create_engine_config()
+        except Exception as e:
+            logger.error(
+                "[PipelineOrchestrator] Failed to create VllmConfig "
+                "for stage-%d: %s",
+                idx,
+                e,
+            )
+            raise
+
+        info.vllm_config = vllm_config
+        executor_class = Executor.get_class(vllm_config)
+
+        client = StageCoreClient(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=self.log_stats,
+            stage_id=idx,
+            stage_type=info.stage_type,
+            devices=str(devices) if devices is not None else None,
+            connectors_config=stage_connectors_config,
+            stage_init_timeout=self._stage_init_timeout,
+        )
+
+        # Initialize processors from comprehension stage
+        if info.is_comprehension:
+            self._init_processors(vllm_config, omni_engine_args)
+
+        return client
+
+    def _create_diffusion_client(
+        self,
+        idx: int,
+        info: StageInfo,
+        engine_args_raw: dict[str, Any],
+        devices: Any,
+    ) -> StageCoreClient:
+        """Create a StageCoreClient for a diffusion stage."""
+        # Strip LLM-specific keys that diffusion doesn't understand
+        engine_args_raw.pop("model_stage", None)
+        engine_args_raw.pop("model", None)
+
+        # Inject omni_kv_config for connector-based KV transfer
+        try:
+            omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(
+                self.omni_transfer_config, idx
+            )
+            if omni_conn_cfg:
+                engine_args_raw["omni_kv_config"] = {
+                    "connector_config": omni_conn_cfg,
+                    "omni_from_stage": omni_from,
+                    "omni_to_stage": omni_to,
+                }
+        except Exception as e:
+            logger.debug(
+                "[PipelineOrchestrator] Failed to inject omni connector "
+                "config into diffusion stage-%d: %s",
+                idx,
+                e,
+            )
+
+        client = StageCoreClient(
+            stage_id=idx,
+            stage_type="diffusion",
+            devices=str(devices) if devices is not None else None,
+            model=self.model,
+            engine_args_raw=engine_args_raw,
+            engine_input_source=info.engine_input_source,
+        )
+
+        logger.info(
+            "[PipelineOrchestrator] Stage-%d diffusion client created",
+            idx,
+        )
+        return client
 
     def _init_processors(
         self,
@@ -426,12 +475,9 @@ class PipelineOrchestrator:
                 final_stage_id_for_e2e=final_stage_id,
             )
 
-        # Convert prompt to EngineCoreRequest for stage 0
-        sp0 = sampling_params_list[0]
-        engine_request = self._create_engine_request(prompt, request_id, sp0)
-
         # Submit to stage 0
-        await self.stage_clients[0].add_request(engine_request)
+        sp0 = sampling_params_list[0]
+        await self._submit_to_stage(0, prompt, sp0, request_id)
         metrics.stage_first_ts[0] = metrics.stage_first_ts[0] or time.time()
 
         if self.async_chunk:
@@ -536,10 +582,9 @@ class PipelineOrchestrator:
                 else:
                     # Direct submission without connector
                     for next_input in next_inputs:
-                        next_request = self._create_engine_request(
-                            next_input, request_id, sp_next
+                        await self._submit_to_stage(
+                            next_stage_id, next_input, sp_next, request_id
                         )
-                        await self.stage_clients[next_stage_id].add_request(next_request)
 
                 metrics.stage_first_ts[next_stage_id] = time.time()
 
@@ -624,10 +669,11 @@ class PipelineOrchestrator:
                         for i in range(1, num_active_stages):
                             if i < len(self.stage_clients):
                                 sp_i = sampling_params_list[i]
-                                req = self._create_engine_request(
-                                    engine_input, request_id, sp_i
+                                asyncio.create_task(
+                                    self._submit_to_stage(
+                                        i, engine_input, sp_i, request_id
+                                    )
                                 )
-                                await self.stage_clients[i].add_request(req)
                                 metrics.stage_first_ts[i] = time.time()
 
                     # Yield output for final output stages
@@ -736,6 +782,30 @@ class PipelineOrchestrator:
 
         return engine_inputs
 
+    async def _submit_to_stage(
+        self,
+        stage_id: int,
+        prompt: Any,
+        sampling_params: Any,
+        request_id: str,
+    ) -> None:
+        """Submit a request to a stage (LLM or diffusion).
+
+        For LLM stages, converts the prompt to an ``EngineCoreRequest``
+        and calls ``add_request``.  For diffusion stages, calls
+        ``submit_diffusion_request`` directly.
+        """
+        client = self.stage_clients[stage_id]
+        if client.is_diffusion:
+            await client.submit_diffusion_request(
+                prompt, sampling_params, request_id,
+            )
+        else:
+            engine_request = self._create_engine_request(
+                prompt, request_id, sampling_params,
+            )
+            await client.add_request(engine_request)
+
     def _make_submit_fn(self, stage_id: int) -> Callable:
         """Create a submit function for connector-based transfer.
 
@@ -745,17 +815,16 @@ class PipelineOrchestrator:
         client = self.stage_clients[stage_id]
 
         def submit(task: dict[str, Any]) -> None:
-            # Convert task dict to EngineCoreRequest and submit
             request_id = task.get("request_id", "")
             engine_inputs = task.get("engine_inputs")
             sampling_params = task.get("sampling_params", SamplingParams())
 
-            request = self._create_engine_request(
-                engine_inputs, request_id, sampling_params
-            )
-            # Use asyncio to submit from sync context
             loop = asyncio.get_event_loop()
-            loop.create_task(client.add_request(request))
+            loop.create_task(
+                self._submit_to_stage(
+                    stage_id, engine_inputs, sampling_params, request_id,
+                )
+            )
 
         return submit
 
@@ -767,6 +836,12 @@ class PipelineOrchestrator:
         engine_outputs: EngineCoreOutputs | None,
     ) -> OmniRequestOutput | None:
         """Create an OmniRequestOutput from stage output."""
+        # Diffusion outputs are already wrapped OmniRequestOutputs
+        if isinstance(output, _DiffusionOutput) and output.result is not None:
+            result = output.result
+            result.stage_id = stage_id
+            return result
+
         images = []
         if info.final_output_type == "image":
             if isinstance(output, OmniRequestOutput) and output.images:
