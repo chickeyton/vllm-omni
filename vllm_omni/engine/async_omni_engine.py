@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+from vllm.v1.engine.utils import get_engine_zmq_addresses
 
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
@@ -117,7 +117,7 @@ class AsyncOmniEngine:
                         stage_init_timeout,
                     )
                     addresses = get_engine_zmq_addresses(vllm_config)
-                    launch_cm = launch_core_engines(
+                    launch_cm = StageEngineCoreClient.launch_engine(
                         vllm_config=vllm_config,
                         executor_class=executor_class,
                         log_stats=False,
@@ -158,24 +158,8 @@ class AsyncOmniEngine:
     ) -> tuple[Any, Any, Any, InputProcessor | None]:
         """Attach a READY LLM stage to the orchestrator event loop."""
 
-        client_addresses = {
-            "input_address": started.addresses.inputs[0],
-            "output_address": started.addresses.outputs[0],
-        }
-        if started.addresses.frontend_stats_publish_address is not None:
-            client_addresses["stats_update_address"] = started.addresses.frontend_stats_publish_address
-
         try:
-            stage_client = StageEngineCoreClient(
-                vllm_config=started.vllm_config,
-                executor_class=started.executor_class,
-                metadata=started.metadata,
-                client_addresses=client_addresses,
-                engine_manager=started.engine_manager,
-                coordinator=started.coordinator,
-            )
-            started.engine_manager = None
-            started.coordinator = None
+            stage_client = StageEngineCoreClient.from_started_stage(started)
         except Exception:
             close_started_llm_stage(started)
             raise
