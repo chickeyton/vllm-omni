@@ -1,21 +1,35 @@
 """
 Stage Engine Core Client for vLLM-Omni V1 architecture.
 
-Directly inherits from vLLM's AsyncMPClient to reuse EngineCore architecture.
+Manages a StageCoreProc subprocess and communicates with it via ZMQ.
+Inherits from vLLM's AsyncMPClient for the ZMQ client functionality.
 """
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any
 
+import zmq
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.engine.utils import (
+    CoreEngine,
+    CoreEngineProcManager,
+    EngineZmqAddresses,
+    wait_for_engine_startup,
+)
+from vllm.v1.utils import get_engine_client_zmq_addr
+from vllm.utils.network_utils import zmq_socket_ctx
 
+from vllm_omni.engine.stage_core_proc import StageCoreProc
 from vllm_omni.engine.stage_init import StageMetadata
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.engine import EngineCoreOutput
+    from vllm.v1.executor import Executor
 
     from vllm_omni.inputs.data import OmniTokensPrompt
 
@@ -23,32 +37,39 @@ logger = init_logger(__name__)
 
 
 class StageEngineCoreClient(AsyncMPClient):
-    """Stage async client that inherits from vLLM's AsyncMPClient.
+    """Stage async client that manages a StageCoreProc subprocess.
 
-    Fully reuses AsyncMPClient.__init__ for:
-    - ZMQ setup, sockets
-    - launch_core_engines() -> EngineCoreProc
-    - outputs_queue, output_queue_task
-    - All utility methods (shutdown, get_output_async, abort_requests_async, etc.)
+    Encapsulates the full lifecycle of a single pipeline stage:
+    - Launches StageCoreProc as a child process with stage-specific setup
+    - ZMQ-based communication with the subprocess (inherited from AsyncMPClient)
+    - Stage metadata management for orchestrator use
 
-    This is the async version of StageMPClient, designed for use with AsyncOmniEngine.
+    The subprocess runs StageCoreProc.run_stage_core which performs
+    stage-specific device setup, plugin loading, and worker class
+    resolution before delegating to EngineCoreProc.run_engine_core
+    for the standard ZMQ server loop.
     """
 
     def __init__(
         self,
-        vllm_config: Any,
-        executor_class: type,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
         metadata: StageMetadata,
-        client_addresses: dict[str, str] | None = None,
-        engine_manager: Any = None,
-        coordinator: Any = None,
+        *,
+        devices: str | None = None,
     ):
         """Create an async EngineCore client for a single stage.
 
-        All heavy init (config extraction, plugin loading, device setup,
-        engine args building, device locking) is done by the Orchestrator
-        via helpers in stage_init.py.  This constructor just stores metadata
-        and calls super().__init__().
+        Launches a StageCoreProc subprocess, performs the engine startup
+        handshake, and initializes ZMQ client sockets for communication.
+
+        Args:
+            vllm_config: Pre-built vLLM configuration for this stage.
+            executor_class: Executor implementation class.
+            metadata: Stage metadata extracted from stage config.
+            devices: Device specification (e.g. "0,1") for the stage
+                subprocess. Passed to StageCoreProc for CUDA_VISIBLE_DEVICES
+                setup.
         """
         # -------- Stage metadata (public fields used at runtime) --------
         self.stage_id = metadata.stage_id
@@ -66,9 +87,28 @@ class StageEngineCoreClient(AsyncMPClient):
         self.engine_outputs: Any = None
 
         logger.info(
-            "[StageEngineCoreClient] Stage-%s initializing EngineCore",
+            "[StageEngineCoreClient] Stage-%s launching StageCoreProc subprocess",
             self.stage_id,
         )
+
+        # -------- Launch StageCoreProc subprocess --------
+        engine_manager, addresses = self._launch_stage_proc(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            metadata=metadata,
+            devices=devices,
+        )
+
+        # -------- Connect to subprocess via ZMQ (parent class) --------
+        client_addresses = {
+            "input_address": addresses.inputs[0],
+            "output_address": addresses.outputs[0],
+        }
+        if addresses.frontend_stats_publish_address is not None:
+            client_addresses["stats_update_address"] = (
+                addresses.frontend_stats_publish_address
+            )
+
         try:
             super().__init__(
                 vllm_config,
@@ -76,34 +116,120 @@ class StageEngineCoreClient(AsyncMPClient):
                 log_stats=False,
                 client_addresses=client_addresses,
             )
-            if engine_manager is not None:
-                self.resources.engine_manager = engine_manager
-            if coordinator is not None:
-                self.resources.coordinator = coordinator
+            # Transfer process lifecycle management to BackgroundResources
+            # so that shutdown() cleans up the subprocess automatically.
+            self.resources.engine_manager = engine_manager
         except Exception:
             logger.exception(
-                "[StageEngineCoreClient] Stage-%s EngineCore init failed",
+                "[StageEngineCoreClient] Stage-%s ZMQ client init failed",
                 self.stage_id,
             )
-            try:
-                self.shutdown()
-            except Exception as shutdown_error:
-                logger.warning(
-                    "[StageEngineCoreClient] Stage-%s cleanup after init failure failed: %s",
-                    self.stage_id,
-                    shutdown_error,
-                )
+            engine_manager.close()
             raise
+
         logger.info(
-            "[StageEngineCoreClient] Stage-%s EngineCore running",
+            "[StageEngineCoreClient] Stage-%s StageCoreProc running",
             self.stage_id,
         )
+
+    # ==================== Subprocess Management ====================
+
+    @staticmethod
+    def _launch_stage_proc(
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        metadata: StageMetadata,
+        devices: str | None,
+    ) -> tuple[CoreEngineProcManager, EngineZmqAddresses]:
+        """Launch StageCoreProc in a subprocess and wait for startup.
+
+        Creates ZMQ addresses, spawns the subprocess with stage-specific
+        parameters via functools.partial, and performs the engine startup
+        handshake (HELLO -> init -> READY).
+
+        Args:
+            vllm_config: Pre-built vLLM configuration.
+            executor_class: Executor implementation class.
+            metadata: Stage metadata for StageCoreProc setup.
+            devices: Device specification string for the subprocess.
+
+        Returns:
+            (engine_manager, addresses) tuple. The engine_manager owns the
+            subprocess and should be assigned to BackgroundResources for
+            lifecycle management.
+        """
+        # Generate ZMQ addresses for client <-> subprocess communication.
+        # Always local (same machine) so use IPC paths.
+        addresses = EngineZmqAddresses(
+            inputs=[get_engine_client_zmq_addr(True, "127.0.0.1")],
+            outputs=[get_engine_client_zmq_addr(True, "127.0.0.1")],
+        )
+        handshake_address = get_engine_client_zmq_addr(True, "127.0.0.1")
+
+        # Wrap StageCoreProc.run_stage_core with stage-specific kwargs.
+        # CoreEngineProcManager will supply the standard kwargs
+        # (vllm_config, handshake_address, executor_class, etc.).
+        target_fn = functools.partial(
+            StageCoreProc.run_stage_core,
+            stage_id=metadata.stage_id,
+            stage_type=metadata.stage_type,
+            devices=devices,
+        )
+
+        logger.info(
+            "[StageEngineCoreClient] Stage-%s spawning subprocess "
+            "(type=%s, devices=%s)",
+            metadata.stage_id,
+            metadata.stage_type,
+            devices,
+        )
+
+        with zmq_socket_ctx(
+            handshake_address, zmq.ROUTER, bind=True
+        ) as handshake_socket:
+            # Spawn StageCoreProc subprocess via CoreEngineProcManager.
+            # Single engine, no data parallelism.
+            engine_manager = CoreEngineProcManager(
+                target_fn=target_fn,
+                local_engine_count=1,
+                start_index=0,
+                local_start_index=0,
+                vllm_config=vllm_config,
+                local_client=True,
+                handshake_address=handshake_address,
+                executor_class=executor_class,
+                log_stats=False,
+            )
+
+            # Wait for the subprocess to complete startup handshake.
+            # The subprocess sends HELLO, we reply with addresses,
+            # then it sends READY once initialized.
+            wait_for_engine_startup(
+                handshake_socket=handshake_socket,
+                addresses=addresses,
+                core_engines=[CoreEngine(index=0, local=True)],
+                parallel_config=vllm_config.parallel_config,
+                coordinated_dp=False,
+                cache_config=vllm_config.cache_config,
+                proc_manager=engine_manager,
+                coord_process=None,
+            )
+
+        logger.info(
+            "[StageEngineCoreClient] Stage-%s subprocess started",
+            metadata.stage_id,
+        )
+        return engine_manager, addresses
 
     # ==================== Overrides ====================
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         """Add request to the stage engine core."""
-        logger.info(f"[StageEngineCoreClient] Stage-{self.stage_id} adding request: {request.request_id}")
+        logger.info(
+            "[StageEngineCoreClient] Stage-%s adding request: %s",
+            self.stage_id,
+            request.request_id,
+        )
         await super().add_request_async(request)
 
     # ==================== Stage Methods ====================
