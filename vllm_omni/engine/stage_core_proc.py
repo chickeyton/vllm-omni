@@ -102,14 +102,17 @@ class StageCoreProc(EngineCoreProc):
                 engine_core.shutdown()
 
 
-def launch_stage_core(
+def spawn_stage_core(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool = False,
-) -> tuple[EngineZmqAddresses, BaseProcess]:
-    """Spawn a *StageCoreProc* subprocess and perform the startup handshake.
+) -> tuple[EngineZmqAddresses, BaseProcess, str]:
+    """Spawn a *StageCoreProc* subprocess without performing the handshake.
 
-    Returns ``(addresses, process)``.
+    Must be called while the correct device env vars are set (e.g. under
+    the stage-launch lock).  Call ``complete_stage_handshake`` afterwards.
+
+    Returns ``(addresses, process, handshake_address)``.
     """
     addresses = get_engine_zmq_addresses(vllm_config)
     handshake_address = get_open_zmq_ipc_path()
@@ -129,14 +132,24 @@ def launch_stage_core(
         },
     )
     proc.start()
+    return addresses, proc, handshake_address
 
+
+def complete_stage_handshake(
+    proc: BaseProcess,
+    handshake_address: str,
+    addresses: EngineZmqAddresses,
+    vllm_config: VllmConfig,
+) -> None:
+    """Perform the HELLO/INIT/READY handshake with an already-spawned proc.
+
+    On failure the process is terminated before re-raising.
+    """
     try:
         _perform_handshake(proc, handshake_address, addresses, vllm_config)
     except Exception:
         shutdown([proc])
         raise
-
-    return addresses, proc
 
 
 def _perform_handshake(

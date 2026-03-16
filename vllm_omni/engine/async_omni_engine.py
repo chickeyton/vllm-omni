@@ -39,6 +39,7 @@ from vllm_omni.engine import (
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
 from vllm_omni.engine.serialization import serialize_additional_information
+from vllm_omni.engine.stage_core_proc import spawn_stage_core
 from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClient
 from vllm_omni.engine.stage_init import (
     acquire_device_locks,
@@ -179,7 +180,11 @@ class AsyncOmniEngine:
         stage_client = None
 
         try:
-            # --- Config building under lock (modifies env vars) ---
+            # --- Config building + process spawn under lock ---
+            # The lock serializes env-var mutations (CUDA_VISIBLE_DEVICES).
+            # The subprocess must be spawned while the correct vars are set
+            # so it inherits them.  The handshake (model loading) happens
+            # outside the lock so stages can initialize in parallel.
             with self._llm_stage_launch_lock:
                 previous_visible_devices = os.environ.get(device_control_env)
                 try:
@@ -200,17 +205,24 @@ class AsyncOmniEngine:
                         engine_args_dict,
                         stage_init_timeout,
                     )
+                    # Spawn while device env vars are still set.
+                    addresses, proc, handshake_address = spawn_stage_core(
+                        vllm_config, executor_class,
+                    )
                 finally:
                     if previous_visible_devices is None:
                         os.environ.pop(device_control_env, None)
                     else:
                         os.environ[device_control_env] = previous_visible_devices
 
-            # --- Create StageEngineCoreClient (spawns StageCoreProc) ---
+            # --- Handshake + client connect (outside the lock) ---
             stage_client = StageEngineCoreClient(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 metadata=metadata,
+                addresses=addresses,
+                proc=proc,
+                handshake_address=handshake_address,
             )
 
             # --- Create output / input processors ---

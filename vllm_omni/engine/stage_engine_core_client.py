@@ -15,7 +15,10 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.utils import shutdown
 
-from vllm_omni.engine.stage_core_proc import launch_stage_core
+from vllm_omni.engine.stage_core_proc import (
+    complete_stage_handshake,
+    spawn_stage_core,
+)
 from vllm_omni.engine.stage_init import StageMetadata
 
 if TYPE_CHECKING:
@@ -44,13 +47,24 @@ class StageEngineCoreClient(AsyncMPClient):
         vllm_config: Any,
         executor_class: type,
         metadata: StageMetadata,
+        *,
+        addresses: Any = None,
+        proc: Any = None,
+        handshake_address: str | None = None,
     ):
         """Create an async EngineCore client for a single stage.
 
         Args:
             vllm_config: Fully-built ``VllmConfig`` for this stage.
             executor_class: Executor class resolved for this stage.
-            metadata: Lightweight stage attributes from ``extract_stage_metadata``.
+            metadata: Lightweight stage attributes from
+                ``extract_stage_metadata``.
+            addresses: Pre-allocated ZMQ addresses (from ``spawn_stage_core``).
+            proc: Already-started subprocess (from ``spawn_stage_core``).
+            handshake_address: Handshake IPC path (from ``spawn_stage_core``).
+                When *addresses*, *proc* and *handshake_address* are all
+                provided the client skips spawning and only performs the
+                handshake + ZMQ connect.  Otherwise it spawns internally.
         """
         # -------- Stage metadata (public fields used at runtime) --------
         self.stage_id = metadata.stage_id
@@ -72,11 +86,15 @@ class StageEngineCoreClient(AsyncMPClient):
             self.stage_id,
         )
         try:
-            # --- Launch StageCoreProc and perform handshake ---
-            addresses, proc = launch_stage_core(
-                vllm_config,
-                executor_class,
-                log_stats=False,
+            # --- Spawn if not pre-spawned ---
+            if proc is None:
+                addresses, proc, handshake_address = spawn_stage_core(
+                    vllm_config, executor_class, log_stats=False,
+                )
+
+            # --- Handshake ---
+            complete_stage_handshake(
+                proc, handshake_address, addresses, vllm_config,
             )
 
             client_addresses = {
