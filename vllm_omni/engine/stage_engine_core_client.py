@@ -1,7 +1,8 @@
 """
 Stage Engine Core Client for vLLM-Omni V1 architecture.
 
-Directly inherits from vLLM's AsyncMPClient to reuse EngineCore architecture.
+Inherits from vLLM's AsyncMPClient for ZMQ client infrastructure and
+internally spawns a StageCoreProc subprocess for the engine busy loop.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient
 
+from vllm_omni.engine.stage_core_proc import launch_stage_core
 from vllm_omni.engine.stage_init import StageMetadata
 
 if TYPE_CHECKING:
@@ -23,15 +25,16 @@ logger = init_logger(__name__)
 
 
 class StageEngineCoreClient(AsyncMPClient):
-    """Stage async client that inherits from vLLM's AsyncMPClient.
+    """Stage async client that manages its own StageCoreProc subprocess.
 
-    Fully reuses AsyncMPClient.__init__ for:
-    - ZMQ setup, sockets
-    - launch_core_engines() -> EngineCoreProc
-    - outputs_queue, output_queue_task
-    - All utility methods (shutdown, get_output_async, abort_requests_async, etc.)
+    On construction the client:
+    1. Spawns a ``StageCoreProc`` in a subprocess via ``launch_stage_core``.
+    2. Performs the ZMQ handshake (HELLO / INIT / READY).
+    3. Connects the ``AsyncMPClient`` ZMQ infrastructure (ROUTER + PULL
+       sockets) to the running subprocess.
 
-    This is the async version of StageMPClient, designed for use with AsyncOmniEngine.
+    All output polling, utility RPCs, and lifecycle management are inherited
+    from ``AsyncMPClient``.
     """
 
     def __init__(
@@ -39,16 +42,13 @@ class StageEngineCoreClient(AsyncMPClient):
         vllm_config: Any,
         executor_class: type,
         metadata: StageMetadata,
-        client_addresses: dict[str, str] | None = None,
-        engine_manager: Any = None,
-        coordinator: Any = None,
     ):
         """Create an async EngineCore client for a single stage.
 
-        All heavy init (config extraction, plugin loading, device setup,
-        engine args building, device locking) is done by the Orchestrator
-        via helpers in stage_init.py.  This constructor just stores metadata
-        and calls super().__init__().
+        Args:
+            vllm_config: Fully-built ``VllmConfig`` for this stage.
+            executor_class: Executor class resolved for this stage.
+            metadata: Lightweight stage attributes from ``extract_stage_metadata``.
         """
         # -------- Stage metadata (public fields used at runtime) --------
         self.stage_id = metadata.stage_id
@@ -66,36 +66,55 @@ class StageEngineCoreClient(AsyncMPClient):
         self.engine_outputs: Any = None
 
         logger.info(
-            "[StageEngineCoreClient] Stage-%s initializing EngineCore",
+            "[StageEngineCoreClient] Stage-%s initializing StageCoreProc",
             self.stage_id,
         )
         try:
+            # --- Launch StageCoreProc and perform handshake ---
+            addresses, stage_manager = launch_stage_core(
+                vllm_config,
+                executor_class,
+                log_stats=False,
+            )
+
+            client_addresses = {
+                "input_address": addresses.inputs[0],
+                "output_address": addresses.outputs[0],
+            }
+            if addresses.frontend_stats_publish_address is not None:
+                client_addresses["stats_update_address"] = (
+                    addresses.frontend_stats_publish_address
+                )
+
+            # --- Connect AsyncMPClient to the running subprocess ---
             super().__init__(
                 vllm_config,
                 executor_class,
                 log_stats=False,
                 client_addresses=client_addresses,
             )
-            if engine_manager is not None:
-                self.resources.engine_manager = engine_manager
-            if coordinator is not None:
-                self.resources.coordinator = coordinator
+            # Transfer process ownership to BackgroundResources so that
+            # shutdown() terminates the subprocess automatically.
+            self.resources.engine_manager = stage_manager
+
         except Exception:
             logger.exception(
-                "[StageEngineCoreClient] Stage-%s EngineCore init failed",
+                "[StageEngineCoreClient] Stage-%s init failed",
                 self.stage_id,
             )
             try:
                 self.shutdown()
             except Exception as shutdown_error:
                 logger.warning(
-                    "[StageEngineCoreClient] Stage-%s cleanup after init failure failed: %s",
+                    "[StageEngineCoreClient] Stage-%s cleanup after init "
+                    "failure failed: %s",
                     self.stage_id,
                     shutdown_error,
                 )
             raise
+
         logger.info(
-            "[StageEngineCoreClient] Stage-%s EngineCore running",
+            "[StageEngineCoreClient] Stage-%s StageCoreProc running",
             self.stage_id,
         )
 
@@ -103,7 +122,11 @@ class StageEngineCoreClient(AsyncMPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         """Add request to the stage engine core."""
-        logger.info(f"[StageEngineCoreClient] Stage-{self.stage_id} adding request: {request.request_id}")
+        logger.info(
+            "[StageEngineCoreClient] Stage-%s adding request: %s",
+            self.stage_id,
+            request.request_id,
+        )
         await super().add_request_async(request)
 
     # ==================== Stage Methods ====================
@@ -129,7 +152,9 @@ class StageEngineCoreClient(AsyncMPClient):
             )
 
         if not self.engine_input_source:
-            raise ValueError(f"engine_input_source empty for stage {self.stage_id}")
+            raise ValueError(
+                f"engine_input_source empty for stage {self.stage_id}"
+            )
 
         source_id = self.engine_input_source[0]
         source_outputs = stage_list[source_id].engine_outputs
@@ -137,12 +162,19 @@ class StageEngineCoreClient(AsyncMPClient):
         if not isinstance(prompt, list):
             prompt = [prompt]
 
-        mm_data = {so.request_id: p.get("multi_modal_data") for so, p in zip(source_outputs, prompt)}
+        mm_data = {
+            so.request_id: p.get("multi_modal_data")
+            for so, p in zip(source_outputs, prompt)
+        }
 
         return [
             OmniTokensPrompt(
                 prompt_token_ids=so.outputs[0].token_ids,
-                multi_modal_data=(mm_data[so.request_id] if self.requires_multimodal_data else None),
+                multi_modal_data=(
+                    mm_data[so.request_id]
+                    if self.requires_multimodal_data
+                    else None
+                ),
             )
             for so in source_outputs
         ]
@@ -154,12 +186,7 @@ class StageEngineCoreClient(AsyncMPClient):
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
-        """Forward control RPCs to the underlying AsyncMPClient stage engine.
-
-        Each ``StageEngineCoreClient`` already represents one logical stage, so
-        stage-scoped control operations should be executed here and then fanned
-        in-core across the workers managed by this EngineCore client.
-        """
+        """Forward control RPCs to the underlying AsyncMPClient stage engine."""
         return await super().collective_rpc_async(
             method=method,
             timeout=timeout,
