@@ -7,11 +7,13 @@ internally spawns a StageCoreProc subprocess for the engine busy loop.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.utils import shutdown
 
 from vllm_omni.engine.stage_core_proc import launch_stage_core
 from vllm_omni.engine.stage_init import StageMetadata
@@ -71,7 +73,7 @@ class StageEngineCoreClient(AsyncMPClient):
         )
         try:
             # --- Launch StageCoreProc and perform handshake ---
-            addresses, stage_manager = launch_stage_core(
+            addresses, proc = launch_stage_core(
                 vllm_config,
                 executor_class,
                 log_stats=False,
@@ -93,9 +95,12 @@ class StageEngineCoreClient(AsyncMPClient):
                 log_stats=False,
                 client_addresses=client_addresses,
             )
-            # Transfer process ownership to BackgroundResources so that
-            # shutdown() terminates the subprocess automatically.
-            self.resources.engine_manager = stage_manager
+            # Wrap the process so BackgroundResources can call .close()
+            # and the engine monitor can access .processes.
+            self.resources.engine_manager = SimpleNamespace(
+                processes=[proc],
+                close=lambda: shutdown([proc]),
+            )
 
         except Exception:
             logger.exception(
