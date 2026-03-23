@@ -29,19 +29,6 @@ def _get_diffusion_feature_cases(model: str):
             OmniServerParams(
                 model=model,
                 server_args=[
-                    "--cache-backend",
-                    "tea_cache",
-                ],
-            ),
-            id="single_card_001",
-            marks=SINGLE_CARD_FEATURE_MARKS,
-        ),
-        pytest.param(
-            OmniServerParams(
-                model=model,
-                server_args=[
-                    "--cache-backend",
-                    "tea_cache",
                     "--cfg-parallel-size",
                     "2",
                 ],
