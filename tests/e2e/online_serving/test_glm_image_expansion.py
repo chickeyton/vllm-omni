@@ -6,6 +6,7 @@ and are supported by the following models:
 """
 
 import pytest
+import os
 from pathlib import Path
 
 from tests.conftest import (
@@ -34,7 +35,7 @@ def _get_diffusion_feature_cases(model: str):
                     "--cfg-parallel-size",
                     "2",
                     "--stage-configs-path",
-                    path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml"),
+                    os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml"),
                 ],
             ),
             id="parallel_001",
