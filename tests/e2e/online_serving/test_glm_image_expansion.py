@@ -6,6 +6,7 @@ and are supported by the following models:
 """
 
 import pytest
+from pathlib import Path
 
 from tests.conftest import (
     OmniServer,
@@ -24,6 +25,7 @@ PARALLEL_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"}, num_cards=2)
 # This test file targets two models, so I write a helper function.
 # If a similar test only involves one model, one can just define a global list variable.
 def _get_diffusion_feature_cases(model: str):
+    base_dir = Path(__file__).resolve().parent.parent.parent.parent
     return [
         pytest.param(
             OmniServerParams(
@@ -31,6 +33,8 @@ def _get_diffusion_feature_cases(model: str):
                 server_args=[
                     "--cfg-parallel-size",
                     "2",
+                    "--stage-configs-path",
+                    path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml"),
                 ],
             ),
             id="parallel_001",
