@@ -27,6 +27,7 @@ PARALLEL_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"}, num_cards=2)
 # If a similar test only involves one model, one can just define a global list variable.
 def _get_diffusion_feature_cases(model: str):
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    stage_configs_path = os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml")
     return [
         pytest.param(
             OmniServerParams(
@@ -35,7 +36,7 @@ def _get_diffusion_feature_cases(model: str):
                     "--cfg-parallel-size",
                     "2",
                     "--stage-configs-path",
-                    os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml"),
+                    stage_configs_path,
                 ],
             ),
             id="parallel_001",
