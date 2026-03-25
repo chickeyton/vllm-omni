@@ -128,7 +128,6 @@ class GlmImageDataParser(MultiModalDataParser):
         return parsers
 
 
-
 class GlmImageProcessingInfo(BaseProcessingInfo):
     """
     Processing information for GLM-Image model.

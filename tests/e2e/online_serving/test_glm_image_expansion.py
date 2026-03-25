@@ -56,7 +56,7 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
                     stage_configs_path,
                 ],
             ),
-            id="parallel_002"，
+            id="parallel_002",
             marks=hardware_marks(res={"cuda": "H100"}, num_cards=4),
         ),
     ]
