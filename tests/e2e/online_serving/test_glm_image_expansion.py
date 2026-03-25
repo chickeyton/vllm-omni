@@ -25,9 +25,9 @@ PARALLEL_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"}, num_cards=2)
 
 # This test file targets two models, so I write a helper function.
 # If a similar test only involves one model, one can just define a global list variable.
-def _get_diffusion_feature_cases(model: str):
+def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
-    stage_configs_path = os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", "glm_image.yaml")
+    stage_configs_path = os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", stage_cfg_file)
     return [
         pytest.param(
             OmniServerParams(
@@ -49,7 +49,7 @@ def _get_diffusion_feature_cases(model: str):
 @pytest.mark.diffusion
 @pytest.mark.parametrize(
     "omni_server",
-    _get_diffusion_feature_cases("zai-org/GLM-Image"),
+    _get_diffusion_feature_cases("zai-org/GLM-Image", "glm_image.yaml"),
     indirect=True,
 )
 def test_glm_image(omni_server: OmniServer, openai_client: OpenAIClientHandler):

@@ -594,8 +594,8 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
 
         logger.debug(f"_apply_hf_processor_main: mm_counts={mm_counts}, num_images={num_images}")
 
-        if num_images == 0 or enable_hf_prompt_update:
-            # t2i mode or normal flow - use parent implementation
+        if num_images == 0:
+            # t2i mode - use parent implementation
             return super()._apply_hf_processor_main(
                 prompt=prompt,
                 mm_items=mm_items,
@@ -604,9 +604,12 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
                 enable_hf_prompt_update=enable_hf_prompt_update,
             )
 
-        # i2i mode with enable_hf_prompt_update=False (cache miss scenario)
-        # We need to build prompt_ids with image placeholders
-        logger.debug(f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update=False, num_images={num_images}")
+        # i2i mode — always use the custom path that builds prompt_ids
+        # manually, bypassing apply_chat_template.  HF's apply_chat_template
+        # inserts a *target* <|image|> placeholder in addition to the source
+        # ones, which creates more image-token groups than actual images and
+        # causes an IndexError in vllm's _merge_mm_kwargs.
+        logger.debug(f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update={enable_hf_prompt_update}, num_images={num_images}")
 
         # Get mm data from our overridden _apply_hf_processor_mm_only
         mm_processed_data = self._apply_hf_processor_mm_only(
