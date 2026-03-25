@@ -35,14 +35,12 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
             OmniServerParams(
                 model=model,
                 server_args=[
-                    "--cfg-parallel-size",
-                    "2",
                     "--stage-configs-path",
                     stage_configs_path,
                 ],
             ),
-            id="parallel_001",
-            marks=hardware_marks(res={"cuda": "H100"}, num_cards=2),
+            id="basic_001",
+            marks=SINGLE_CARD_FEATURE_MARKS,
         ),
         pytest.param(
             OmniServerParams(
@@ -50,6 +48,17 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
                 server_args=[
                     "--cfg-parallel-size",
                     "2",
+                    "--stage-configs-path",
+                    stage_configs_path,
+                ],
+            ),
+            id="parallel_001",
+            marks=PARALLEL_FEATURE_MARKS,
+        ),
+        pytest.param(
+            OmniServerParams(
+                model=model,
+                server_args=[
                     "--tensor-parallel-size",
                     "2",
                     "--stage-configs-path",
@@ -57,7 +66,7 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
                 ],
             ),
             id="parallel_002",
-            marks=hardware_marks(res={"cuda": "H100"}, num_cards=4),
+            marks=PARALLEL_FEATURE_MARKS,
         ),
     ]
 
