@@ -127,13 +127,6 @@ class GlmImageDataParser(MultiModalDataParser):
         parsers["img2img"] = self._parse_image_data
         return parsers
 
-    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
-        # Remap "img2img" → "image" so that hashes, kwargs, and prompt
-        # updates all use the same modality key downstream.
-        if "img2img" in mm_data and "image" not in mm_data:
-            mm_data = {("image" if k == "img2img" else k): v
-                       for k, v in mm_data.items()}
-        return super().parse_mm_data(mm_data)
 
 
 class GlmImageProcessingInfo(BaseProcessingInfo):
@@ -187,6 +180,19 @@ class GlmImageProcessingInfo(BaseProcessingInfo):
         return GlmImageDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
         )
+
+    def parse_mm_data(
+        self,
+        mm_data: MultiModalDataDict,
+        *,
+        validate: bool = True,
+    ) -> MultiModalDataItems:
+        # Remap "img2img" → "image" *in-place* so that every downstream
+        # consumer (hashes, kwargs, prompt-updates, _validate_mm_uuids)
+        # sees a single, consistent modality key.
+        if "img2img" in mm_data and "image" not in mm_data:
+            mm_data["image"] = mm_data.pop("img2img")
+        return super().parse_mm_data(mm_data, validate=validate)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # GLM-Image is an image GENERATION model that supports:
