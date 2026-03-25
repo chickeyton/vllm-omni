@@ -127,6 +127,14 @@ class GlmImageDataParser(MultiModalDataParser):
         parsers["img2img"] = self._parse_image_data
         return parsers
 
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        # Remap "img2img" → "image" so that hashes, kwargs, and prompt
+        # updates all use the same modality key downstream.
+        if "img2img" in mm_data and "image" not in mm_data:
+            mm_data = {("image" if k == "img2img" else k): v
+                       for k, v in mm_data.items()}
+        return super().parse_mm_data(mm_data)
+
 
 class GlmImageProcessingInfo(BaseProcessingInfo):
     """
