@@ -5,9 +5,10 @@ and are supported by the following models:
 - Qwen-Image-Edit-2509: two image inputs
 """
 
-import pytest
 import os
 from pathlib import Path
+
+import pytest
 
 from tests.conftest import (
     OmniServer,
@@ -27,6 +28,7 @@ PARALLEL_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"}, num_cards=2)
 # If a similar test only involves one model, one can just define a global list variable.
 def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    # don't need --stage-configs-path after https://github.com/vllm-project/vllm/pull/1894 is merged
     stage_configs_path = os.path.join(base_dir, "vllm_omni", "model_executor", "stage_configs", stage_cfg_file)
     return [
         pytest.param(
@@ -40,7 +42,22 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
                 ],
             ),
             id="parallel_001",
-            marks=PARALLEL_FEATURE_MARKS,
+            marks=hardware_marks(res={"cuda": "H100"}, num_cards=2),
+        ),
+        pytest.param(
+            OmniServerParams(
+                model=model,
+                server_args=[
+                    "--cfg-parallel-size",
+                    "2",
+                    "--tensor-parallel-size",
+                    "2",
+                    "--stage-configs-path",
+                    stage_configs_path,
+                ],
+            ),
+            id="parallel_002"
+            marks=hardware_marks(res={"cuda": "H100"}, num_cards=4),
         ),
     ]
 
@@ -54,7 +71,7 @@ def _get_diffusion_feature_cases(model: str, stage_cfg_file: str):
 )
 def test_glm_image(omni_server: OmniServer, openai_client: OpenAIClientHandler):
     """Test all diffusion features with GLM-Image in regular end-user scenarios."""
-    image_data_url = f"data:image/jpeg;base64,{generate_synthetic_image(512, 512)['base64']}"
+    image_data_url = f"data:image/jpeg;base64,{generate_synthetic_image(1024, 1024)['base64']}"
 
     messages = dummy_messages_from_mix_data(image_data_url=image_data_url, content_text=EDIT_PROMPT)
 
@@ -63,8 +80,8 @@ def test_glm_image(omni_server: OmniServer, openai_client: OpenAIClientHandler):
         "model": omni_server.model,
         "messages": messages,
         "extra_body": {
-            "height": 512,
-            "width": 512,
+            "height": 1024,
+            "width": 1024,
             "num_inference_steps": 2,
             "guidance_scale": 1.5,
             "true_cfg_scale": 4.0,
