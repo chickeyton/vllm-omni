@@ -625,7 +625,9 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
         # inserts a *target* <|image|> placeholder in addition to the source
         # ones, which creates more image-token groups than actual images and
         # causes an IndexError in vllm's _merge_mm_kwargs.
-        logger.debug(f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update={enable_hf_prompt_update}, num_images={num_images}")
+        logger.debug(
+            f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update={enable_hf_prompt_update}, num_images={num_images}"
+        )
 
         # Get mm data from our overridden _apply_hf_processor_mm_only
         mm_processed_data = self._apply_hf_processor_mm_only(
