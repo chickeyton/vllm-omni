@@ -1,8 +1,8 @@
 """
 Comprehensive tests of diffusion features that are available in online serving mode
 and are supported by the following models:
-- Qwen-Image-Edit: single image input
-- Qwen-Image-Edit-2509: two image inputs
+- GLM-Image: single image & text input
+CFG-Parallel and Tensor-Parallel features are covered
 """
 
 import os
