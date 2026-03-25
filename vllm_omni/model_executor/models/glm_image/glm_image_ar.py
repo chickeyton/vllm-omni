@@ -606,9 +606,7 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
         mm_counts = mm_items.get_all_counts()
         num_images = mm_counts.get("image", 0)
 
-        logger.debug(
-            f"_apply_hf_processor_main: mm_counts={mm_counts}, num_images={num_images}"
-        )
+        logger.debug(f"_apply_hf_processor_main: mm_counts={mm_counts}, num_images={num_images}")
 
         if num_images == 0:
             # t2i mode - use parent implementation
@@ -626,7 +624,8 @@ class GlmImageMultiModalProcessor(BaseMultiModalProcessor[GlmImageProcessingInfo
         # ones, which creates more image-token groups than actual images and
         # causes an IndexError in vllm's _merge_mm_kwargs.
         logger.debug(
-            f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update={enable_hf_prompt_update}, num_images={num_images}"
+            f"_apply_hf_processor_main: i2i mode with enable_hf_prompt_update={enable_hf_prompt_update}"
+            f", num_images={num_images}"
         )
 
         # Get mm data from our overridden _apply_hf_processor_mm_only
