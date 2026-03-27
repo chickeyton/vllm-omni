@@ -5,8 +5,6 @@ and are supported by the following models:
 CFG-Parallel and Tensor-Parallel features are covered
 """
 
-from pathlib import Path
-
 import pytest
 
 from tests.conftest import (
