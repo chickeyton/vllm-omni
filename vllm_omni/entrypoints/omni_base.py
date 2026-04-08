@@ -74,7 +74,7 @@ class OmniBase:
         **kwargs: Any,
     ) -> None:
         engine_args: OmniEngineArgs | None = kwargs.pop("engine_args", None)
-        stage_init_timeout = kwargs.pop("stage_init_timeout", 300)
+        stage_init_timeout = kwargs.pop("stage_init_timeout", 600)
         init_timeout = kwargs.pop("init_timeout", 600)
         log_stats = kwargs.pop("log_stats", False)
         async_chunk = kwargs.pop("async_chunk", False)

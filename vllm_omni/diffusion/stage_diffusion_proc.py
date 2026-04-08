@@ -39,9 +39,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_HANDSHAKE_POLL_TIMEOUT_S = 600
-
-
 class StageDiffusionProc:
     """Subprocess entry point for diffusion inference.
 
@@ -588,13 +585,14 @@ def spawn_diffusion_proc(
 def complete_diffusion_handshake(
     proc: BaseProcess,
     handshake_address: str,
+    stage_init_timeout: int = 600,
 ) -> None:
     """Wait for the diffusion subprocess to signal READY.
 
     On failure the process is terminated before re-raising.
     """
     try:
-        _perform_diffusion_handshake(proc, handshake_address)
+        _perform_diffusion_handshake(proc, handshake_address, stage_init_timeout)
     except Exception:
         shutdown([proc])
         raise
@@ -603,6 +601,7 @@ def complete_diffusion_handshake(
 def _perform_diffusion_handshake(
     proc: BaseProcess,
     handshake_address: str,
+    stage_init_timeout: int = 600,
 ) -> None:
     """Run the handshake with the diffusion subprocess."""
     with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
@@ -610,7 +609,7 @@ def _perform_diffusion_handshake(
         poller.register(handshake_socket, zmq.POLLIN)
         poller.register(proc.sentinel, zmq.POLLIN)
 
-        timeout_ms = _HANDSHAKE_POLL_TIMEOUT_S * 1000
+        timeout_ms = stage_init_timeout * 1000
         while True:
             events = dict(poller.poll(timeout=timeout_ms))
             if not events:

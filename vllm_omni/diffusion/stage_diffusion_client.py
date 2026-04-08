@@ -52,6 +52,7 @@ class StageDiffusionClient:
         od_config: OmniDiffusionConfig,
         metadata: StageMetadata,
         batch_size: int = 1,
+        stage_init_timeout: int = 600,
     ) -> None:
         self.stage_id = metadata.stage_id
         self.final_output = metadata.final_output
@@ -62,7 +63,7 @@ class StageDiffusionClient:
 
         # Spawn StageDiffusionProc subprocess and wait for READY.
         proc, handshake_address, request_address, response_address = spawn_diffusion_proc(model, od_config)
-        complete_diffusion_handshake(proc, handshake_address)
+        complete_diffusion_handshake(proc, handshake_address, stage_init_timeout)
         self._proc = proc
 
         # ZMQ sockets (sync) for communicating with the subprocess.
