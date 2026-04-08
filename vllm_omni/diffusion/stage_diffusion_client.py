@@ -14,6 +14,7 @@ from dataclasses import fields, is_dataclass
 from typing import TYPE_CHECKING, Any
 
 import zmq
+import zmq.asyncio
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.stage_diffusion_proc import (
@@ -70,6 +71,9 @@ class StageDiffusionClient:
         self._request_socket.connect(request_address)
         self._response_socket = self._zmq_ctx.socket(zmq.PULL)
         self._response_socket.connect(response_address)
+
+        self._response_poller = zmq.asyncio.Poller()
+        self._response_poller.register(self._response_socket, zmq.POLLIN)
 
         self._encoder = OmniMsgpackEncoder()
         self._decoder = OmniMsgpackDecoder()
@@ -228,13 +232,6 @@ class StageDiffusionClient:
                     }
                 )
             )
-        except Exception as e:
-            logger.exception(
-                "[StageDiffusionClient] Stage-%s batch req=%s failed: %s",
-                self.stage_id,
-                request_id,
-                e,
-            )
         finally:
             self._tasks.pop(request_id, None)
 
@@ -320,9 +317,16 @@ class StageDiffusionClient:
                         f"StageDiffusionProc died while waiting for "
                         f"collective_rpc '{method}' (exit code {self._proc.exitcode})"
                     )
-                if deadline and time.monotonic() > deadline:
+                if deadline is not None and time.monotonic() > deadline:
                     raise TimeoutError(f"collective_rpc_async '{method}' timed out after {timeout}s")
-                await asyncio.sleep(0.01)
+                # Block (async) until data arrives on the ZMQ response
+                # socket or until the timeout expires, then loop back to
+                # drain and check.
+                if deadline is not None:
+                    poll_timeout_ms = max(int((deadline - time.monotonic()) * 1000), 0)
+                else:
+                    poll_timeout_ms = 100
+                await self._response_poller.poll(timeout=poll_timeout_ms)
         finally:
             self._pending_rpcs.discard(rpc_id)
 
