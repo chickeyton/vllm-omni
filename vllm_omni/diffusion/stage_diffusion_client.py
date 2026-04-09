@@ -184,6 +184,7 @@ class StageDiffusionClient:
         request_id: str,
         prompt: OmniPromptType,
         sampling_params: OmniDiffusionSamplingParams,
+        kv_sender_info: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         self._request_socket.send(
             self._encoder.encode(
@@ -192,6 +193,7 @@ class StageDiffusionClient:
                     "request_id": request_id,
                     "prompt": prompt,
                     "sampling_params": self._sampling_params_to_dict(sampling_params),
+                    "kv_sender_info": kv_sender_info,
                 }
             )
         )
@@ -203,6 +205,7 @@ class StageDiffusionClient:
         request_id: str,
         prompts: list[OmniPromptType],
         sampling_params: OmniDiffusionSamplingParams,
+        kv_sender_info: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         """Submit a list of prompts as a single batched engine call.
 
@@ -211,7 +214,12 @@ class StageDiffusionClient:
         *request_id*.
         """
         task = asyncio.create_task(
-            self._run_batch(request_id, prompts, sampling_params),
+            self._run_batch(
+                request_id,
+                prompts,
+                sampling_params,
+                kv_sender_info,
+            ),
             name=f"diffusion-batch-{request_id}",
         )
         self._tasks[request_id] = task
@@ -221,6 +229,7 @@ class StageDiffusionClient:
         request_id: str,
         prompts: list[OmniPromptType],
         sampling_params: OmniDiffusionSamplingParams,
+        kv_sender_info: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         try:
             self._request_socket.send(
@@ -230,6 +239,7 @@ class StageDiffusionClient:
                         "request_id": request_id,
                         "prompts": prompts,
                         "sampling_params": self._sampling_params_to_dict(sampling_params),
+                        "kv_sender_info": kv_sender_info,
                     }
                 )
             )
