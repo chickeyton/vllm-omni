@@ -321,8 +321,9 @@ class StageDiffusionClient:
         try:
             while True:
                 self._drain_responses()
-                if rpc_id in self._rpc_results:
-                    return self._rpc_results.pop(rpc_id)
+                result = self._rpc_results.pop(rpc_id, None)
+                if result is not None:
+                    return result
                 if self._proc is not None and not self._proc.is_alive():
                     raise RuntimeError(
                         f"StageDiffusionProc died while waiting for "
@@ -337,6 +338,7 @@ class StageDiffusionClient:
                     poll_timeout_ms = max(int((deadline - time.monotonic()) * 1000), 0)
                 else:
                     poll_timeout_ms = 100
+                # no exception be raised on timeout
                 await self._response_poller.poll(timeout=poll_timeout_ms)
         finally:
             self._pending_rpcs.discard(rpc_id)
