@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 class StageEngineCoreProc(EngineCoreProc):
     """Stage-specific engine core process for vLLM-Omni.
 

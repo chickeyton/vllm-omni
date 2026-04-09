@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 class StageDiffusionProc:
     """Subprocess entry point for diffusion inference.
 

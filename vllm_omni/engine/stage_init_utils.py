@@ -486,7 +486,9 @@ def initialize_diffusion_stage(
     od_config.num_gpus = num_devices_per_stage
     if metadata.cfg_kv_collect_func is not None:
         od_config.cfg_kv_collect_func = metadata.cfg_kv_collect_func
-    return StageDiffusionClient(model, od_config, metadata, batch_size=batch_size, stage_init_timeout=stage_init_timeout)
+    return StageDiffusionClient(
+        model, od_config, metadata, batch_size=batch_size, stage_init_timeout=stage_init_timeout
+    )
 
 
 def _shutdown_or_close_resource(resource: Any, resource_name: str, stage_id: int) -> None:
