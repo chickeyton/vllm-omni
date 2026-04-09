@@ -353,7 +353,11 @@ async def omni_run_server_worker(listen_address, sock, args, client_config=None,
     try:
         await shutdown_task
     finally:
-        app.state.openai_serving_speech.shutdown()
+        # After uvicorn shutdown, app.state may have been cleaned up by
+        # Starlette's lifespan teardown (e.g. when killed by SIGTERM).
+        speech = getattr(getattr(app, "state", None), "openai_serving_speech", None)
+        if speech is not None:
+            speech.shutdown()
         sock.close()
 
 
