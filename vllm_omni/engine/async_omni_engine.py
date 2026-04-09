@@ -398,7 +398,7 @@ class AsyncOmniEngine:
                     logger.info("[AsyncOmniEngine] Stage %s engine launch started", metadata.stage_id)
                     # Keep the stage-specific device visibility until vLLM
                     # finishes starting all child processes.
-                    complete_stage_handshake(proc, handshake_address, addresses, vllm_config)
+                    complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
                     logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
                 finally:
                     if previous_visible_devices is None:
