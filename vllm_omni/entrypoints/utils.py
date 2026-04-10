@@ -321,7 +321,14 @@ def load_stage_configs_from_yaml(
         config_path: Path to the YAML configuration file
         base_engine_args: Engine args supplied by the caller.
         prefer_stage_engine_args: When True, YAML stage args override caller
-            engine args. When False, caller engine args override YAML defaults.
+            engine args for *every* stage. When False, the merge order is
+            decided per-stage based on ``stage_type``: LLM stages still treat
+            their YAML values as hard pins (YAML wins on conflicts) while
+            diffusion stages let the caller override the YAML defaults. This
+            asymmetry exists because LLM stages in multi-stage Omni pipelines
+            (e.g. Bagel thinker, Qwen-Omni thinker/talker/code2wav) carry
+            per-stage parallel topology that must not be globally rewritten by
+            CLI flags meant for the diffusion stage.
 
     Returns:
         List of stage configuration dictionaries from the file's stage_args
@@ -341,14 +348,24 @@ def load_stage_configs_from_yaml(
     base_engine_args = create_config(base_engine_args)
     for stage_arg in stage_args:
         base_engine_args_tmp = base_engine_args.copy()
+        stage_type = getattr(stage_arg, "stage_type", "llm")
+        # Per-stage merge order: LLM stages always treat their YAML engine_args
+        # as hard pins (YAML wins on conflicts, base only fills in keys the
+        # YAML did not set). Diffusion stages honor `prefer_stage_engine_args`
+        # so callers can still override e.g. tensor_parallel_size, ulysses_degree,
+        # ring_degree, cfg_parallel_size on the diffusion engine via CLI.
+        # Without this asymmetry, a user passing --tensor-parallel-size 2 for
+        # the diffusion stage would also overwrite the LLM thinker stage's
+        # `tensor_parallel_size: 1` pin and trip the
+        # `local_world_size > visible devices` assertion in gpu_ar_worker.
+        effective_prefer_stage_engine_args = prefer_stage_engine_args or stage_type != "diffusion"
         # Update base_engine_args with stage-specific engine_args if they exist
         if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
-            if prefer_stage_engine_args:
+            if effective_prefer_stage_engine_args:
                 merged_engine_args = merge_configs(base_engine_args_tmp, stage_arg.engine_args)
             else:
                 merged_engine_args = merge_configs(stage_arg.engine_args, base_engine_args_tmp)
             base_engine_args_tmp = create_config(merged_engine_args)
-        stage_type = getattr(stage_arg, "stage_type", "llm")
         if hasattr(stage_arg, "runtime") and stage_arg.runtime is not None and stage_type != "diffusion":
             base_engine_args_tmp.async_chunk = global_async_chunk
         stage_arg.engine_args = base_engine_args_tmp
