@@ -333,6 +333,11 @@ def load_stage_configs_from_yaml(
     global_async_chunk = config_data.get("async_chunk", False)
     # Convert any nested dataclass objects to dicts before creating DictConfig
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
+    # Drop keys whose value is None so that OmegaConf.merge does not overwrite
+    # explicit YAML stage defaults with argparse "unset" sentinels (e.g. the
+    # CLI namespace passes max_num_batched_tokens=None when the user did not
+    # specify --max-num-batched-tokens).
+    base_engine_args = {k: v for k, v in base_engine_args.items() if v is not None}
     base_engine_args = create_config(base_engine_args)
     for stage_arg in stage_args:
         base_engine_args_tmp = base_engine_args.copy()
