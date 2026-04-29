@@ -7,7 +7,7 @@ CFG-Parallel and Tensor-Parallel features are covered
 
 import pytest
 
-from tests.conftest import (
+from tests.helpers.runtime import (
     OmniServer,
     OmniServerParams,
     OpenAIClientHandler,
