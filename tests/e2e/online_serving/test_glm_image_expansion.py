@@ -7,12 +7,12 @@ CFG-Parallel and Tensor-Parallel features are covered
 
 import pytest
 
+from tests.helpers.media import generate_synthetic_image
 from tests.helpers.runtime import (
     OmniServer,
     OmniServerParams,
     OpenAIClientHandler,
     dummy_messages_from_mix_data,
-    generate_synthetic_image,
 )
 from tests.utils import hardware_marks
 
