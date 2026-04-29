@@ -7,6 +7,7 @@ CFG-Parallel and Tensor-Parallel features are covered
 
 import pytest
 
+from tests.helpers.mark import hardware_marks
 from tests.helpers.media import generate_synthetic_image
 from tests.helpers.runtime import (
     OmniServer,
@@ -14,7 +15,6 @@ from tests.helpers.runtime import (
     OpenAIClientHandler,
     dummy_messages_from_mix_data,
 )
-from tests.utils import hardware_marks
 
 EDIT_PROMPT = "Transform this modern, geometrist image into a Vincent van Gogh style impressionist painting."
 SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "H100"})
