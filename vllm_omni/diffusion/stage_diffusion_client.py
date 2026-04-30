@@ -202,12 +202,11 @@ class StageDiffusionClient:
 
             # Check for the death sentinel (raw bytes, not msgpack-encoded).
             if raw == StageDiffusionProc.DIFFUSION_PROC_DEAD:
-                if not self._shutting_down:
-                    self._engine_dead = True
-                    logger.error(
-                        "[StageDiffusionClient] Stage-%s received DIFFUSION_PROC_DEAD sentinel from subprocess.",
-                        self.stage_id,
-                    )
+                self._engine_dead = True
+                logger.error(
+                    "[StageDiffusionClient] Stage-%s received DIFFUSION_PROC_DEAD sentinel from subprocess.",
+                    self.stage_id,
+                )
                 break
 
             msg = self._decoder.decode(raw)
