@@ -170,20 +170,11 @@ class StageDiffusionClient:
             client = self_ref()
             if client is None or client._shutting_down or client._engine_dead:
                 return
-            exitcode = proc.exitcode
-            if exitcode is not None and exitcode > 128:
-                client._shutting_down = True
-                logger.info(
-                    "[StageDiffusionClient] Stage-%s subprocess exited via signal %d; treating as external shutdown.",
-                    client.stage_id,
-                    exitcode - 128,
-                )
-                return
             client._engine_dead = True
             logger.error(
                 "[StageDiffusionClient] Stage-%s StageDiffusionProc died unexpectedly (exit code %s).",
                 client.stage_id,
-                exitcode,
+                proc.exitcode,
             )
 
         Thread(target=_monitor, daemon=True, name="DiffusionProcMonitor").start()
@@ -376,11 +367,10 @@ class StageDiffusionClient:
         try:
             return self._output_queue.get_nowait()
         except asyncio.QueueEmpty:
-            if self._shutting_down:
-                return None
             if self._engine_dead:
                 raise EngineDeadError()
             if not self._shutting_down and self._owns_process and self._proc is not None and not self._proc.is_alive():
+                self._engine_dead = True
                 exitcode = self._proc.exitcode
                 # One final drain – the last ZMQ frame may have arrived
                 # between the first drain and the is_alive() check.
@@ -394,7 +384,6 @@ class StageDiffusionClient:
                     logger.warning("StageDiffusionProc was killed by signal %d; treating as external shutdown.", sig)
                     self._shutting_down = True
                     return None
-                self._engine_dead = True
                 raise EngineDeadError(f"StageDiffusionProc died unexpectedly (exit code {exitcode})")
             return None
 
