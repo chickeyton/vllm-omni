@@ -281,7 +281,36 @@ class Orchestrator:
                 # the output format in the future to simplify the processing logic in Orchestrator.
                 stage_client = self.stage_clients[stage_id]
                 if stage_client.stage_type == "diffusion":
-                    output = stage_client.get_diffusion_output_nowait()
+                    try:
+                        output = stage_client.get_diffusion_output_nowait()
+                    except EngineDeadError as e:
+                        if self._shutdown_event.is_set() or getattr(stage_client, "_shutting_down", False):
+                            logger.debug(
+                                "[Orchestrator] Stage-%s diffusion poll saw EngineDeadError during shutdown; exiting cleanly.",
+                                stage_id,
+                            )
+                            return
+                        logger.error(
+                            "[Orchestrator] Stage-%s diffusion is dead: %s",
+                            stage_id,
+                            e,
+                        )
+                        self._fatal_error = str(e)
+                        self._fatal_error_stage_id = stage_id
+                        for req_id, req_state in list(self.request_states.items()):
+                            if stage_id in req_state.stage_submit_ts:
+                                await self.output_async_queue.put(
+                                    {
+                                        "type": "error",
+                                        "error": str(e),
+                                        "fatal": True,
+                                        "request_id": req_id,
+                                        "stage_id": stage_id,
+                                    }
+                                )
+                                self.request_states.pop(req_id, None)
+                        self._shutdown_event.set()
+                        raise
                     if output is not None:
                         idle = False
 
