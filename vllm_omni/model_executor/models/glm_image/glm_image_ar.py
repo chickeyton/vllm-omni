@@ -2626,7 +2626,7 @@ class GlmImageForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
         # This is needed because vLLM doesn't pass pixel_values to forward
         self._prior_token_cache = prior_token_info
         logger.debug(
-            f"embed_multimodal: cached prior_token_info with {len(prior_token_info['prior_token_image_ids'])} images"
+            f"embed_multimodal: cached prior_token_info with {len(prior_token_info['ids']['prior_image'])} images"
         )
 
         return tuple(image_embeddings)
