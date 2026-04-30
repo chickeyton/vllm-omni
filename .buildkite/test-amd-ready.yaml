@@ -106,6 +106,7 @@ steps:
   mirror_hardwares: [amdproduction]
   grade: Blocking
   commands:
+    - pip list|grep vllm
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - |
       timeout 15m bash -c '
