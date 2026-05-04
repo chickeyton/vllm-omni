@@ -5,6 +5,9 @@ and are supported by the following models:
 CFG-Parallel and Tensor-Parallel features are covered
 """
 
+import random
+import shutil
+
 import pytest
 
 from tests.helpers.mark import hardware_marks
@@ -46,7 +49,8 @@ def _get_diffusion_feature_cases(model: str):
 def test_glm_image(omni_server: OmniServer, openai_client: OpenAIClientHandler):
     """Test all diffusion features with GLM-Image in regular end-user scenarios."""
     image_size = 1024
-    image_data_url = f"data:image/jpeg;base64,{generate_synthetic_image(image_size, image_size)['base64']}"
+    synthetic_image = generate_synthetic_image(image_size, image_size)
+    image_data_url = f"data:image/jpeg;base64,{synthetic_image['base64']}"
 
     messages = dummy_messages_from_mix_data(image_data_url=image_data_url, content_text=EDIT_PROMPT)
 
@@ -64,4 +68,10 @@ def test_glm_image(omni_server: OmniServer, openai_client: OpenAIClientHandler):
         },
     }
 
-    openai_client.send_diffusion_request(request_config)
+    responses = openai_client.send_diffusion_request(request_config)
+
+    pair_id = random.randint(10**8, 10**9 - 1)
+    shutil.copyfile(synthetic_image["file_path"], f"in_{pair_id}.jpg")
+    for response in responses:
+        for i, image in enumerate(response.images) or ():
+            image.convert("RGB").save(f"out_{pair_id}_{i}.jpg", format="JPEG")
