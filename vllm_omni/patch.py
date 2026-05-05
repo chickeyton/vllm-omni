@@ -96,6 +96,86 @@ except ImportError:
     # GlmImageTextConfig not available, skip patching
     pass
 
+# =============================================================================
+# Patch Qwen3-VL / Qwen3-Omni-Thinker deepstack checks for CUDA-graph padding
+# =============================================================================
+# WHY: vllm's gpu_model_runner._preprocess calls embed_input_ids on the
+# unpadded scheduled-token length, then runs forward on the CUDA-graph padded
+# length. embed_input_ids → _set_deepstack_input_embeds stores
+# `deepstack_input_embeds_num_tokens = unpadded`, but forward calls
+# _get_deepstack_input_embeds(padded). The original strict check
+# `num_tokens > self.deepstack_input_embeds_num_tokens` raises ValueError
+# whenever scheduled tokens don't already sit on a CUDA-graph bucket boundary
+# (e.g. judge model with 309 scheduled tokens padded to 320). The buffer
+# itself (allocated to max_num_batched_tokens) has plenty of capacity; the
+# guard is just over-strict. Tail rows are zero-initialised and the per-
+# position add of zero is a no-op, so dropping the guard is safe.
+#
+# WHY NOT model-level: judge processes (e.g. Qwen3-VL-30B-A3B-Instruct-AWQ
+# in GEdit-Bench) launch via `vllm_omni.entrypoints.cli.main` without the
+# `--omni` flag and therefore never resolve through OmniModelRegistry, so
+# a vllm-omni-side subclass + registry override would not be reachable.
+#
+# SCOPE: Replaces _get_deepstack_input_embeds and _clear_deepstack_input_embeds
+# on:
+#   - Qwen3VLForConditionalGeneration (Qwen3VLMoeForConditionalGeneration
+#     inherits without overriding, so it picks up the patch automatically)
+#   - Qwen3OmniMoeThinkerForConditionalGeneration (independent class, ships
+#     its own duplicate copies of these methods upstream)
+# vllm-omni's own qwen3_omni_moe_thinker.py override (used on the --omni
+# path) already implements the fix; this patch covers the upstream-CLI path.
+#
+# FRAGILITY: If upstream rewrites these methods (e.g. dynamic buffer
+# allocation) or renames the class, this patch becomes either redundant or
+# inert. The replacement is semantically equivalent to upstream PR #40932,
+# so re-applying on an already-fixed vllm is harmless.
+#
+# TODO: Remove once vllm pin is past commit 22631f80a (PR #40932, v0.20.2rc0).
+# https://github.com/vllm-project/vllm/pull/40932
+try:
+    from vllm.sequence import IntermediateTensors as _IntermediateTensors
+
+    def _patched_get_deepstack_input_embeds(self, num_tokens):
+        if not getattr(self, "deepstack_input_embeds", None):
+            return None
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
+            return None
+        return _IntermediateTensors(
+            {
+                f"deepstack_input_embeds_{idx}": self.deepstack_input_embeds[idx][:num_tokens]
+                for idx in range(self.deepstack_num_level)
+            }
+        )
+
+    def _patched_clear_deepstack_input_embeds(self, num_tokens):
+        if not getattr(self, "deepstack_input_embeds", None):
+            return
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
+            return
+        if num_tokens > 0:
+            for idx in range(self.deepstack_num_level):
+                self.deepstack_input_embeds[idx][:num_tokens].zero_()
+            self.deepstack_input_embeds_num_tokens = 0
+
+    for _module_path, _class_name in (
+        ("vllm.model_executor.models.qwen3_vl", "Qwen3VLForConditionalGeneration"),
+        (
+            "vllm.model_executor.models.qwen3_omni_moe_thinker",
+            "Qwen3OmniMoeThinkerForConditionalGeneration",
+        ),
+    ):
+        try:
+            _mod = __import__(_module_path, fromlist=[_class_name])
+            _cls = getattr(_mod, _class_name)
+        except (ImportError, AttributeError):
+            # Class not available in this vllm version — skip.
+            continue
+        _cls._get_deepstack_input_embeds = _patched_get_deepstack_input_embeds
+        _cls._clear_deepstack_input_embeds = _patched_clear_deepstack_input_embeds
+except ImportError:
+    # vllm.sequence.IntermediateTensors missing — skip patching entirely.
+    pass
+
 # Extend RequestStatus enum with omni-specific statuses
 if not hasattr(RequestStatus, "WAITING_FOR_CHUNK"):
     # The value - 1 is intentionally chosen to ensure it is treated
