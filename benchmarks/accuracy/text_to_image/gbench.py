@@ -572,7 +572,6 @@ class GEBenchRunner:
                 num_inference_steps=self.num_inference_steps,
                 output_compression=self.output_compression,
                 guidance_scale=self.guidance_scale,
-                negative_prompt=" ",
                 seed=self.seed,
             )
             save_image(output_path, generated)
@@ -607,7 +606,6 @@ class GEBenchRunner:
                     num_inference_steps=self.num_inference_steps,
                     output_compression=self.output_compression,
                     guidance_scale=self.guidance_scale,
-                    negative_prompt=" ",
                     seed=self.seed,
                 )
                 save_image(frame_path, generated)
@@ -652,7 +650,6 @@ class GEBenchRunner:
                     num_inference_steps=self.num_inference_steps,
                     output_compression=self.output_compression,
                     guidance_scale=self.guidance_scale,
-                    negative_prompt=" ",
                     seed=self.seed,
                 )
                 save_image(frame_path, generated)
@@ -686,7 +683,6 @@ class GEBenchRunner:
                 num_inference_steps=self.num_inference_steps,
                 output_compression=self.output_compression,
                 guidance_scale=self.guidance_scale,
-                negative_prompt=" ",
                 seed=self.seed,
             )
             save_image(output_path, generated)

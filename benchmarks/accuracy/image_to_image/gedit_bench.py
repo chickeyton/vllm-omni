@@ -477,7 +477,6 @@ class GEditBenchRunner:
             height=self.height,
             num_inference_steps=self.num_inference_steps,
             guidance_scale=self.guidance_scale,
-            negative_prompt=" ",
             seed=self.seed,
         )
         edited_image.save(output_path)
