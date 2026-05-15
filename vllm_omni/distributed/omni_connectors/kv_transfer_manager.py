@@ -1018,13 +1018,18 @@ class OmniKVTransferManager:
         )
         pending_pairs = list(recv_key_pairs)
         received_payloads: dict[str, tuple[dict[str, Any], int]] = {}
+        replica_id = get_omni_replica_id()
 
         logger.info(
-            "Wait for KV cache for request %s from stage %s to %s via %s key(s)...",
+            "[KV recv stage-%s rep-%s] Wait for KV cache for request %s from stage %s via %s key(s) "
+            "(sender=%s:%s)...",
+            to_stage,
+            replica_id,
             request_id,
             from_stage,
-            to_stage,
             len(recv_key_pairs),
+            self._sender_base_host,
+            self._sender_base_zmq_port,
         )
 
         try:
@@ -1110,12 +1115,17 @@ class OmniKVTransferManager:
                         logger.exception("Failed to move KV cache tensors to target device")
 
                     logger.info(
-                        "Successfully received KV cache for %s, %s bytes across %s key(s), wait=%.3fs, link=%.1fms",
+                        "[KV recv stage-%s rep-%s] Successfully received KV cache for %s, "
+                        "%s bytes across %s key(s), wait=%.3fs, link=%.1fms (sender=%s:%s)",
+                        to_stage,
+                        replica_id,
                         request_id,
                         total_size,
                         len(recv_key_pairs),
                         elapsed,
                         link_ms,
+                        self._sender_base_host,
+                        self._sender_base_zmq_port,
                     )
                     return data, total_size
 
