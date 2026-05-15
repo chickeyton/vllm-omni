@@ -382,9 +382,14 @@ class AsyncOmniEngine:
         self.supported_tasks: tuple[str, ...] = ("generate",)
         self.default_sampling_params_list: list[OmniSamplingParams] = []
         self.stage_metadata: list[StageRuntimeInfo] = []
-        self.request_queue: janus.Queue[EngineQueueMessage] | None = None
-        self.output_queue: janus.Queue[EngineQueueMessage] | None = None
-        self.rpc_output_queue: janus.Queue[EngineQueueMessage] | None = None
+        # Janus queues are constructed eagerly here (not deferred to the
+        # orchestrator thread) so the master server's ROUTER thread always
+        # sees a non-None ``self.request_queue`` when on_register fires.
+        # ``async_q`` lazily binds to whatever event loop first awaits on
+        # it (the orchestrator loop), so cross-thread use stays correct.
+        self.request_queue: janus.Queue[EngineQueueMessage] = janus.Queue()
+        self.output_queue: janus.Queue[EngineQueueMessage] = janus.Queue()
+        self.rpc_output_queue: janus.Queue[EngineQueueMessage] = janus.Queue()
         self._shutdown_called = False
         self._weak_finalizer: weakref.finalize | None = None
         self._rpc_lock = threading.Lock()
