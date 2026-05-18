@@ -63,7 +63,6 @@ from vllm_omni.engine.messages import (
     RegisterRemoteReplicaMessage,
     ShutdownRequestMessage,
     StageSubmissionMessage,
-    UnregisterRemoteReplicaMessage,
 )
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.output_modality import FinalOutputModalityType
@@ -861,8 +860,7 @@ class AsyncOmniEngine:
         """
         if self.request_queue is None:
             logger.warning(
-                "[AsyncOmniEngine] request_queue not initialized; "
-                "dropping register_remote_replica stage=%d replica=%d",
+                "[AsyncOmniEngine] request_queue not initialized; dropping register_remote_replica stage=%d replica=%d",
                 stage_id,
                 replica_id,
             )

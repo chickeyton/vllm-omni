@@ -274,6 +274,7 @@ def test_heartbeat_loop_retries_after_transient_send_failure():
     client._closed = False
     client._heartbeat_interval = 0.0
     client._stop_event = _FakeStopEvent()
+    client._on_heartbeat = None
 
     calls = {"count": 0}
 

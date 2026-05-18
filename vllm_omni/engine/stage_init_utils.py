@@ -458,9 +458,7 @@ def split_devices_for_replicas(
         try:
             offsets = [int(a) for a in device_list]
         except ValueError as e:
-            raise ValueError(
-                f"Stage {stage_id}: template-mode devices must be ints, got {devices_str!r}"
-            ) from e
+            raise ValueError(f"Stage {stage_id}: template-mode devices must be ints, got {devices_str!r}") from e
         bad = [a for a in offsets if not (0 <= a < tp_size)]
         if bad:
             raise ValueError(

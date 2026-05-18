@@ -522,8 +522,7 @@ class OmniMasterServer:
                     )
                     self._stage_routes[(stage_id, replica_id)] = alloc
                 logger.info(
-                    "[OmniMasterServer] Stage %d replica %d cross-host bind "
-                    "(sockets bound on %s; replica_ip=%s)",
+                    "[OmniMasterServer] Stage %d replica %d cross-host bind (sockets bound on %s; replica_ip=%s)",
                     stage_id,
                     replica_id,
                     "replica" if replica_binds_sockets else "master",
@@ -670,9 +669,7 @@ def register_stage_with_omni_master(
             # (otherwise the master would hand back ``tcp://<master_ip>:port``
             # and ``zmq.bind`` would EADDRNOTAVAIL on the remote host).
             if replica_bind_address is None:
-                replica_bind_address = _detect_local_bind_address(
-                    omni_master_address, omni_master_port
-                )
+                replica_bind_address = _detect_local_bind_address(omni_master_address, omni_master_port)
             hs_port, inp_port, out_port = get_open_ports_list(count=3)
             payload["replica_bind_address"] = replica_bind_address
             payload["replica_handshake_port"] = hs_port

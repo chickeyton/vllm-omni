@@ -6,9 +6,9 @@ from time import time
 import pytest
 
 from vllm_omni.distributed.omni_coordinator import (
-    InstanceInfo,
     LeastQueueLengthBalancer,
     RandomBalancer,
+    ReplicaInfo,
     RoundRobinBalancer,
     StageStatus,
 )
@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_load_balancer_select_returns_valid_index():
-    """Verify RandomBalancer.select() returns a valid index for instances."""
+    """Verify RandomBalancer.select() returns a valid index for replicas."""
     # Task structure mirrors async_omni; RandomBalancer ignores task contents.
     task: dict = {
         "request_id": "test",
@@ -26,8 +26,8 @@ def test_load_balancer_select_returns_valid_index():
     }
 
     now = time()
-    instances = [
-        InstanceInfo(
+    replicas = [
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -36,7 +36,7 @@ def test_load_balancer_select_returns_valid_index():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10002",
             output_addr="tcp://host:10002-out",
             stage_id=0,
@@ -45,7 +45,7 @@ def test_load_balancer_select_returns_valid_index():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10003",
             output_addr="tcp://host:10003-out",
             stage_id=1,
@@ -58,16 +58,16 @@ def test_load_balancer_select_returns_valid_index():
 
     balancer = RandomBalancer()
 
-    index = balancer.select(task, instances)
+    index = balancer.select(task, replicas)
 
     assert isinstance(index, int)
-    assert 0 <= index < len(instances)
+    assert 0 <= index < len(replicas)
 
 
-def test_round_robin_balancer_cycles_instances():
+def test_round_robin_balancer_cycles_replicas():
     now = time()
-    instances = [
-        InstanceInfo(
+    replicas = [
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -76,7 +76,7 @@ def test_round_robin_balancer_cycles_instances():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10002",
             output_addr="tcp://host:10002-out",
             stage_id=0,
@@ -85,7 +85,7 @@ def test_round_robin_balancer_cycles_instances():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10003",
             output_addr="tcp://host:10003-out",
             stage_id=1,
@@ -97,22 +97,22 @@ def test_round_robin_balancer_cycles_instances():
     ]
 
     balancer = RoundRobinBalancer()
-    results = [balancer.select({}, instances) for _ in range(5)]
+    results = [balancer.select({}, replicas) for _ in range(5)]
 
     # Default start_index=0 => 0,1,2,0,1
     assert results == [0, 1, 2, 0, 1]
 
 
-def test_round_robin_balancer_empty_instances_raises():
-    with pytest.raises(ValueError, match="instances must not be empty"):
+def test_round_robin_balancer_empty_replicas_raises():
+    with pytest.raises(ValueError, match="replicas must not be empty"):
         RoundRobinBalancer().select({}, [])
 
 
 def test_round_robin_balancer_after_large_index_and_shorter_list():
-    """Large start_index % len(instances) then counter wraps with shorter list."""
+    """Large start_index % len(replicas) then counter wraps with shorter list."""
     now = time()
     two = [
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -121,7 +121,7 @@ def test_round_robin_balancer_after_large_index_and_shorter_list():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10002",
             output_addr="tcp://host:10002-out",
             stage_id=0,
@@ -138,8 +138,8 @@ def test_round_robin_balancer_after_large_index_and_shorter_list():
 
 def test_least_queue_length_balancer_picks_min_queue():
     now = time()
-    instances = [
-        InstanceInfo(
+    replicas = [
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -148,7 +148,7 @@ def test_least_queue_length_balancer_picks_min_queue():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10002",
             output_addr="tcp://host:10002-out",
             stage_id=0,
@@ -157,7 +157,7 @@ def test_least_queue_length_balancer_picks_min_queue():
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10003",
             output_addr="tcp://host:10003-out",
             stage_id=1,
@@ -169,19 +169,19 @@ def test_least_queue_length_balancer_picks_min_queue():
     ]
 
     balancer = LeastQueueLengthBalancer()
-    index = balancer.select({}, instances)
+    index = balancer.select({}, replicas)
     assert index == 1
 
 
-def test_least_queue_length_balancer_empty_instances_raises():
-    with pytest.raises(ValueError, match="instances must not be empty"):
+def test_least_queue_length_balancer_empty_replicas_raises():
+    with pytest.raises(ValueError, match="replicas must not be empty"):
         LeastQueueLengthBalancer().select({}, [])
 
 
 def test_least_queue_length_balancer_equal_queues_uses_choice(mocker):
     now = time()
-    instances = [
-        InstanceInfo(
+    replicas = [
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -190,7 +190,7 @@ def test_least_queue_length_balancer_equal_queues_uses_choice(mocker):
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10002",
             output_addr="tcp://host:10002-out",
             stage_id=0,
@@ -199,7 +199,7 @@ def test_least_queue_length_balancer_equal_queues_uses_choice(mocker):
             last_heartbeat=now,
             registered_at=now,
         ),
-        InstanceInfo(
+        ReplicaInfo(
             input_addr="tcp://host:10003",
             output_addr="tcp://host:10003-out",
             stage_id=1,
@@ -214,13 +214,13 @@ def test_least_queue_length_balancer_equal_queues_uses_choice(mocker):
         "vllm_omni.distributed.omni_coordinator.load_balancer.random.choice",
         return_value=2,
     )
-    assert balancer.select({}, instances) == 2
+    assert balancer.select({}, replicas) == 2
 
 
 def test_least_queue_length_balancer_negative_queue_raises():
     now = time()
-    instances = [
-        InstanceInfo(
+    replicas = [
+        ReplicaInfo(
             input_addr="tcp://host:10001",
             output_addr="tcp://host:10001-out",
             stage_id=0,
@@ -231,4 +231,4 @@ def test_least_queue_length_balancer_negative_queue_raises():
         ),
     ]
     with pytest.raises(ValueError, match="queue_length must be non-negative"):
-        LeastQueueLengthBalancer().select({}, instances)
+        LeastQueueLengthBalancer().select({}, replicas)
