@@ -9,7 +9,7 @@ from typing import Any
 
 import zmq
 
-from .messages import ReplicaInfo, ReplicaList, StageStatus
+from .messages import ReplicaInfo, ReplicaList, ReplicaStatus
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class OmniCoordClientForHub:
                     input_addr=rep["input_addr"],
                     output_addr=rep["output_addr"],
                     stage_id=int(rep["stage_id"]),
-                    status=StageStatus(rep["status"]),
+                    status=ReplicaStatus(rep["status"]),
                     queue_length=int(rep["queue_length"]),
                     last_heartbeat=float(rep["last_heartbeat"]),
                     registered_at=float(rep["registered_at"]),

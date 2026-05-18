@@ -34,7 +34,7 @@ from vllm_omni.distributed.omni_coordinator import (
     LoadBalancer,
     OmniCoordClientForHub,
     RandomBalancer,
-    StageStatus,
+    ReplicaStatus,
 )
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.cfg_companion_tracker import CfgCompanionTracker
@@ -1242,7 +1242,7 @@ class Orchestrator:
 
             try:
                 snap = self._hub.get_replica_list()
-                current = {(rep.stage_id, rep.input_addr) for rep in snap.replicas if rep.status == StageStatus.UP}
+                current = {(rep.stage_id, rep.input_addr) for rep in snap.replicas if rep.status == ReplicaStatus.UP}
                 for stage_id, addr in last_up - current:
                     await self.request_async_queue.put(
                         UnregisterRemoteReplicaMessage(

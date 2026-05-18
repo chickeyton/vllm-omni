@@ -11,7 +11,7 @@ from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm_omni.distributed.omni_coordinator import (
     OmniCoordClientForStage,
     OmniCoordinator,
-    StageStatus,
+    ReplicaStatus,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -201,7 +201,7 @@ def test_omni_coordinator_heartbeat_timeout_handling():
         "output_addr": "tcp://stage:c-out",
         "stage_id": 0,
         "event_type": "update",
-        "status": StageStatus.UP.value,
+        "status": ReplicaStatus.UP.value,
         "queue_length": 0,
     }
     dealer_c.send(json.dumps(reg_event).encode("utf-8"))
@@ -267,7 +267,7 @@ def test_omni_coordinator_replica_shutdown_handling():
     assert msg["replicas"][0]["input_addr"] == "tcp://stage:shutdown"
 
     # Send down status (simulating graceful shutdown).
-    client.update_info(status=StageStatus.DOWN)
+    client.update_info(status=ReplicaStatus.DOWN)
 
     # Receive updated list (should have 0 active replicas).
     msg = _wait_for_replica_list(sub, expected_count=0)

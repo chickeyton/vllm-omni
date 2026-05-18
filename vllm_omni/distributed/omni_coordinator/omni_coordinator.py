@@ -11,7 +11,7 @@ from typing import Any
 
 import zmq
 
-from .messages import ReplicaEvent, ReplicaInfo, ReplicaList, StageStatus
+from .messages import ReplicaEvent, ReplicaInfo, ReplicaList, ReplicaStatus
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class OmniCoordinator:
     The coordinator maintains an in-memory registry of all known replicas,
     including their status, queue length, and heartbeat timestamps. A
     background thread periodically checks for heartbeat timeouts and marks
-    unhealthy replicas as ``StageStatus.ERROR``.
+    unhealthy replicas as ``ReplicaStatus.ERROR``.
     """
 
     def __init__(
@@ -78,7 +78,7 @@ class OmniCoordinator:
     def get_active_replicas(self) -> ReplicaList:
         """Return a :class:`ReplicaList` of active (UP) replicas only."""
         with self._lock:
-            active = [rep for rep in self._replicas.values() if rep.status == StageStatus.UP]
+            active = [rep for rep in self._replicas.values() if rep.status == ReplicaStatus.UP]
         return ReplicaList(replicas=active, timestamp=time())
 
     def add_new_replica(self, event: ReplicaEvent) -> None:
@@ -135,7 +135,7 @@ class OmniCoordinator:
 
     def _mark_replica_error_locked(self, info: ReplicaInfo) -> None:
         """Mark replica as ERROR (e.g. after heartbeat timeout)."""
-        info.status = StageStatus.ERROR
+        info.status = ReplicaStatus.ERROR
 
     def _check_heartbeat_timeouts(self) -> None:
         """Mark replicas as ERROR if their heartbeat has timed out."""
@@ -147,10 +147,10 @@ class OmniCoordinator:
             to_delete: list[str] = []
 
             for input_addr, info in self._replicas.items():
-                if info.status == StageStatus.UP and now - info.last_heartbeat > self._heartbeat_timeout:
+                if info.status == ReplicaStatus.UP and now - info.last_heartbeat > self._heartbeat_timeout:
                     self._mark_replica_error_locked(info)
                     timed_out = True
-                elif info.status in (StageStatus.DOWN, StageStatus.ERROR) and now - info.last_heartbeat > gc_ttl:
+                elif info.status in (ReplicaStatus.DOWN, ReplicaStatus.ERROR) and now - info.last_heartbeat > gc_ttl:
                     to_delete.append(input_addr)
 
             for input_addr in to_delete:
@@ -195,7 +195,7 @@ class OmniCoordinator:
                 output_addr=str(data["output_addr"]),
                 stage_id=int(data["stage_id"]),
                 event_type=str(data["event_type"]),
-                status=StageStatus(data.get("status")),
+                status=ReplicaStatus(data.get("status")),
                 queue_length=data.get("queue_length"),
             )
         except (KeyError, ValueError, TypeError):
@@ -294,8 +294,8 @@ class OmniCoordinator:
                         if event.queue_length is not None and info.queue_length != event.queue_length:
                             info.queue_length = event.queue_length
                             queue_changed = True
-                        if info.status == StageStatus.ERROR:
-                            info.status = StageStatus.UP
+                        if info.status == ReplicaStatus.ERROR:
+                            info.status = ReplicaStatus.UP
                             promote = True
                 if promote or queue_changed:
                     self._schedule_broadcast()
@@ -307,7 +307,7 @@ class OmniCoordinator:
                 if input_addr not in self._replicas:
                     self._add_new_replica_locked(event)
                 else:
-                    if event.status == StageStatus.DOWN:
+                    if event.status == ReplicaStatus.DOWN:
                         self._remove_replica_locked(event)
                     else:
                         self._update_replica_info_locked(event)
@@ -354,4 +354,4 @@ class OmniCoordinator:
         if info is None:
             return
 
-        info.status = StageStatus.DOWN
+        info.status = ReplicaStatus.DOWN

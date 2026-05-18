@@ -60,6 +60,14 @@ class StageDiffusionProc:
         # :attr:`queue_length` can report in-flight requests for the
         # OmniCoordinator heartbeat hook.
         self._active_tasks: dict[str, asyncio.Task] | None = None
+        # Set when a request-handler detects that the engine's multiproc
+        # executor has died (e.g. a worker process crashed and the executor's
+        # monitor thread closed it). Once set, ``run_loop`` breaks out so the
+        # outer ``except``/``finally`` can send ``DIFFUSION_PROC_DEAD`` and
+        # ``ReplicaStatus.DOWN``, then the subprocess exits non-zero. Without
+        # this, the run_loop would swallow per-request errors and keep
+        # serving 500s indefinitely while heartbeats still report UP.
+        self._fatal_event: asyncio.Event | None = None
 
     @property
     def queue_length(self) -> int:
@@ -69,6 +77,35 @@ class StageDiffusionProc:
         """
         tasks = self._active_tasks
         return 0 if tasks is None else len(tasks)
+
+    def _is_executor_dead(self) -> bool:
+        """True iff the multiproc executor has been closed or marked failed.
+
+        Detects the "workers died but the diffusion proc is still pulling
+        requests" case: ``MultiprocDiffusionExecutor`` sets ``_closed = True``
+        and ``is_failed = True`` from its worker-monitor thread the moment any
+        worker process exits; every subsequent ``execute_request`` /
+        ``collective_rpc`` then raises ``RuntimeError("DiffusionExecutor is
+        closed.")`` inside the engine. Callers in ``run_loop`` use this to
+        decide whether a per-request failure is recoverable or fatal.
+        """
+        if self._engine is None:
+            return False
+        executor = getattr(self._engine, "executor", None)
+        if executor is None:
+            return False
+        return bool(getattr(executor, "_closed", False) or getattr(executor, "is_failed", False))
+
+    def _signal_fatal_engine_failure(self, reason: str) -> None:
+        """Idempotently signal ``run_loop`` to tear down on a fatal engine error."""
+        if self._fatal_event is None or self._fatal_event.is_set():
+            return
+        logger.error(
+            "[StageDiffusionProc] fatal engine failure detected (%s); "
+            "signaling run_loop to send DIFFUSION_PROC_DEAD and exit.",
+            reason,
+        )
+        self._fatal_event.set()
 
     # ------------------------------------------------------------------
     # Initialization
@@ -327,6 +364,11 @@ class StageDiffusionProc:
         # Expose the live task dict so :attr:`queue_length` (used by the
         # OmniCoordinator heartbeat hook) can read the in-flight count.
         self._active_tasks = tasks
+        # Wakes the main recv loop when a request-handler detects a fatal
+        # engine failure so we tear down promptly instead of swallowing
+        # "DiffusionExecutor is closed" on every subsequent request.
+        fatal_event = asyncio.Event()
+        self._fatal_event = fatal_event
 
         async def _dispatch_request(
             request_id: str,
@@ -360,12 +402,41 @@ class StageDiffusionProc:
                         }
                     )
                 )
+                # Per-request errors are usually recoverable, but a closed
+                # executor means every future request will get the same
+                # "DiffusionExecutor is closed" error. Signal the main loop
+                # to send DIFFUSION_PROC_DEAD and exit so the head's hub
+                # demotes this replica instead of waiting on the heartbeat
+                # timeout (~30 s by default).
+                if self._is_executor_dead():
+                    self._signal_fatal_engine_failure(f"add_request {request_id}: {e!s}")
             finally:
                 tasks.pop(request_id, None)
 
         try:
             while True:
-                raw = await request_socket.recv()
+                # Await recv and fatal_event concurrently so the loop wakes
+                # up immediately when a per-request handler signals a fatal
+                # engine failure — even if no fresh ZMQ frame arrives.
+                recv_task: asyncio.Task = asyncio.ensure_future(request_socket.recv())
+                fatal_task: asyncio.Task = asyncio.ensure_future(fatal_event.wait())
+                try:
+                    done, pending = await asyncio.wait(
+                        [recv_task, fatal_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for waiter in (recv_task, fatal_task):
+                        if not waiter.done():
+                            waiter.cancel()
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
+                                await waiter
+                if fatal_event.is_set():
+                    raise RuntimeError(
+                        "StageDiffusionProc executor reported permanent failure; "
+                        "tearing down the diffusion subprocess."
+                    )
+                raw = recv_task.result()
                 msg = decoder.decode(raw)
                 msg_type = msg.get("type")
 
@@ -415,6 +486,11 @@ class StageDiffusionProc:
                                     }
                                 )
                             )
+                            # Same rationale as the single-request path: a
+                            # closed executor turns every subsequent batch
+                            # into a 500, so escalate now.
+                            if self._is_executor_dead():
+                                self._signal_fatal_engine_failure(f"add_batch_request {rid}: {e!s}")
                         finally:
                             tasks.pop(rid, None)
 
@@ -464,6 +540,13 @@ class StageDiffusionProc:
                                 }
                             )
                         )
+                        # Collective RPCs run through the same multiproc
+                        # executor — a closed executor means every future
+                        # RPC fails the same way, so tear down promptly.
+                        if self._is_executor_dead():
+                            self._signal_fatal_engine_failure(
+                                f"collective_rpc {msg['method']} (rpc_id={rpc_id}): {e!s}"
+                            )
 
                 elif msg_type == "shutdown":
                     break
@@ -485,6 +568,7 @@ class StageDiffusionProc:
                 await asyncio.gather(*tasks.values(), return_exceptions=True)
 
             self._active_tasks = None
+            self._fatal_event = None
             request_socket.close()
             response_socket.close()
             ctx.term()

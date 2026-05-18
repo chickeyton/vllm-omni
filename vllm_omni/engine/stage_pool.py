@@ -14,7 +14,7 @@ from vllm_omni.distributed.omni_coordinator import (
     LoadBalancer,
     OmniCoordClientForHub,
     ReplicaInfo,
-    StageStatus,
+    ReplicaStatus,
 )
 from vllm_omni.distributed.omni_coordinator.load_balancer import Task
 from vllm_omni.engine.stage_client import (
@@ -308,7 +308,7 @@ class StagePool:
         snap = self._hub.get_replicas_for_stage(self.stage_id)
         out: list[tuple[ReplicaInfo, int]] = []
         for rep in snap.replicas:
-            if rep.status != StageStatus.UP:
+            if rep.status != ReplicaStatus.UP:
                 continue
             replica_id = self._addr_to_replica_id.get(rep.input_addr)
             if replica_id is None:
@@ -327,7 +327,7 @@ class StagePool:
             return None
         snap = self._hub.get_replicas_for_stage(self.stage_id)
         for rep in snap.replicas:
-            if rep.input_addr == input_addr and rep.status == StageStatus.UP:
+            if rep.input_addr == input_addr and rep.status == ReplicaStatus.UP:
                 return replica_id
         return None
 
