@@ -9,8 +9,8 @@ from vllm_omni.distributed.omni_coordinator import (
     LeastQueueLengthBalancer,
     RandomBalancer,
     ReplicaInfo,
-    RoundRobinBalancer,
     ReplicaStatus,
+    RoundRobinBalancer,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
