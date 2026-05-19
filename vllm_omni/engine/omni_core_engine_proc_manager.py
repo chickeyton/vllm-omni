@@ -99,7 +99,12 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
-        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+        # Intra-replica vLLM DP mesh (i.e. ``data_parallel_size`` ranks sharing
+        # one engine, one DPCoordinator, one set of weights). Distinct from
+        # the omni-level notion of multiple independent replicas of a stage —
+        # those each spawn their own OmniCoreEngineProcManager and never join
+        # a vLLM DP group across replicas.
+        has_intra_replica_dp = vllm_config.parallel_config.data_parallel_size > 1
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks: list[int] = []
@@ -117,7 +122,7 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
                     target=StageEngineCoreProc.run_stage_core,
                     name=(
                         f"StageEngineCoreProc_stage{omni_stage_id}"
-                        f"_replica{omni_replica_id}" + (f"_DP{global_index}" if is_dp else "")
+                        f"_replica{omni_replica_id}" + (f"_DP{global_index}" if has_intra_replica_dp else "")
                     ),
                     kwargs=common_kwargs
                     | {
@@ -136,7 +141,7 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 device_control_context: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
                 if (
-                    is_dp
+                    has_intra_replica_dp
                     and set_device_control_env_var is not None
                     and (not current_platform.is_cuda_alike() or vllm_config.parallel_config.use_ray)
                 ):

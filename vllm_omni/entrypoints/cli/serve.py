@@ -120,6 +120,32 @@ class OmniServeCommand(CLISubcommand):
             if omni_dp_size_local != 1 and args.stage_id is None:
                 raise ValueError("--omni-dp-size-local != 1 requires --stage-id to be set")
 
+        # vLLM CLI args that omni does not honor: parallelism comes from the
+        # per-stage YAML (parallel_config:, enable_expert_parallel:) and the
+        # process-local replica count from --omni-dp-size-local. Passing the
+        # vLLM equivalents on the command line would silently disagree with
+        # those sources of truth, so reject them at parse time.
+        if getattr(args, "omni", False):
+            explicit_cli_keys: set[str] = getattr(args, "_cli_explicit_keys", set()) or set()
+            prohibited_with_omni: dict[str, str] = {
+                "data_parallel_size": "--data-parallel-size",
+                "data_parallel_size_local": "--data-parallel-size-local",
+                "data_parallel_address": "--data-parallel-address",
+                "data_parallel_rpc_port": "--data-parallel-rpc-port",
+                "data_parallel_start_rank": "--data-parallel-start-rank",
+                "data_parallel_backend": "--data-parallel-backend",
+                "api_server_count": "--api-server-count",
+                "enable_expert_parallel": "--enable-expert-parallel",
+            }
+            offenders = sorted(flag for dest, flag in prohibited_with_omni.items() if dest in explicit_cli_keys)
+            if offenders:
+                raise ValueError(
+                    "The following CLI args are not supported under --omni: "
+                    f"{', '.join(offenders)}. Configure parallelism through the "
+                    "per-stage YAML (`--deploy-config` / `--stage-configs-path`) "
+                    "and replica count via `--omni-dp-size-local`."
+                )
+
         # --omni-lb-policy is validated against the LoadBalancingPolicy enum.
         omni_lb_policy = getattr(args, "omni_lb_policy", None)
         if omni_lb_policy is not None:

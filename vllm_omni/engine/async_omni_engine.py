@@ -46,11 +46,8 @@ from vllm_omni.distributed.omni_connectors.utils.initialization import (
     resolve_omni_kv_config_for_stage,
 )
 from vllm_omni.distributed.omni_coordinator import (
-    LeastQueueLengthBalancer,
     LoadBalancer,
-    LoadBalancingPolicy,
-    RandomBalancer,
-    RoundRobinBalancer,
+    build_load_balancer_factory,
 )
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.messages import (
@@ -85,6 +82,7 @@ from vllm_omni.engine.stage_engine_startup import (
 from vllm_omni.engine.stage_init_utils import (
     LogicalStageInitPlan,
     ReplicaInitPlan,
+    StageRemoteFactoryContext,
     _inject_inferred_kv_tp_topology,
     acquire_device_locks,
     acquire_diffusion_device_locks,
@@ -93,6 +91,7 @@ from vllm_omni.engine.stage_init_utils import (
     build_llm_stage_output_processor,
     build_stage0_input_processor,
     build_vllm_config,
+    capture_stage_factory_contexts,
     compute_replica_layout,
     extract_stage_metadata,
     get_stage_connector_spec,
@@ -157,46 +156,10 @@ _PARENT_ARGS_KEEP: frozenset[str] = frozenset(
 _PARENT_ARGS_STRIP: frozenset[str] = frozenset({"stage_configs_path"})
 
 
-def _build_load_balancer_factory(policy: str) -> Callable[[], LoadBalancer]:
-    """Translate ``--omni-lb-policy`` (string) into a per-pool LB factory."""
-    try:
-        normalized = LoadBalancingPolicy(policy)
-    except ValueError as exc:
-        valid = ", ".join(p.value for p in LoadBalancingPolicy)
-        raise ValueError(f"unknown --omni-lb-policy {policy!r} (valid: {valid})") from exc
-    if normalized is LoadBalancingPolicy.RANDOM:
-        return RandomBalancer
-    if normalized is LoadBalancingPolicy.ROUND_ROBIN:
-        return RoundRobinBalancer
-    if normalized is LoadBalancingPolicy.LEAST_QUEUE_LENGTH:
-        return LeastQueueLengthBalancer
-    raise ValueError(f"unhandled load balancing policy {normalized!r}")
-
-
 # Fields always populated by callers (via ``from_cli_args`` / ``asdict``) so
 # their presence as an override is never a surprise — suppress the
 # "override ignored" warning for these.
 _PARENT_ARGS_NO_WARN: frozenset[str] = frozenset({"model"})
-
-
-@dataclasses.dataclass
-class _StageRemoteFactoryContext:
-    """Per-stage context cached by AsyncOmniEngine for dynamic replica attach.
-
-    Populated once during ``_bootstrap_orchestrator`` from the per-stage
-    init plans. ``_build_remote_replica`` consumes it to construct the
-    right head-side stage client when a headless replica registers.
-    """
-
-    stage_id: int
-    stage_type: str
-    stage_cfg: Any
-    base_metadata: Any
-    # LLM-only fields:
-    vllm_config: Any | None = None
-    executor_class: type | None = None
-    # Diffusion-only fields:
-    diffusion_batch_size: int = 1
 
 
 def _inject_global_id(target: Any, request_id: str) -> None:
@@ -268,14 +231,15 @@ def _weak_shutdown_async_omni_engine(
         pass
 
     try:
-        if orchestrator_thread.is_alive():
+        if orchestrator_thread is not None and orchestrator_thread.is_alive():
             orchestrator_thread.join(timeout=10)
     except Exception:
         pass
 
     for q in (request_queue, output_queue, rpc_output_queue):
         try:
-            q.close()
+            if q is not None:
+                q.close()
         except Exception:
             pass
 
@@ -359,7 +323,7 @@ class AsyncOmniEngine:
         # Per-stage construction context, captured after _initialize_stages
         # and used by ``_build_remote_replica`` (the RemoteReplicaFactory
         # passed to Orchestrator) when a headless replica registers.
-        self._stage_remote_factory_contexts: dict[int, _StageRemoteFactoryContext] = {}
+        self._stage_remote_factory_contexts: dict[int, StageRemoteFactoryContext] = {}
 
         if single_stage_mode:
             logger.info(
@@ -705,41 +669,6 @@ class AsyncOmniEngine:
     # ------------------------------------------------------------------
     # Remote replica factory (head-side client construction)
     # ------------------------------------------------------------------
-
-    def _capture_stage_factory_contexts(
-        self, stage_plans: Sequence[LogicalStageInitPlan]
-    ) -> dict[int, _StageRemoteFactoryContext]:
-        """Snapshot per-stage construction context for dynamic replica attach.
-
-        Called once after ``_initialize_stages`` finishes. The captured
-        context holds everything :meth:`_build_remote_replica` needs to
-        build a fresh head-side client when a new headless replica
-        registers (vllm_config / executor_class for LLM, batch_size for
-        diffusion, plus the base stage metadata).
-
-        Per-replica fields like ``replica_id`` are filled in at build
-        time, not at capture time.
-        """
-        contexts: dict[int, _StageRemoteFactoryContext] = {}
-        for plan in stage_plans:
-            if not plan.replicas:
-                # Stage was declared but has zero replicas locally; we still
-                # want to be able to attach incoming headless ones, so use
-                # the stage_cfg-derived context if any replica plan exists.
-                continue
-            template = plan.replicas[0]
-            stage_id = int(plan.configured_stage_id)
-            stage_type = template.metadata.stage_type or "llm"
-            contexts[stage_id] = _StageRemoteFactoryContext(
-                stage_id=stage_id,
-                stage_type=stage_type,
-                stage_cfg=template.stage_cfg,
-                base_metadata=template.metadata,
-                vllm_config=template.stage_vllm_config,
-                executor_class=template.executor_class,
-                diffusion_batch_size=self.diffusion_batch_size,
-            )
-        return contexts
 
     async def _build_remote_replica(self, stage_id: int, replica_id: int) -> Any:
         """Construct a head-side stage client for a newly-registered remote replica.
@@ -1344,7 +1273,9 @@ class AsyncOmniEngine:
         # so the on_register proxy can build head-side clients for
         # registrations that arrive immediately after the server starts.
         if self.single_stage_mode:
-            self._stage_remote_factory_contexts = self._capture_stage_factory_contexts(stage_plans)
+            self._stage_remote_factory_contexts = capture_stage_factory_contexts(
+                stage_plans, diffusion_batch_size=self.diffusion_batch_size
+            )
             self._start_omni_master_server(stage_plans)
 
         stage_pools: list[StagePool] = []
@@ -1425,7 +1356,7 @@ class AsyncOmniEngine:
             remote_replica_factory: Callable[[int, int], Awaitable[Any]] | None = None
             if self._coordinator_runtime is not None:
                 coordinator_pub_address = self._coordinator_runtime.pub_address
-                load_balancer_factory = _build_load_balancer_factory(self._omni_lb_policy)
+                load_balancer_factory = build_load_balancer_factory(self._omni_lb_policy)
                 remote_replica_factory = self._build_remote_replica
             orchestrator = Orchestrator(
                 request_async_queue=self.request_queue.async_q,
