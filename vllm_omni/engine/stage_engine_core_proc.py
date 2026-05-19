@@ -83,13 +83,11 @@ class StageEngineCoreProc(EngineCoreProc):
         engine_core: StageEngineCoreProc | None = None
         coord_client: OmniCoordClientForStage | None = None
         try:
-            # NOTE: previous revisions hardcoded data_parallel_size=1 here
-            # (TODO referencing issue #984). The hardcoding has been removed
-            # so the DP fields propagate through from the caller exactly
-            # like upstream vLLM.
-
             stage_label = f"stage{omni_stage_id}" if omni_stage_id is not None else "noid"
-            set_process_title(f"StageEngineCoreProc_{stage_label}_replica{omni_replica_id}_DP{dp_rank}")
+            # vLLM-Omni LLM stages run one engine per omni replica
+            # (see PR #3569); ``dp_rank`` is always 0, so we omit the
+            # ``_DP*`` suffix that older builds carried.
+            set_process_title(f"StageEngineCoreProc_{stage_label}_replica{omni_replica_id}")
             decorate_logs()
             os.environ["VLLM_OMNI_REPLICA_ID"] = str(max(int(omni_replica_id), 0))
 

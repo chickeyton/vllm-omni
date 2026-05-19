@@ -749,7 +749,6 @@ class TestSingleStageReplicaInitialization:
 
         assert result is sentinel_client
         engine._omni_master_server.get_stage_config.assert_called_once_with(7, timeout_s=60, replica_id=0)
-        assert fake_vllm_config.parallel_config.data_parallel_size_local == 0
         assert mock_connect.call_args.kwargs["stage_id"] == 7
         assert mock_connect.call_args.kwargs["replica_id"] == 0
         assert events == ["enter", "exit", "attach"]
@@ -1021,25 +1020,23 @@ class TestSingleStageReplicaInitialization:
 # ---------------------------------------------------------------------------
 
 
-class TestConnectRemoteEngineCoresCoordinator:
-    @staticmethod
-    def _build_vllm_config(
-        mocker: MockerFixture, *, dp_rank: int = 0, offline_mode: bool = False, needs_dp_coordinator: bool = True
-    ) -> Any:
-        parallel_config = mocker.Mock()
-        parallel_config.data_parallel_size_local = 1
-        parallel_config.data_parallel_size = 2
-        parallel_config.data_parallel_rank = dp_rank
-        parallel_config.data_parallel_rank_local = 0 if offline_mode else None
+class TestConnectRemoteEngineCores:
+    """vLLM-Omni LLM stages run one engine per omni replica; vLLM's own DP
+    is never effective in vllm-omni LLM stages (see PR #3569). These tests
+    assert ``connect_remote_engine_cores`` no longer constructs a
+    DPCoordinator and no longer reads coordinator addresses from the
+    master server.
+    """
 
+    @staticmethod
+    def _build_vllm_config(mocker: MockerFixture) -> Any:
         vllm_config = mocker.Mock()
-        vllm_config.parallel_config = parallel_config
-        vllm_config.needs_dp_coordinator = needs_dp_coordinator
+        vllm_config.parallel_config = mocker.Mock()
         vllm_config.model_config = mocker.Mock(is_moe=False)
         return vllm_config
 
-    def test_uses_registered_coordinator_addresses(self, mocker: MockerFixture):
-        vllm_config = self._build_vllm_config(mocker, dp_rank=0, offline_mode=False, needs_dp_coordinator=True)
+    def test_yields_no_coordinator(self, mocker: MockerFixture):
+        vllm_config = self._build_vllm_config(mocker)
 
         omni_master_server = mocker.Mock(spec=OmniMasterServer)
         omni_master_server.get_zmq_addresses.return_value = EngineZmqAddresses(
@@ -1047,11 +1044,6 @@ class TestConnectRemoteEngineCoresCoordinator:
             outputs=["tcp://client-out"],
         )
         omni_master_server.get_allocation.return_value = mocker.Mock(handshake_bind_address="tcp://127.0.0.1:26001")
-        omni_master_server.get_stage_coordinator_addresses.return_value = StageCoordinatorAddresses(
-            coordinator_input="tcp://coord-in",
-            coordinator_output="tcp://coord-out",
-            frontend_stats_publish_address="tcp://stats",
-        )
 
         @contextmanager
         def fake_socket_ctx(*args, **kwargs):
@@ -1066,51 +1058,27 @@ class TestConnectRemoteEngineCoresCoordinator:
             replica_id=2,
         ) as (_, yielded_coordinator, yielded_addresses, _tensor_queue):
             assert yielded_coordinator is None
-            assert yielded_addresses.coordinator_input == "tcp://coord-in"
-            assert yielded_addresses.coordinator_output == "tcp://coord-out"
-            assert yielded_addresses.frontend_stats_publish_address == "tcp://stats"
+            assert yielded_addresses is not None
 
         omni_master_server.get_zmq_addresses.assert_called_once_with(7, replica_id=2)
-        omni_master_server.get_stage_coordinator_addresses.assert_called_once_with(7, replica_id=2)
         omni_master_server.get_allocation.assert_called_once_with(7, replica_id=2)
+        # The DPCoordinator address read was removed from
+        # ``connect_remote_engine_cores`` — assert it is not consulted.
+        omni_master_server.get_stage_coordinator_addresses.assert_not_called()
         mock_wait.assert_called_once()
-
-    def test_defaults_to_no_coordinator_addresses_when_none_registered(self, mocker: MockerFixture):
-        vllm_config = self._build_vllm_config(mocker, dp_rank=0, offline_mode=False, needs_dp_coordinator=True)
-
-        omni_master_server = mocker.Mock(spec=OmniMasterServer)
-        omni_master_server.get_zmq_addresses.return_value = EngineZmqAddresses(
-            inputs=["tcp://client-in"],
-            outputs=["tcp://client-out"],
-        )
-        omni_master_server.get_allocation.return_value = mocker.Mock(handshake_bind_address="tcp://127.0.0.1:26001")
-        omni_master_server.get_stage_coordinator_addresses.return_value = StageCoordinatorAddresses()
-
-        @contextmanager
-        def fake_socket_ctx(*args, **kwargs):
-            yield mocker.Mock()
-
-        mocker.patch("vllm_omni.engine.stage_engine_startup.zmq_socket_ctx", return_value=fake_socket_ctx())
-        mocker.patch("vllm_omni.engine.stage_engine_startup._wait_for_omni_engine_startup")
-        with connect_remote_engine_cores(
-            vllm_config=vllm_config,
-            omni_master_server=omni_master_server,
-            stage_id=7,
-        ) as (_, yielded_coordinator, yielded_addresses, _tensor_queue):
-            assert yielded_coordinator is None
-            assert yielded_addresses.coordinator_input is None
-            assert yielded_addresses.coordinator_output is None
-            assert yielded_addresses.frontend_stats_publish_address is None
 
 
 class TestLaunchOmniCoreEngines:
-    def test_registers_stage_once_and_reuses_handshake_for_all_local_engines(self, mocker: MockerFixture):
-        parallel_config = mocker.Mock(
-            data_parallel_size_local=2,
-            data_parallel_size=4,
-            data_parallel_rank=3,
+    """vllm-omni LLM stages always launch exactly one engine per omni
+    replica; no DPCoordinator. See PR #3569 for the rationale.
+    """
+
+    def test_registers_stage_with_single_local_engine(self, mocker: MockerFixture):
+        vllm_config = mocker.Mock(
+            parallel_config=mocker.Mock(),
+            model_config=mocker.Mock(is_moe=False),
+            cache_config=mocker.Mock(),
         )
-        vllm_config = mocker.Mock(parallel_config=parallel_config)
 
         omni_master_server = mocker.Mock(spec=OmniMasterServer)
         omni_master_server.address = "127.0.0.1"
@@ -1152,27 +1120,30 @@ class TestLaunchOmniCoreEngines:
             omni_master_port=26000,
             omni_stage_id=7,
             omni_stage_config=stage_config,
-            coordinator=None,
             replica_id=2,
         )
         omni_master_server.get_zmq_addresses.assert_called_once_with(7, replica_id=2)
         omni_master_server.get_allocation.assert_called_once_with(7, replica_id=2)
         manager_kwargs = mock_manager_cls.call_args.kwargs
-        assert manager_kwargs["local_engine_count"] == 2
-        assert manager_kwargs["start_index"] == 3
+        assert manager_kwargs["local_engine_count"] == 1
+        assert manager_kwargs["start_index"] == 0
         assert manager_kwargs["local_start_index"] == 0
         assert manager_kwargs["handshake_address"] == "tcp://127.0.0.1:26001"
 
-    def test_registers_stage_with_coordinator_when_started(self, mocker: MockerFixture):
-        parallel_config = mocker.Mock(
-            data_parallel_size_local=1,
-            data_parallel_size=2,
-            data_parallel_rank=0,
-        )
+    def test_does_not_start_dp_coordinator(self, mocker: MockerFixture):
+        """Even when ``needs_dp_coordinator`` would be True upstream, the
+        omni launch path no longer instantiates a DPCoordinator. We assert
+        on the absence of the symbol — the import has been removed from
+        ``stage_engine_startup`` so a stray reference would be a NameError
+        at module load."""
+        import vllm_omni.engine.stage_engine_startup as startup_mod
+
+        assert not hasattr(startup_mod, "DPCoordinator")
+
         vllm_config = mocker.Mock(
-            parallel_config=parallel_config,
+            parallel_config=mocker.Mock(),
             needs_dp_coordinator=True,
-            model_config=mocker.Mock(is_moe=False),
+            model_config=mocker.Mock(is_moe=True),
             cache_config=mocker.Mock(),
         )
 
@@ -1185,17 +1156,11 @@ class TestLaunchOmniCoreEngines:
         )
         omni_master_server.get_allocation.return_value = mocker.Mock(handshake_bind_address="tcp://127.0.0.1:26001")
 
-        coordinator = mocker.Mock()
-        coordinator.proc.pid = 1234
-        coordinator.get_engine_socket_addresses.return_value = ("tcp://coord-in", "tcp://coord-out")
-        coordinator.get_stats_publish_address.return_value = "tcp://stats"
-
         @contextmanager
         def fake_socket_ctx(*args, **kwargs):
             yield mocker.Mock()
 
-        mocker.patch("vllm_omni.engine.stage_engine_startup.DPCoordinator", return_value=coordinator)
-        mock_register = mocker.patch(
+        mocker.patch(
             "vllm_omni.engine.stage_engine_startup.register_stage_with_omni_master",
             return_value="tcp://127.0.0.1:26001",
         )
@@ -1214,17 +1179,11 @@ class TestLaunchOmniCoreEngines:
             stage_config={"stage_id": 7},
             replica_id=3,
         ) as (_, yielded_coordinator, yielded_addresses):
-            assert yielded_coordinator is coordinator
-            assert yielded_addresses.coordinator_input == "tcp://coord-in"
-            assert yielded_addresses.coordinator_output == "tcp://coord-out"
-            assert yielded_addresses.frontend_stats_publish_address == "tcp://stats"
+            assert yielded_coordinator is None
+            assert yielded_addresses.frontend_stats_publish_address is None
 
-        mock_register.assert_called_once_with(
-            omni_master_address="127.0.0.1",
-            omni_master_port=26000,
-            omni_stage_id=7,
-            omni_stage_config={"stage_id": 7},
-            coordinator=coordinator,
-            replica_id=3,
-        )
         mock_wait.assert_called_once()
+        # The MoE wave-coordination wait path is collapsed: assert the
+        # ``coordinated_dp`` positional arg is False.
+        coordinated_dp_arg = mock_wait.call_args.args[4]
+        assert coordinated_dp_arg is False

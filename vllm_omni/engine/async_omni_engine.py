@@ -837,7 +837,6 @@ class AsyncOmniEngine:
                 executor_class = plan.executor_class
                 assert vllm_config is not None
                 assert executor_class is not None
-                vllm_config.parallel_config.data_parallel_size_local = 0
                 launch_cm = connect_remote_engine_cores(
                     vllm_config=vllm_config,
                     omni_master_server=self._omni_master_server,

@@ -16,7 +16,6 @@ from omegaconf import OmegaConf
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_ports_list, zmq_socket_ctx
-from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.utils import (
     STARTUP_POLL_PERIOD_MS,
     CoreEngine,
@@ -619,7 +618,6 @@ def register_stage_with_omni_master(
     omni_master_port: int,
     omni_stage_id: int,
     omni_stage_config: Any = None,
-    coordinator: DPCoordinator | None = None,
     return_addresses: bool = False,
     replica_id: int | None = 0,
     return_full_response: bool = False,
@@ -654,11 +652,6 @@ def register_stage_with_omni_master(
                 "replica_id": wire_replica_id,
                 "stage_config": _serialize_stage_config(omni_stage_config),
             }
-            if coordinator is not None:
-                coordinator_input, coordinator_output = coordinator.get_engine_socket_addresses()
-                payload["coordinator_input"] = coordinator_input
-                payload["coordinator_output"] = coordinator_output
-                payload["frontend_stats_publish_address"] = coordinator.get_stats_publish_address()
 
             # Always advertise THIS host's local bind address + 3 locally
             # free ports so the master can root the per-stage socket
@@ -795,32 +788,17 @@ def connect_remote_engine_cores(
     omni_master_server: OmniMasterServer,
     stage_id: int,
     replica_id: int = 0,
-) -> Iterator[tuple[None, DPCoordinator | None, EngineZmqAddresses, None]]:
+) -> Iterator[tuple[None, None, EngineZmqAddresses, None]]:
     """Wait for remote engine cores to connect through the omni handshake."""
     addresses = omni_master_server.get_zmq_addresses(stage_id, replica_id=replica_id)
-    parallel_config = vllm_config.parallel_config
-    # Mirror the engine-count logic from launch_omni_core_engines.
-    remote_engine_count = (
-        parallel_config.data_parallel_size_local
-        if parallel_config.data_parallel_size_local is not None and parallel_config.data_parallel_size_local > 0
-        else max(1, parallel_config.data_parallel_size)
-    )
-    start_index = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
+    # vLLM-Omni LLM stages run one engine per omni replica; vLLM's own DP
+    # is never effective (see PR #3569). Hardcode to a single engine.
     coordinator = None
 
-    registered_coordinator_addresses = omni_master_server.get_stage_coordinator_addresses(
-        stage_id,
-        replica_id=replica_id,
-    )
-    addresses.coordinator_input = registered_coordinator_addresses.coordinator_input
-    addresses.coordinator_output = registered_coordinator_addresses.coordinator_output
-    addresses.frontend_stats_publish_address = registered_coordinator_addresses.frontend_stats_publish_address
-
-    engines_to_handshake = [CoreEngine(index=start_index + i, local=False) for i in range(remote_engine_count)]
+    engines_to_handshake = [CoreEngine(index=0, local=False)]
 
     logger.info(
-        "Waiting for %d remote engine(s) for stage %d replica %d",
-        remote_engine_count,
+        "Waiting for 1 remote engine for stage %d replica %d",
         stage_id,
         replica_id,
     )
@@ -849,72 +827,35 @@ def launch_omni_core_engines(
     replica_id: int = 0,
     *,
     omni_coordinator_address: str | None = None,
-) -> Iterator[tuple[CoreEngineProcManager, DPCoordinator | None, EngineZmqAddresses]]:
+) -> Iterator[tuple[CoreEngineProcManager, None, EngineZmqAddresses]]:
     """Launch local engine cores using the omni registration flow.
 
+    vLLM-Omni runs exactly one engine per omni replica; vLLM's own data
+    parallel is never effective in vllm-omni LLM stages (see PR #3569).
     When ``omni_coordinator_address`` is provided, the spawned engine
-    subprocesses use :class:`OmniCoreEngineProcManager` and each
-    instantiates an :class:`OmniCoordClientForStage` after the handshake
-    completes so the head's :class:`OmniCoordinator` knows about them.
+    subprocess uses :class:`OmniCoreEngineProcManager` and instantiates an
+    :class:`OmniCoordClientForStage` after the handshake completes so the
+    head's :class:`OmniCoordinator` knows about it.
     """
     addresses = omni_master_server.get_zmq_addresses(stage_id, replica_id=replica_id)
     parallel_config = vllm_config.parallel_config
-    # Determine the number of local engines and their ranks.
-    local_engine_count = (
-        parallel_config.data_parallel_size_local
-        if parallel_config.data_parallel_size_local is not None and parallel_config.data_parallel_size_local > 0
-        else max(1, parallel_config.data_parallel_size)
-    )
-    dp_rank = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
-    local_start_index = 0
-    start_index = dp_rank
-
-    # Run the DP Coordinator process with rank 0 when in online DP mode.
-    # The coordinator is needed for:
-    # 1. Internal/hybrid LB: collecting and publishing queue stats
-    # 2. MoE models: wave coordination in addition to stats
-    run_coordinator = vllm_config.needs_dp_coordinator and dp_rank == 0
-
-    if run_coordinator:
-        coordinator = DPCoordinator(
-            parallel_config,
-            enable_wave_coordination=vllm_config.model_config.is_moe,
-        )
-
-        addresses.coordinator_input, addresses.coordinator_output = coordinator.get_engine_socket_addresses()
-        addresses.frontend_stats_publish_address = coordinator.get_stats_publish_address()
-
-        logger.info(
-            "[omni] Started DP Coordinator process for stage %d replica %d (PID: %d)",
-            stage_id,
-            replica_id,
-            coordinator.proc.pid,
-        )
-    else:
-        coordinator = None
+    coordinator = None
 
     logger.info(
-        "Starting %d local engine(s) for stage %d replica %d (dp_rank=%d)",
-        local_engine_count,
+        "Starting 1 local engine for stage %d replica %d",
         stage_id,
         replica_id,
-        dp_rank,
     )
 
-    # Register the stage once and reuse the returned per-stage handshake
-    # address for all local engine-core processes.
     handshake_address = register_stage_with_omni_master(
         omni_master_address=omni_master_server.address,
         omni_master_port=omni_master_server.port,
         omni_stage_id=stage_id,
         omni_stage_config=stage_config,
-        coordinator=coordinator,
         replica_id=replica_id,
     )
 
-    # One CoreEngine entry per local engine so wait_for_engine_startup can
-    # track the HELLO/READY handshake for each of them.
-    engines_to_handshake = [CoreEngine(index=start_index + i, local=True) for i in range(local_engine_count)]
+    engines_to_handshake = [CoreEngine(index=0, local=True)]
 
     # Bind the pre-allocated handshake socket for this stage.
     handshake_bind_address = omni_master_server.get_allocation(stage_id, replica_id=replica_id).handshake_bind_address
@@ -926,9 +867,9 @@ def launch_omni_core_engines(
             from vllm_omni.engine.omni_core_engine_proc_manager import OmniCoreEngineProcManager
 
             local_engine_manager: CoreEngineProcManager = OmniCoreEngineProcManager(
-                local_engine_count=local_engine_count,
-                start_index=start_index,
-                local_start_index=local_start_index,
+                local_engine_count=1,
+                start_index=0,
+                local_start_index=0,
                 vllm_config=vllm_config,
                 local_client=True,
                 handshake_address=handshake_address,
@@ -940,9 +881,9 @@ def launch_omni_core_engines(
             )
         else:
             local_engine_manager = CoreEngineProcManager(
-                local_engine_count=local_engine_count,
-                start_index=start_index,
-                local_start_index=local_start_index,
+                local_engine_count=1,
+                start_index=0,
+                local_start_index=0,
                 vllm_config=vllm_config,
                 local_client=True,
                 handshake_address=handshake_address,
@@ -952,16 +893,16 @@ def launch_omni_core_engines(
 
         yield local_engine_manager, coordinator, addresses
 
-        # Wait for all local engine-core processes to complete the
-        # standard HELLO/READY handshake — mirrors launch_core_engines.
-        coordinated_dp = parallel_config.data_parallel_size > 1 and vllm_config.model_config.is_moe
+        # Wait for the local engine-core process to complete the
+        # standard HELLO/READY handshake. ``coordinated_dp`` is always
+        # False here — vLLM DP > 1 is never effective in vllm-omni.
         wait_for_engine_startup(
             handshake_socket,
             addresses,
             engines_to_handshake,
             parallel_config,
-            coordinated_dp,
+            False,
             vllm_config.cache_config,
             local_engine_manager,
-            coordinator.proc if coordinator else None,
+            None,
         )

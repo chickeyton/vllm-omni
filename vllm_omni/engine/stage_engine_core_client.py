@@ -89,10 +89,15 @@ class StageEngineCoreClientBase(StageClientBase):
         coordinator: Any = None,
         client_count: int = 1,
         client_index: int = 0,
-    ) -> StageEngineCoreClient | DPLBStageEngineCoreClient:
-        """Create the appropriate stage async client for the DP mode."""
-        parallel_config = vllm_config.parallel_config
-        client_args = dict(
+    ) -> StageEngineCoreClient:
+        """Create the stage async client.
+
+        vLLM-Omni LLM stages never run vLLM's own data parallel mesh (see
+        PR #3569), so the DP-LB client variant is unreachable. The class
+        :class:`DPLBStageEngineCoreClient` is kept defined in this module
+        so re-enabling LLM DP only needs to flip the dispatch here.
+        """
+        return StageEngineCoreClient(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=log_stats,
@@ -104,11 +109,6 @@ class StageEngineCoreClientBase(StageClientBase):
             client_count=client_count,
             client_index=client_index,
         )
-
-        if parallel_config.data_parallel_size > 1 and not parallel_config.data_parallel_external_lb:
-            return DPLBStageEngineCoreClient(**client_args)
-
-        return StageEngineCoreClient(**client_args)
 
     def __init__(
         self,

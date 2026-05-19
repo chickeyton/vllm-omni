@@ -469,6 +469,9 @@ class DeployConfig:
     quantization: str | None = None
     enable_prefix_caching: bool | None = None
     enable_chunked_prefill: bool | None = None
+    # Accepted for backward compat with existing LLM-stage YAMLs; not
+    # propagated to vLLM ParallelConfig because vLLM's own data parallel
+    # is not effective in vllm-omni LLM stages (see PR #3569).
     data_parallel_size: int | None = None
     pipeline_parallel_size: int | None = None
 
@@ -636,6 +639,10 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
     }
     # Pipeline-wide engine settings: only set if explicitly present in YAML
     # so the DeployConfig dataclass defaults take effect otherwise.
+    # ``data_parallel_size`` is intentionally omitted — it is no longer
+    # propagated to LLM stages (PR #3569). Keep parsing it on
+    # ``DeployConfig`` for back-compat below but drop it here so we don't
+    # forward it into the runtime.
     for name in (
         "trust_remote_code",
         "distributed_executor_backend",
@@ -643,7 +650,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
         "quantization",
         "enable_prefix_caching",
         "enable_chunked_prefill",
-        "data_parallel_size",
         "pipeline_parallel_size",
     ):
         if name in raw_dict:
@@ -740,6 +746,8 @@ def _select_processor_funcs(
 
 # Pipeline-wide DeployConfig fields that are propagated to every stage's
 # engine args during merge. These live at top level of the deploy YAML.
+# ``data_parallel_size`` is intentionally omitted — vLLM's own DP is not
+# effective in vllm-omni LLM stages (see PR #3569).
 _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
     "trust_remote_code",
     "distributed_executor_backend",
@@ -747,7 +755,6 @@ _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
     "quantization",
     "enable_prefix_caching",
     "enable_chunked_prefill",
-    "data_parallel_size",
     "pipeline_parallel_size",
 )
 

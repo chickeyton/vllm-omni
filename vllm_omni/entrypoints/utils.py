@@ -770,13 +770,12 @@ def build_base_engine_args(source: Any) -> dict[str, Any] | None:
 
     base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
 
-    # Extract parallel configuration
+    # Extract parallel configuration. Note: vLLM's own data parallel is
+    # never effective in vllm-omni LLM stages (see PR #3569), so the
+    # ``data_parallel_*`` keys are deliberately omitted here.
     parallel_keys = [
         "tensor_parallel_size",
         "pipeline_parallel_size",
-        "data_parallel_size",
-        "data_parallel_size_local",
-        "data_parallel_backend",
         "distributed_executor_backend",
     ]
 

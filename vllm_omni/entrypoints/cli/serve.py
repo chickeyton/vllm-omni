@@ -678,7 +678,6 @@ def run_headless(args: argparse.Namespace) -> None:
     headless invocations can coexist) and reports heartbeats to the head's
     OmniCoordinator.
     """
-    from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.executor.multiproc_executor import MultiprocExecutor
     from vllm.version import __version__ as VLLM_VERSION
 
@@ -946,10 +945,10 @@ def run_headless(args: argparse.Namespace) -> None:
         headless=True,
     )
     parallel_config = vllm_config.parallel_config
-    local_engine_count = parallel_config.data_parallel_size_local
-
-    if local_engine_count <= 0:
-        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
+    # vLLM-Omni runs exactly one engine per omni replica; vLLM's own DP is
+    # never effective in vllm-omni LLM stages (see PR #3569). Replica
+    # fan-out is driven entirely by ``--omni-dp-size-local`` below.
+    local_engine_count = 1
 
     shutdown_requested = False
 
@@ -963,6 +962,9 @@ def run_headless(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    # ``node_rank_within_dp`` is computed from ``node_rank %
+    # nnodes_within_dp``; at DP=1 with multi-node TP (``nnodes > 1``)
+    # the worker nodes still need this MultiprocExecutor join path.
     if parallel_config.node_rank_within_dp > 0:
         head_node_address = f"{parallel_config.master_addr}:{parallel_config.master_port}"
         logger.info(
@@ -976,24 +978,10 @@ def run_headless(args: argparse.Namespace) -> None:
         executor.start_worker_monitor(inline=True)
         return
 
-    dp_rank = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
-    coordinator = None
-    if vllm_config.needs_dp_coordinator and dp_rank == 0:
-        coordinator = DPCoordinator(
-            parallel_config,
-            enable_wave_coordination=vllm_config.model_config.is_moe,
-        )
-        logger.info(
-            "[Headless] Started DP Coordinator process for stage %d (PID: %d)",
-            stage_id,
-            coordinator.proc.pid,
-        )
-
     logger.info(
-        "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) for stage %d "
+        "[Headless] Launching %d omni replica(s) for stage %d "
         "via OmniMasterServer at %s:%d",
         omni_dp_size_local,
-        local_engine_count,
         stage_id,
         omni_master_address,
         omni_master_port,
@@ -1026,7 +1014,6 @@ def run_headless(args: argparse.Namespace) -> None:
                 omni_master_port=omni_master_port,
                 omni_stage_id=stage_id,
                 omni_stage_config=stage_cfg,
-                coordinator=coordinator,
                 replica_id=None,
                 return_full_response=True,
                 replica_bind_address=omni_replica_address,
@@ -1052,7 +1039,7 @@ def run_headless(args: argparse.Namespace) -> None:
                     setup_stage_devices(stage_id, {"devices": per_replica_devices[_rep_idx]})
                 mgr = OmniCoreEngineProcManager(
                     local_engine_count=local_engine_count,
-                    start_index=dp_rank,
+                    start_index=0,
                     local_start_index=0,
                     vllm_config=vllm_config,
                     local_client=False,
@@ -1094,8 +1081,6 @@ def run_headless(args: argparse.Namespace) -> None:
                 mgr.shutdown()
             except Exception:
                 logger.exception("[Headless] engine manager shutdown failed")
-        if coordinator is not None:
-            coordinator.shutdown()
 
 
 def cmd_init() -> list[CLISubcommand]:

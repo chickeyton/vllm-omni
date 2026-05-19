@@ -680,6 +680,18 @@ def build_engine_args_dict(
 
     if stage_type != "diffusion":
         resolve_worker_cls(engine_args_dict)
+        # vLLM-Omni LLM stages never honor vLLM's own DP / expert-parallel
+        # (see PR #3569 — CLI rejection + this strip). Replica fan-out is
+        # driven entirely by ``--omni-dp-size-local`` + OmniCoordinator.
+        # YAML keys are accepted for backward compat but silently dropped
+        # so they cannot disagree with the runtime.
+        for k in (
+            "data_parallel_size",
+            "data_parallel_size_local",
+            "data_parallel_backend",
+            "enable_expert_parallel",
+        ):
+            engine_args_dict.pop(k, None)
 
     if engine_args_dict.get("worker_type") == "generation":
         # Non-AR generation stages (e.g. code2wav) do not benefit from

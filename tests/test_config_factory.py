@@ -831,7 +831,6 @@ class TestDeployConfigLoading:
             "async_scheduling",
             "compilation_config",
             "config_format",
-            "data_parallel_size",
             "devices",
             "disable_hybrid_kv_cache_manager",
             "distributed_executor_backend",

@@ -19,7 +19,6 @@ Liveness monitoring and shutdown are inherited from
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import weakref
 from multiprocessing.process import BaseProcess
@@ -27,7 +26,6 @@ from multiprocessing.queues import Queue
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import numa_utils
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -37,14 +35,6 @@ from vllm.v1.utils import shutdown
 from vllm_omni.engine.stage_engine_core_proc import StageEngineCoreProc
 
 logger = init_logger(__name__)
-
-try:
-    # ``set_device_control_env_var`` lives next to CoreEngineProcManager and
-    # is only required for non-CUDA DP, so we tolerate its absence on
-    # older / future vLLM revisions.
-    from vllm.v1.engine.utils import set_device_control_env_var  # type: ignore
-except ImportError:  # pragma: no cover - depends on vLLM build
-    set_device_control_env_var = None  # type: ignore[assignment]
 
 
 class OmniCoreEngineProcManager(CoreEngineProcManager):
@@ -99,13 +89,10 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
-        # Intra-replica vLLM DP mesh (i.e. ``data_parallel_size`` ranks sharing
-        # one engine, one DPCoordinator, one set of weights). Distinct from
-        # the omni-level notion of multiple independent replicas of a stage —
-        # those each spawn their own OmniCoreEngineProcManager and never join
-        # a vLLM DP group across replicas.
-        has_intra_replica_dp = vllm_config.parallel_config.data_parallel_size > 1
-
+        # vLLM-Omni runs exactly one engine per omni replica; vLLM's own
+        # data-parallel is never effective in vllm-omni LLM stages (see
+        # PR #3569). The ``_DP*`` suffix and the ray/non-cuda device-control
+        # env-var override are both dead under this assumption.
         self.processes: list[BaseProcess] = []
         local_dp_ranks: list[int] = []
         for index in range(local_engine_count):
@@ -120,10 +107,7 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
             self.processes.append(
                 context.Process(
                     target=StageEngineCoreProc.run_stage_core,
-                    name=(
-                        f"StageEngineCoreProc_stage{omni_stage_id}"
-                        f"_replica{omni_replica_id}" + (f"_DP{global_index}" if has_intra_replica_dp else "")
-                    ),
+                    name=f"StageEngineCoreProc_stage{omni_stage_id}_replica{omni_replica_id}",
                     kwargs=common_kwargs
                     | {
                         "dp_rank": global_index,
@@ -139,22 +123,11 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                device_control_context: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
-                if (
-                    has_intra_replica_dp
-                    and set_device_control_env_var is not None
-                    and (not current_platform.is_cuda_alike() or vllm_config.parallel_config.use_ray)
-                ):
-                    device_control_context = set_device_control_env_var(vllm_config, local_dp_rank)
-
-                with (
-                    device_control_context,
-                    numa_utils.configure_subprocess(
-                        vllm_config,
-                        local_rank=0,
-                        dp_local_rank=local_dp_rank,
-                        process_kind="EngineCore",
-                    ),
+                with numa_utils.configure_subprocess(
+                    vllm_config,
+                    local_rank=0,
+                    dp_local_rank=local_dp_rank,
+                    process_kind="EngineCore",
                 ):
                     proc.start()
         finally:
