@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +22,7 @@ import zmq.asyncio
 from PIL import Image
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import decorate_logs, get_mp_context, set_process_title
 from vllm.v1.utils import shutdown
 
 from vllm_omni.diffusion.data import DiffusionRequestAbortedError
@@ -632,6 +633,12 @@ class StageDiffusionProc:
 
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+
+        stage_label = f"stage{omni_stage_id}" if omni_stage_id is not None else "noid"
+        replica_id = max(int(omni_replica_id), 0)
+        set_process_title(f"StageDiffusionProc_{stage_label}_replica{replica_id}")
+        decorate_logs()
+        os.environ["VLLM_OMNI_REPLICA_ID"] = str(replica_id)
 
         proc = cls(model, od_config)
         coord_client: OmniCoordClientForStage | None = None

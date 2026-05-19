@@ -494,6 +494,12 @@ class StagePool:
                 request_id,
                 affinity_request_id=affinity_request_id,
             )
+            logger.debug(
+                "[StagePool] stage-%s selected diffusion replica %s for request %s",
+                self.stage_id,
+                replica_id,
+                request_id,
+            )
             client = self._diffusion_client(replica_id)
             if isinstance(request, list):
                 await client.add_batch_request_async(request_id, request, params, **submit_kwargs)
@@ -504,6 +510,12 @@ class StagePool:
         replica_id = await self._pick_or_select(
             request_id,
             affinity_request_id=affinity_request_id,
+        )
+        logger.debug(
+            "[StagePool] stage-%s selected LLM replica %s for request %s",
+            self.stage_id,
+            replica_id,
+            request_id,
         )
         client = self.clients[replica_id]
         if client is None:
