@@ -147,6 +147,17 @@ The disagreement is **hidden, not fixed**.
 
 ---
 
+## Safe deployment recipe (avoids the bug without code changes)
+
+The mismatch only happens when the two processes end up with **different per-stage TP views**. Two conditions are sufficient to remove every source of that divergence:
+
+1. **Do not pass `--tensor-parallel-size`** (or any other parallelism CLI override) on either runtime.
+2. **Every CLI runtime reads the exact same YAML static file** (same path, same contents), with each stage's `tensor_parallel_size` pinned in that file at the location `_tp_size_for_stage` reads:
+   - LLM / AR stages → top-level `tensor_parallel_size: N` (or `parallel_config.tensor_parallel_size`)
+   - Diffusion / DiT stages → `parallel_config: { tensor_parallel_size: N }`
+
+Under those conditions, each process's merged `stage_configs` carries identical per-stage TP values. `_inject_inferred_kv_tp_topology` returns the same `(from_tp, to_tp)` on both sides, both build the same `KVTPTopology`, both take the same fork in `build_rank_aware_send_keys` / `build_rank_aware_recv_keys`, and the connector keys line up. Heterogeneous per-stage TP (e.g. stage 0 TP=1, stage 1 TP=2) works — the constraint is **same YAML across processes**, not "same TP across stages".
+
 ## Fix surfaces, in order of robustness
 
 1. **Exchange the authoritative TP via `OmniMasterServer`.** Each process registers its own `tensor_parallel_size` for the stage it owns; `_inject_inferred_kv_tp_topology` reads the peer's TP from the master rather than from the local YAML-merge result. This is the only fix that holds when the YAML is silent on per-stage TP.
