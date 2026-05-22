@@ -40,6 +40,21 @@ for the trade-off rationale.
 >
 >   The body below has been updated to reflect (1)–(3). See §10 for
 >   a complete summary of the post-smoke bugfix patch.
+>
+> - **Post-review revision (this version).** A second review pass
+>   surfaced two related issues with the validator's call site:
+>   1. Two `must_omit` fields (`data_parallel_master_port`,
+>      `data_parallel_rank_local`) live only on vLLM's `ParallelConfig`,
+>      not `EngineArgs`. The validator ran *after*
+>      `filter_dataclass_kwargs(OmniEngineArgs)`, which strips
+>      non-EngineArgs keys — so those two checks were dead code.
+>   2. A user who put DiT-shaped nested `parallel_config:` on an LLM
+>      stage would have the whole block silently stripped by the
+>      filter, and the stage would run with vLLM defaults.
+>
+>   Both fixed by moving the validator call to *before*
+>   `filter_dataclass_kwargs` and adding an explicit LLM-only reject
+>   for nested `parallel_config:`. See §10.4.
 
 ---
 
@@ -212,26 +227,27 @@ The combined consequence: **no new files**, ~6 small file touches, ~150-250 LoC 
             ▼
    ┌──────────────────────────────────┐
    │ build_vllm_config                │  stage_init_utils.py:698+
-   │  ┌─────────────────────────────┐ │
-   │  │ filter_dataclass_kwargs(    │ │
-   │  │    OmniEngineArgs, ...)     │ │
-   │  └────────────┬────────────────┘ │
+   │  ┌─────────────────────────────┐ │  ◄── NEW (§4.3)
+   │  │ _enforce_omni_parallel_     │ │      • Reject user-set fields
+   │  │  config(stage_cfg,          │ │        vllm-omni owns
+   │  │          engine_args_dict)  │ │      • Reject nested
+   │  └────────────┬────────────────┘ │        parallel_config: on LLM
+   │               │                  │      • Reject ext/hybrid LB,
+   │  ┌────────────▼─────────────────┐│        elastic EP, ray backend
+   │  │ filter_dataclass_kwargs(    │ │       • Reject device-count
+   │  │    OmniEngineArgs, ...)     │ │         non-divisible
+   │  └────────────┬─────────────────┘│       • Force-set ONLY
+   │               │                  │         data_parallel_size
+   │  ┌────────────▼─────────────────┐│         (api_server_count is
+   │  │ OmniEngineArgs(**args_dict)  ││          CLI-only, never reaches
+   │  └────────────┬─────────────────┘│          engine_args)
    │               │                  │
-   │  ┌────────────▼─────────────────┐│  ◄── NEW (§4.3)
-   │  │ _enforce_omni_parallel_      ││      • Reject user-set fields
-   │  │  config(stage_cfg, args_dict)││        vllm-omni owns
-   │  └────────────┬─────────────────┘│      • Reject ext/hybrid LB,
-   │               │                  │        elastic EP, ray backend
-   │  ┌────────────▼─────────────────┐│      • Reject device-count
-   │  │ OmniEngineArgs(**args_dict)  ││        non-divisible
-   │  └────────────┬─────────────────┘│      • Force-set ONLY
-   │               │                  │        data_parallel_size
-   │  ┌────────────▼─────────────────┐│        (api_server_count is
-   │  │ .create_engine_config()      ││         CLI-only, never reaches
-   │  │  → VllmConfig.parallel_config││         engine_args)
+   │  ┌────────────▼─────────────────┐│
+   │  │ .create_engine_config()      ││  ◄── vLLM does its own
+   │  │  → VllmConfig.parallel_config││      validation here
    │  │  → ParallelConfig.__post_init│ │
-   │  │    (auto-allocs DP master    │ │  ◄── vLLM does its own
-   │  │     port, applies EP rules)  │ │      validation here
+   │  │    (auto-allocs DP master    │ │
+   │  │     port, applies EP rules)  │ │
    │  └────────────┬─────────────────┘ │
    └───────────────┼──────────────────┘
                    │
@@ -242,12 +258,18 @@ The combined consequence: **no new files**, ~6 small file touches, ~150-250 LoC 
    └──────────────────────────────────┘
 ```
 
-The validator is **one hook in one place** — between
-`filter_dataclass_kwargs` and `OmniEngineArgs(**args_dict)`. It mutates
-`engine_args_dict` in-place (rejects forbidden FLAT fields, force-sets
-the single value vLLM defaults don't cover),
-then lets the standard `EngineArgs` → `ParallelConfig` path do the rest.
-No changes downstream of that point.
+The validator is **one hook in one place** — **before**
+`filter_dataclass_kwargs` so it can see the raw user-supplied dict.
+Two fields it rejects (`data_parallel_master_port`,
+`data_parallel_rank_local`) live only on vLLM's `ParallelConfig`, not
+on `EngineArgs`, so they'd be silently stripped by the filter if the
+validator ran later. Same reason for the LLM-side nested
+`parallel_config:` reject: the filter would drop the whole block and
+the user's settings would silently disappear. The validator mutates
+`engine_args_dict` in-place (rejects forbidden fields, force-sets the
+single value vLLM defaults don't cover), then `filter_dataclass_kwargs`
+drops anything not in `OmniEngineArgs`, then the standard
+`EngineArgs` → `ParallelConfig` path runs unchanged.
 
 ### 3.1 CLI flags accepted under `--omni`
 
@@ -945,16 +967,72 @@ through the parser's action table to find its real `dest`, correctly
 handling alias flags (`--omni-num-replica` and `--omni-dp-size-local`
 share the same dest) and `--no-foo` boolean-optional patterns.
 
+### 10.4 Post-review bugs (validator order)
+
+A second review pass after the integration smoke surfaced two related
+issues with the validator's call site. Both stem from the same root
+cause: the validator was being invoked *after*
+`filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)`.
+
+**Issue A — two `must_omit` checks were dead code.**
+`OmniEngineArgs` (subclass of vLLM's `EngineArgs`) is a flat dataclass.
+A check against EngineArgs' field set on the test server confirmed:
+
+```
+data_parallel_address:        in EngineArgs = True
+data_parallel_rpc_port:       in EngineArgs = True
+data_parallel_master_port:    in EngineArgs = False   ← only on ParallelConfig
+data_parallel_rank:           in EngineArgs = True
+data_parallel_rank_local:     in EngineArgs = False   ← only on ParallelConfig
+```
+
+`filter_dataclass_kwargs(OmniEngineArgs, ...)` strips any key that
+isn't an `OmniEngineArgs`/`EngineArgs` field. So if a user set
+`data_parallel_master_port` or `data_parallel_rank_local` in the YAML,
+the filter would drop it *before* the validator could see it — the
+"is not user-settable" error for those two fields never fired.
+
+**Issue B — nested `parallel_config:` on an LLM stage silently lost
+its contents.** A user who copies the DiT YAML shape onto an LLM stage:
+
+```yaml
+engine_args:
+  parallel_config:                  # DiT-only shape
+    tensor_parallel_size: 2
+    data_parallel_size_local: 2
+```
+
+would have the entire `parallel_config` key stripped by
+`filter_dataclass_kwargs` (because `OmniEngineArgs` has no
+`parallel_config` field). All the parallelism settings under it just
+disappear, the stage runs with vLLM defaults (TP=1, no DP), and no
+error fires.
+
+**Fix.** Move the validator call to *before* `filter_dataclass_kwargs`
+so it operates on the raw user-supplied `engine_args_dict`. Add an
+explicit LLM-only reject for `parallel_config` keys so the "wrong
+schema for stage type" case produces a clear error pointing at the
+flat shape. CLI prohibition error message also reworded to mention
+both shapes: "flat fields under `stages[]` for LLM stages, or
+`engine_args.parallel_config:` for DiT stages."
+
 ### Test coverage added for these bugs
 
-- `tests/engine/test_parallel_config_validator.py` now uses a FLAT
-  schema and includes
-  `test_validator_only_writes_data_parallel_size` — a regression
-  guard that asserts the validator does **not** add unexpected keys
-  like `parallel_config` or `api_server_count` to `engine_args_dict`
-  (which would break `OmniEngineArgs(**dict)` downstream).
+- `tests/engine/test_parallel_config_validator.py`:
+  - Uses a FLAT schema.
+  - `test_validator_only_writes_data_parallel_size` — regression guard
+    asserting the validator does **not** add unexpected keys (like
+    `parallel_config` or `api_server_count`) to `engine_args_dict`,
+    which would break `OmniEngineArgs(**dict)` downstream.
+  - `test_rejects_nested_parallel_config_on_llm_stage` — issue B
+    above (rejects DiT-shaped YAML on an LLM stage with a clear error).
+  - `test_accepts_none_parallel_config_on_llm_stage` — boundary case
+    where the user explicitly writes `parallel_config: null` on an
+    LLM stage; must not raise.
+  - The previously-dead `must_omit` cases for `data_parallel_master_port`
+    and `data_parallel_rank_local` are now exercised — issue A above.
 - Parser-level smoke (run manually, not in pytest because it requires
-  GPU env activation) confirms each prohibited flag now fires the
+  GPU env activation) confirms each prohibited flag fires the
   ValueError end-to-end, and that the `--omni-dp-size-local` alias
   emits its deprecation warning.
 
