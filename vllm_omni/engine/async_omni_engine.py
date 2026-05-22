@@ -309,11 +309,17 @@ class AsyncOmniEngine:
         self._omni_master_server: OmniMasterServer | None = None
 
         # New omni-coordinator flags. Consumed only in single_stage_mode.
-        # ``omni_dp_size_local`` is process-local: each invocation (head and
+        # ``omni_num_replica`` is process-local: each invocation (head and
         # every headless) launches that many replicas for its own stage.
-        self._omni_dp_size_local: int = int(kwargs.get("omni_dp_size_local") or 1)
-        if self._omni_dp_size_local < 1:
-            raise ValueError(f"--omni-dp-size-local must be >= 1, got {self._omni_dp_size_local}")
+        # Accept the deprecated ``omni_dp_size_local`` kwarg from
+        # programmatic callers that still use the pre-rename name.
+        self._omni_num_replica: int = int(
+            kwargs.get("omni_num_replica")
+            or kwargs.get("omni_dp_size_local")  # deprecated alias
+            or 1
+        )
+        if self._omni_num_replica < 1:
+            raise ValueError(f"--omni-num-replica must be >= 1, got {self._omni_num_replica}")
         self._omni_lb_policy: str = str(kwargs.get("omni_lb_policy") or "random")
         self._omni_heartbeat_timeout: float = float(kwargs.get("omni_heartbeat_timeout") or 30.0)
         if self._omni_heartbeat_timeout <= 0:
@@ -472,12 +478,12 @@ class AsyncOmniEngine:
                 )
 
     def _validate_single_stage_mode_replica_constraints(self) -> None:
-        """Apply --omni-dp-size-local to the local stage's runtime.num_replicas.
+        """Apply --omni-num-replica to the local stage's runtime.num_replicas.
 
         In the previous revision this method rejected LLM stages with
-        ``num_replicas > 1``. The whole point of ``--omni-dp-size-local`` is
+        ``num_replicas > 1``. The whole point of ``--omni-num-replica`` is
         to lift that restriction for the *local* stage, so the rejection is
-        gone. We now use this hook to write ``--omni-dp-size-local`` onto
+        gone. We now use this hook to write ``--omni-num-replica`` onto
         the self-stage's runtime config so downstream code
         (``compute_replica_layout`` → ``_build_logical_stage_init_plans``)
         sees a consistent view.
@@ -494,12 +500,12 @@ class AsyncOmniEngine:
             if runtime_cfg is None:
                 continue
             if stage_id == target_stage_id:
-                # Self stage: take --omni-dp-size-local from this process.
+                # Self stage: take --omni-num-replica from this process.
                 try:
-                    runtime_cfg.num_replicas = self._omni_dp_size_local
+                    runtime_cfg.num_replicas = self._omni_num_replica
                 except Exception:
                     if hasattr(runtime_cfg, "__setitem__"):
-                        runtime_cfg["num_replicas"] = self._omni_dp_size_local
+                        runtime_cfg["num_replicas"] = self._omni_num_replica
             # Other stages keep their config-declared num_replicas; in
             # head-distributed mode they will be launched as ``launch_mode
             # == "remote"`` with the configured count.

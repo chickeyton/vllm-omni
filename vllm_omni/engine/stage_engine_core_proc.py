@@ -99,10 +99,14 @@ class StageEngineCoreProc(EngineCoreProc):
                 **kwargs,
             )
 
-            # Each subprocess corresponds to exactly one omni replica with
-            # its own OmniMasterServer allocation, so the heartbeat client
-            # runs unconditionally — there is no dp_rank-based gating.
-            if omni_coordinator_address is not None:
+            # DP ranks share one omni replica slot — only rank 0 reports to
+            # OmniCoordinator. With data_parallel_size_local > 1 every DP rank
+            # would otherwise insert its own entry in OmniCoordinator's
+            # ReplicaList, conflicting with the StagePool LB which expects
+            # one entry per omni replica. The inner DPLBAsyncMPClient handles
+            # DP-rank-level LB inside the replica; the outer StagePool LB
+            # only needs one queue-length signal per replica.
+            if omni_coordinator_address is not None and local_dp_rank == 0:
                 if omni_stage_id is None:
                     raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
                 addresses: EngineZmqAddresses = engine_core.addresses
@@ -119,7 +123,14 @@ class StageEngineCoreProc(EngineCoreProc):
                 )
 
                 def _refresh_queue_length() -> None:
-                    """Pre-heartbeat hook: refresh queue_length from scheduler."""
+                    """Pre-heartbeat hook: refresh queue_length from scheduler.
+
+                    Reports rank-0's own scheduler queue. Acceptable proxy
+                    because the inner DPLBAsyncMPClient already balances across
+                    inner DP ranks (so per-rank queues are roughly equal within
+                    a small constant), and the outer StagePool LB only needs
+                    relative values across replicas.
+                    """
                     scheduler = getattr(engine_core, "scheduler", None)
                     if scheduler is None:
                         return

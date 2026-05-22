@@ -111,10 +111,13 @@ class OmniCoreEngineProcManager(CoreEngineProcManager):
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
-            # Each spawned subprocess is one omni replica. The replica id
-            # is contiguous within this manager; the master server may have
-            # pre-allocated a contiguous block starting at ``omni_replica_base_id``.
-            omni_replica_id = omni_replica_base_id + index
+            # All DP-rank subprocesses spawned by one manager invocation share
+            # the SAME omni_replica_id — one OmniMasterServer registration =
+            # one omni replica slot, regardless of the inner DP fan-out. The
+            # old ``omni_replica_base_id + index`` produced ids beyond what
+            # OmniMasterServer auto-assigned when data_parallel_size_local > 1
+            # and caused OmniCoordinator to see N×DP entries per replica.
+            omni_replica_id = omni_replica_base_id
 
             local_dp_ranks.append(local_index)
             self.processes.append(

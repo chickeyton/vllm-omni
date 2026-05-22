@@ -497,7 +497,7 @@ def split_devices_for_replicas(
        ``split_devices_for_replicas("0,1", 4, 2, 1) → ["0,1", "2,3", "4,5", "6,7"]``
 
        This lets the same ``devices: "0,1"`` YAML work for any
-       ``--omni-dp-size-local``: the launcher's CVD scales, the YAML
+       ``--omni-num-replica``: the launcher's CVD scales, the YAML
        does not.
 
     Any other length raises ``ValueError`` (the two modes are
@@ -540,10 +540,134 @@ def get_stage_tp_size(stage_cfg: Any) -> int:
     return int(getattr(engine_args, "tensor_parallel_size", 1) or 1)
 
 
+def _resolve_devices_str(stage_cfg: Any) -> str | None:
+    """Return the YAML's ``devices:`` string for *stage_cfg*, or None."""
+    runtime_cfg = getattr(stage_cfg, "runtime", None)
+    if runtime_cfg is not None:
+        d = runtime_cfg.get("devices") if hasattr(runtime_cfg, "get") else getattr(runtime_cfg, "devices", None)
+        if d:
+            return d
+    return getattr(stage_cfg, "devices", None)
+
+
+def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, Any]) -> None:
+    """Validate and finalize ``parallel_config`` for ``--omni`` mode.
+
+    Rejects YAML values for fields vllm-omni owns and force-sets the two
+    values vLLM defaults don't cover (``data_parallel_size`` and
+    ``api_server_count``). Mutates ``engine_args_dict["parallel_config"]``
+    in place. The DiT branch is a soft-pass because
+    ``DiffusionParallelConfig`` has none of the conflicting fields.
+
+    Called from :func:`build_vllm_config` just before instantiating
+    ``OmniEngineArgs``.
+    """
+    if getattr(stage_cfg, "stage_type", "llm") == "diffusion":
+        return
+    pc = engine_args_dict.get("parallel_config")
+    if pc is None:
+        # Initialize a parallel_config dict so we can force-set the two values
+        # below — vLLM's ParallelConfig default for api_server_count is None,
+        # which serve.py:734 normalizes to 0 in the headless path but the head
+        # path leaves untouched.
+        pc = {}
+        engine_args_dict["parallel_config"] = pc
+    if not isinstance(pc, dict):
+        # Non-dict (e.g., dataclass) parallel_config is treated as opaque —
+        # nothing to validate.
+        return
+
+    sid = stage_cfg.stage_id
+
+    # Fields vllm-omni / vLLM own; user must not set them.
+    must_omit = {
+        "data_parallel_address":     "vllm-omni / vLLM auto-assigns the DP master address",
+        "data_parallel_rpc_port":    "vllm-omni / vLLM auto-assigns the DP RPC port",
+        "data_parallel_master_port": "vllm-omni / vLLM auto-assigns the DP master port",
+        "data_parallel_rank":        "each replica is its own DP world; rank is always 0",
+        "data_parallel_rank_local":  "each replica is its own DP world; local rank is always 0",
+        "api_server_count":          "vllm-omni owns the HTTP API server; vLLM never starts one",
+    }
+    for field, why in must_omit.items():
+        if field in pc:
+            raise ValueError(
+                f"stage {sid}: parallel_config.{field} is not user-settable "
+                f"under --omni ({why}). Remove the field from the YAML."
+            )
+
+    # Equality-or-absent: data_parallel_size must match data_parallel_size_local.
+    dp_local = int(pc.get("data_parallel_size_local") or 1)
+    if "data_parallel_size" in pc and int(pc["data_parallel_size"]) != dp_local:
+        raise ValueError(
+            f"stage {sid}: parallel_config.data_parallel_size "
+            f"({pc['data_parallel_size']}) must equal data_parallel_size_local "
+            f"({dp_local}). vllm-omni does not support cross-replica DP."
+        )
+
+    # Boolean-must-be-False.
+    for field, hint in {
+        "data_parallel_external_lb": "the outer LB is vllm-omni's StagePool",
+        "data_parallel_hybrid_lb":   "the outer LB is vllm-omni's StagePool",
+        "enable_elastic_ep": (
+            "Ray-only feature; structurally incompatible with the omni replica "
+            "model. vllm-omni provides equivalent capability at the replica level "
+            "via OmniCoordinator dynamic attach."
+        ),
+    }.items():
+        if pc.get(field):
+            raise ValueError(
+                f"stage {sid}: parallel_config.{field}=True is not supported ({hint})."
+            )
+
+    # String-must-be-mp.
+    backend = pc.get("data_parallel_backend", "mp")
+    if backend != "mp":
+        raise ValueError(
+            f"stage {sid}: parallel_config.data_parallel_backend must be 'mp' "
+            f"(got {backend!r}); the Ray DP backend is not supported under --omni."
+        )
+
+    # EPLB sanity — vLLM's own error message is less specific than this one.
+    tp = int(pc.get("tensor_parallel_size", 1) or 1)
+    if pc.get("enable_eplb") and dp_local * tp <= 1:
+        raise ValueError(
+            f"stage {sid}: enable_eplb requires data_parallel_size_local × "
+            f"tensor_parallel_size > 1 (got {dp_local} × {tp})."
+        )
+
+    # Device-count product check (LLM only; DiT validates via DiffusionParallelConfig.world_size).
+    pp  = int(pc.get("pipeline_parallel_size", 1) or 1)
+    pcp = int(pc.get("prefill_context_parallel_size", 1) or 1)
+    per_replica = tp * pp * pcp * dp_local
+    devices_str = _resolve_devices_str(stage_cfg)
+    if devices_str:
+        n = len([d for d in devices_str.split(",") if d.strip()])
+        if n % per_replica != 0:
+            raise ValueError(
+                f"stage {sid}: len(devices)={n} is not divisible by per-replica "
+                f"device count tp×pp×pcp×dp_local={per_replica}."
+            )
+
+    # Minimal force-set: everything else is already correct via vLLM defaults.
+    pc["data_parallel_size"] = dp_local
+    pc["api_server_count"] = 0
+
+
 def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     """Return the number of devices consumed by one replica of *stage_cfg*."""
     if getattr(stage_cfg, "stage_type", "llm") != "diffusion":
-        return get_stage_tp_size(stage_cfg)
+        ea = getattr(stage_cfg, "engine_args", {})
+        pc = _get_attr_or_item(ea, "parallel_config") or {}
+        tp  = int(
+            _get_attr_or_item(pc, "tensor_parallel_size", None)
+            or _get_attr_or_item(ea, "tensor_parallel_size", 1)
+            or 1
+        )
+        pp  = int(_get_attr_or_item(pc, "pipeline_parallel_size", 1) or 1)
+        pcp = int(_get_attr_or_item(pc, "prefill_context_parallel_size", 1) or 1)
+        dp  = int(_get_attr_or_item(pc, "data_parallel_size_local", 1) or 1)
+        # DCP reuses TP devices (vllm/config/parallel.py:469-473), not multiplied.
+        return tp * pp * pcp * dp
 
     parallel_config = _get_attr_or_item(getattr(stage_cfg, "engine_args", {}), "parallel_config")
     if parallel_config is None:
@@ -715,6 +839,13 @@ def build_vllm_config(
         )
 
     filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
+
+    # Enforce omni's intra-replica parallelism contract: reject YAML values
+    # for fields vllm-omni / vLLM own, force-set the two values vLLM defaults
+    # don't cover (data_parallel_size = data_parallel_size_local;
+    # api_server_count = 0). DiT stages early-return; their
+    # DiffusionParallelConfig has none of the conflicting fields.
+    _enforce_omni_parallel_config(stage_config, filtered_engine_args_dict)
 
     # _to_dict serializes dataclass fields (e.g. StructuredOutputsConfig) into
     # plain dicts.  When OmniEngineArgs is instantiated with the dict, these
