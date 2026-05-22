@@ -551,30 +551,24 @@ def _resolve_devices_str(stage_cfg: Any) -> str | None:
 
 
 def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, Any]) -> None:
-    """Validate and finalize ``parallel_config`` for ``--omni`` mode.
+    """Validate and finalize parallelism config for ``--omni`` mode.
 
-    Rejects YAML values for fields vllm-omni owns and force-sets the two
-    values vLLM defaults don't cover (``data_parallel_size`` and
-    ``api_server_count``). Mutates ``engine_args_dict["parallel_config"]``
-    in place. The DiT branch is a soft-pass because
-    ``DiffusionParallelConfig`` has none of the conflicting fields.
+    For LLM stages the relevant fields live FLAT in ``engine_args_dict``
+    (e.g. ``tensor_parallel_size``, ``data_parallel_size_local``) — vLLM's
+    ``EngineArgs`` is flat, not nested under a ``parallel_config:`` key.
 
-    Called from :func:`build_vllm_config` just before instantiating
-    ``OmniEngineArgs``.
+    Rejects YAML values for fields vllm-omni / vLLM own and force-sets
+    the one value vLLM defaults don't cover (``data_parallel_size``
+    equal to ``data_parallel_size_local``). ``api_server_count`` is
+    CLI-only on the argparse Namespace; it never reaches engine_args, so
+    we don't touch it here.
+
+    Mutates ``engine_args_dict`` in place. DiT stages early-return —
+    their ``DiffusionParallelConfig`` is a nested dict under
+    ``engine_args_dict["parallel_config"]`` with a different schema and
+    none of the LLM-DP fields.
     """
     if getattr(stage_cfg, "stage_type", "llm") == "diffusion":
-        return
-    pc = engine_args_dict.get("parallel_config")
-    if pc is None:
-        # Initialize a parallel_config dict so we can force-set the two values
-        # below — vLLM's ParallelConfig default for api_server_count is None,
-        # which serve.py:734 normalizes to 0 in the headless path but the head
-        # path leaves untouched.
-        pc = {}
-        engine_args_dict["parallel_config"] = pc
-    if not isinstance(pc, dict):
-        # Non-dict (e.g., dataclass) parallel_config is treated as opaque —
-        # nothing to validate.
         return
 
     sid = stage_cfg.stage_id
@@ -586,22 +580,26 @@ def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, An
         "data_parallel_master_port": "vllm-omni / vLLM auto-assigns the DP master port",
         "data_parallel_rank":        "each replica is its own DP world; rank is always 0",
         "data_parallel_rank_local":  "each replica is its own DP world; local rank is always 0",
-        "api_server_count":          "vllm-omni owns the HTTP API server; vLLM never starts one",
     }
     for field, why in must_omit.items():
-        if field in pc:
+        if field in engine_args_dict:
             raise ValueError(
-                f"stage {sid}: parallel_config.{field} is not user-settable "
+                f"stage {sid}: engine_args.{field} is not user-settable "
                 f"under --omni ({why}). Remove the field from the YAML."
             )
 
     # Equality-or-absent: data_parallel_size must match data_parallel_size_local.
-    dp_local = int(pc.get("data_parallel_size_local") or 1)
-    if "data_parallel_size" in pc and int(pc["data_parallel_size"]) != dp_local:
+    dp_local = int(engine_args_dict.get("data_parallel_size_local") or 1)
+    if (
+        "data_parallel_size" in engine_args_dict
+        and engine_args_dict["data_parallel_size"] is not None
+        and int(engine_args_dict["data_parallel_size"]) != dp_local
+    ):
         raise ValueError(
-            f"stage {sid}: parallel_config.data_parallel_size "
-            f"({pc['data_parallel_size']}) must equal data_parallel_size_local "
-            f"({dp_local}). vllm-omni does not support cross-replica DP."
+            f"stage {sid}: engine_args.data_parallel_size "
+            f"({engine_args_dict['data_parallel_size']}) must equal "
+            f"data_parallel_size_local ({dp_local}). vllm-omni does not "
+            f"support cross-replica DP."
         )
 
     # Boolean-must-be-False.
@@ -614,30 +612,30 @@ def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, An
             "via OmniCoordinator dynamic attach."
         ),
     }.items():
-        if pc.get(field):
+        if engine_args_dict.get(field):
             raise ValueError(
-                f"stage {sid}: parallel_config.{field}=True is not supported ({hint})."
+                f"stage {sid}: engine_args.{field}=True is not supported ({hint})."
             )
 
     # String-must-be-mp.
-    backend = pc.get("data_parallel_backend", "mp")
+    backend = engine_args_dict.get("data_parallel_backend", "mp")
     if backend != "mp":
         raise ValueError(
-            f"stage {sid}: parallel_config.data_parallel_backend must be 'mp' "
+            f"stage {sid}: engine_args.data_parallel_backend must be 'mp' "
             f"(got {backend!r}); the Ray DP backend is not supported under --omni."
         )
 
     # EPLB sanity — vLLM's own error message is less specific than this one.
-    tp = int(pc.get("tensor_parallel_size", 1) or 1)
-    if pc.get("enable_eplb") and dp_local * tp <= 1:
+    tp = int(engine_args_dict.get("tensor_parallel_size") or 1)
+    if engine_args_dict.get("enable_eplb") and dp_local * tp <= 1:
         raise ValueError(
             f"stage {sid}: enable_eplb requires data_parallel_size_local × "
             f"tensor_parallel_size > 1 (got {dp_local} × {tp})."
         )
 
-    # Device-count product check (LLM only; DiT validates via DiffusionParallelConfig.world_size).
-    pp  = int(pc.get("pipeline_parallel_size", 1) or 1)
-    pcp = int(pc.get("prefill_context_parallel_size", 1) or 1)
+    # Device-count product check.
+    pp  = int(engine_args_dict.get("pipeline_parallel_size") or 1)
+    pcp = int(engine_args_dict.get("prefill_context_parallel_size") or 1)
     per_replica = tp * pp * pcp * dp_local
     devices_str = _resolve_devices_str(stage_cfg)
     if devices_str:
@@ -648,9 +646,10 @@ def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, An
                 f"device count tp×pp×pcp×dp_local={per_replica}."
             )
 
-    # Minimal force-set: everything else is already correct via vLLM defaults.
-    pc["data_parallel_size"] = dp_local
-    pc["api_server_count"] = 0
+    # Minimal force-set: data_parallel_size must equal data_parallel_size_local
+    # so each replica is its own DP world. Everything else is already correct
+    # via vLLM defaults (mp backend, internal LB, no elastic EP, rank 0).
+    engine_args_dict["data_parallel_size"] = dp_local
 
 
 def get_stage_devices_per_replica(stage_cfg: Any) -> int:
