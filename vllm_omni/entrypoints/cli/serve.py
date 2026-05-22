@@ -188,9 +188,11 @@ class OmniServeCommand(CLISubcommand):
                 raise ValueError(
                     "The following CLI args are not supported under --omni: "
                     f"{', '.join(offenders)}. Configure intra-replica parallelism "
-                    "in the deploy YAML (--deploy-config) under "
-                    "`stages[].engine_args.parallel_config:`. The only CLI knob "
-                    "for replica scaling is --omni-num-replica."
+                    "in the deploy YAML (--deploy-config): flat fields under "
+                    "`stages[]` for LLM stages (e.g. `tensor_parallel_size`, "
+                    "`data_parallel_size_local`, `enable_expert_parallel`), or "
+                    "`engine_args.parallel_config:` for DiT stages. The only "
+                    "CLI knob for replica scaling is --omni-num-replica."
                 )
 
         # --omni-lb-policy is validated against the LoadBalancingPolicy enum.

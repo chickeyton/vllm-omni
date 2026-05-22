@@ -573,7 +573,25 @@ def _enforce_omni_parallel_config(stage_cfg: Any, engine_args_dict: dict[str, An
 
     sid = stage_cfg.stage_id
 
-    # Fields vllm-omni / vLLM own; user must not set them.
+    # Reject the DiT-style nested ``parallel_config:`` block on an LLM
+    # stage. vLLM's ``EngineArgs`` is a flat dataclass, so a nested
+    # ``parallel_config:`` would be silently filtered out by
+    # ``filter_dataclass_kwargs`` later — the user's settings would
+    # disappear and the stage would run with vLLM defaults. Catch this
+    # at validation time so the operator gets a clear error instead.
+    if "parallel_config" in engine_args_dict and engine_args_dict["parallel_config"] is not None:
+        raise ValueError(
+            f"stage {sid}: nested `parallel_config:` block is for DiT stages "
+            f"only. For LLM stages, place parallelism fields directly under "
+            f"`stages[]` (e.g. `tensor_parallel_size: 2`, "
+            f"`data_parallel_size_local: 2`, `enable_expert_parallel: true`)."
+        )
+
+    # Fields vllm-omni / vLLM own; user must not set them. Some of these
+    # exist only on ``ParallelConfig`` (not ``EngineArgs``) and would be
+    # silently stripped by ``filter_dataclass_kwargs`` if the validator
+    # ran after it — that's why this function is called against the RAW
+    # ``engine_args_dict`` before filtering.
     must_omit = {
         "data_parallel_address":     "vllm-omni / vLLM auto-assigns the DP master address",
         "data_parallel_rpc_port":    "vllm-omni / vLLM auto-assigns the DP RPC port",
@@ -837,14 +855,20 @@ def build_vllm_config(
             stage_connector_spec=stage_connector_spec,
         )
 
-    filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
+    # Enforce omni's intra-replica parallelism contract on the RAW
+    # ``engine_args_dict`` (i.e. before filter_dataclass_kwargs). Two
+    # of the rejected fields (``data_parallel_master_port``,
+    # ``data_parallel_rank_local``) live only on ``ParallelConfig`` —
+    # not ``EngineArgs`` — so they would be silently stripped by the
+    # filter and bypass the validator if we ran it later. Same reason
+    # for the DiT-style nested ``parallel_config:`` reject (the filter
+    # would strip the key, and the user's settings would silently
+    # disappear). LLM stages mutate the dict in-place to force-set
+    # ``data_parallel_size = data_parallel_size_local``; DiT stages
+    # early-return.
+    _enforce_omni_parallel_config(stage_config, engine_args_dict)
 
-    # Enforce omni's intra-replica parallelism contract: reject YAML values
-    # for fields vllm-omni / vLLM own, force-set the two values vLLM defaults
-    # don't cover (data_parallel_size = data_parallel_size_local;
-    # api_server_count = 0). DiT stages early-return; their
-    # DiffusionParallelConfig has none of the conflicting fields.
-    _enforce_omni_parallel_config(stage_config, filtered_engine_args_dict)
+    filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
 
     # _to_dict serializes dataclass fields (e.g. StructuredOutputsConfig) into
     # plain dicts.  When OmniEngineArgs is instantiated with the dict, these

@@ -36,6 +36,37 @@ def _make_dit_stage() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
+# Reject nested ``parallel_config:`` on LLM stages (DiT-only shape)
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_nested_parallel_config_on_llm_stage() -> None:
+    """A user who copies the DiT YAML shape onto an LLM stage gets a clear
+    error. Without the validator catch, ``filter_dataclass_kwargs`` would
+    silently strip the nested block and the stage would run with vLLM
+    defaults (TP=1, no DP, no EP) — the user's settings would just
+    disappear.
+    """
+    stage = _make_llm_stage()
+    args_dict = {
+        "parallel_config": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size_local": 2,
+        }
+    }
+    with pytest.raises(ValueError, match="nested `parallel_config:` block is for DiT"):
+        _enforce_omni_parallel_config(stage, args_dict)
+
+
+def test_accepts_none_parallel_config_on_llm_stage() -> None:
+    """``parallel_config: None`` on an LLM stage is a no-op (vLLM leaves
+    it to internal defaults); the validator must not reject it."""
+    stage = _make_llm_stage()
+    args_dict: dict[str, Any] = {"parallel_config": None}
+    _enforce_omni_parallel_config(stage, args_dict)
+
+
+# ---------------------------------------------------------------------------
 # Reject user-set "must omit" fields
 # ---------------------------------------------------------------------------
 
