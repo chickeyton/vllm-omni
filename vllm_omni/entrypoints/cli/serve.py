@@ -103,6 +103,15 @@ class OmniServeCommand(CLISubcommand):
             uvloop.run(omni_run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        # Populate ``args._cli_explicit_keys`` from sys.argv so the prohibited
+        # list and replica-id deprecation logic below can distinguish
+        # user-typed flags from argparse defaults. Stage-init utilities
+        # downstream (run_headless, _initialize_*) also rely on this attr.
+        if not hasattr(args, "_cli_explicit_keys"):
+            from vllm_omni.entrypoints.utils import detect_explicit_cli_keys
+
+            args._cli_explicit_keys = detect_explicit_cli_keys(sys.argv[1:], type(self)._parser)
+
         if args.stage_id is not None and (args.omni_master_address is None or args.omni_master_port is None):
             raise ValueError("--stage-id requires both --omni-master-address and --omni-master-port to be set")
 
