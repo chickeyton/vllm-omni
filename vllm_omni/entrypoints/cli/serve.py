@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
+from vllm_omni.engine.arg_utils import resolve_omni_num_replica
 from vllm_omni.entrypoints.cli.logo import log_logo
 from vllm_omni.entrypoints.openai.api_server import omni_run_server
 from vllm_omni.utils.tracking_parser import TrackingArgumentParser, TrackingNamespace
@@ -119,18 +120,29 @@ class OmniServeCommand(CLISubcommand):
         if getattr(args, "omni_replica_address", None) is not None and not args.headless:
             raise ValueError("--omni-replica-address requires --headless to be set")
 
-        # --omni-dp-size-local is process-local. A value other than 1 only
-        # makes sense when this process owns a stage (head or headless).
-        omni_dp_size_local = getattr(args, "omni_dp_size_local", None)
-        if omni_dp_size_local is not None:
-            if omni_dp_size_local < 1:
-                raise ValueError(f"--omni-dp-size-local must be >= 1, got {omni_dp_size_local}")
-            if omni_dp_size_local != 1 and args.stage_id is None:
-                raise ValueError("--omni-dp-size-local != 1 requires --stage-id to be set")
+        # --omni-num-replica replaces --omni-dp-size-local. Both flags
+        # register with distinct dests so we can tell which one the user
+        # typed; ``resolve_omni_num_replica`` enforces the conflict rule
+        # and emits the one-shot deprecation warning. After this point
+        # the canonical attribute is ``args.omni_num_replica``.
+        args.omni_num_replica = resolve_omni_num_replica(
+            new=getattr(args, "omni_num_replica", None),
+            legacy=getattr(args, "_omni_dp_size_local_alias", None),
+            label_new="--omni-num-replica",
+            label_legacy="--omni-dp-size-local",
+        )
+
+        # Process-local replica count. A value other than 1 only makes
+        # sense when this process owns a stage (head or headless).
+        omni_num_replica = args.omni_num_replica
+        if omni_num_replica < 1:
+            raise ValueError(f"--omni-num-replica must be >= 1, got {omni_num_replica}")
+        if omni_num_replica != 1 and args.stage_id is None:
+            raise ValueError("--omni-num-replica != 1 requires --stage-id to be set")
 
         # vLLM CLI args that omni does not honor: parallelism comes from the
         # per-stage YAML (parallel_config:, enable_expert_parallel:) and the
-        # process-local replica count from --omni-dp-size-local. Passing the
+        # process-local replica count from --omni-num-replica. Passing the
         # vLLM equivalents on the command line would silently disagree with
         # those sources of truth, so reject them at parse time.
         if getattr(args, "omni", False):
@@ -151,7 +163,7 @@ class OmniServeCommand(CLISubcommand):
                     "The following CLI args are not supported under --omni: "
                     f"{', '.join(offenders)}. Configure parallelism through the "
                     "per-stage YAML (`--deploy-config` / `--stage-configs-path`) "
-                    "and replica count via `--omni-dp-size-local`."
+                    "and replica count via `--omni-num-replica`."
                 )
 
         # --omni-lb-policy is validated against the LoadBalancingPolicy enum.
@@ -338,15 +350,24 @@ class OmniServeCommand(CLISubcommand):
             ),
         )
         omni_config_group.add_argument(
-            "--omni-dp-size-local",
+            "--omni-num-replica",
+            dest="omni_num_replica",
             type=int,
-            default=1,
+            default=None,  # sentinel: "not user-set"; merged to 1 in validate()
             help=(
                 "Number of stage replicas this runtime launches locally for its "
-                "own --stage-id. Process-local: head and every headless invocation "
-                "read their own copy; values may differ across invocations. "
-                "Requires --stage-id to be set when not equal to 1."
+                "own --stage-id. Replaces --omni-dp-size-local. Process-local: "
+                "head and every headless invocation read their own copy; values "
+                "may differ across invocations. Requires --stage-id to be set "
+                "when not equal to 1."
             ),
+        )
+        omni_config_group.add_argument(
+            "--omni-dp-size-local",
+            dest="_omni_dp_size_local_alias",
+            type=int,
+            default=None,
+            help="[Deprecated] Use --omni-num-replica. Will be removed in the next release.",
         )
         omni_config_group.add_argument(
             "--omni-lb-policy",
@@ -690,11 +711,11 @@ class OmniServeCommand(CLISubcommand):
 def run_headless(args: TrackingNamespace) -> None:
     """Run a single stage in headless mode.
 
-    Honors ``--omni-dp-size-local``: launches that many replicas locally for
-    ``--stage-id``. Each replica registers with the head's OmniMasterServer
-    (auto-assigned replica id when ``--omni-dp-size-local > 1`` so multiple
-    headless invocations can coexist) and reports heartbeats to the head's
-    OmniCoordinator.
+    Honors ``--omni-num-replica`` (deprecated alias: ``--omni-dp-size-local``):
+    launches that many replicas locally for ``--stage-id``. Each replica
+    registers with the head's OmniMasterServer (auto-assigned replica id
+    when ``--omni-num-replica > 1`` so multiple headless invocations can
+    coexist) and reports heartbeats to the head's OmniCoordinator.
     """
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -731,7 +752,16 @@ def run_headless(args: TrackingNamespace) -> None:
     worker_backend: str | None = args.worker_backend
     stage_configs_path: str | None = args.stage_configs_path
     omni_replica_address: str | None = getattr(args, "omni_replica_address", None)
-    omni_dp_size_local: int = max(1, int(getattr(args, "omni_dp_size_local", 1) or 1))
+    # ``args.omni_num_replica`` is set by ``OmniServeCommand.validate``
+    # after merging the deprecated alias. Programmatic callers that
+    # construct a raw argparse.Namespace and bypass validate() may still
+    # expose the old name; ``resolve_omni_num_replica`` handles both.
+    omni_num_replica: int = resolve_omni_num_replica(
+        new=getattr(args, "omni_num_replica", None),
+        legacy=getattr(args, "omni_dp_size_local", None),
+        label_new="omni_num_replica",
+        label_legacy="omni_dp_size_local",
+    )
 
     if not model:
         raise ValueError("Failed to pass model from kwargs")
@@ -780,7 +810,7 @@ def run_headless(args: TrackingNamespace) -> None:
     omni_transfer_config = load_omni_transfer_config_for_model(model, config_path)
     omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
 
-    # When ``--omni-dp-size-local > 1``, slice the YAML's ``devices:`` field
+    # When ``--omni-num-replica > 1``, slice the YAML's ``devices:`` field
     # into per-replica subsets so each subprocess we spawn below sees a
     # narrowed ``CUDA_VISIBLE_DEVICES`` and doesn't stack on cuda:0. Mirrors
     # the head-side per-replica device application at
@@ -794,23 +824,23 @@ def run_headless(args: TrackingNamespace) -> None:
     devices_per_replica = get_stage_devices_per_replica(stage_cfg)
     if devices_str:
         # Always remap YAML's logical devices through setup_stage_devices,
-        # even for omni_dp_size_local==1. The launcher's CUDA_VISIBLE_DEVICES
+        # even for omni_num_replica==1. The launcher's CUDA_VISIBLE_DEVICES
         # is dropped from the engine-subprocess env between vllm-serve and
         # OmniCoreEngineProcManager.Process, so the worker would otherwise
         # default cuda:0 to physical GPU 0 and collide with a co-located
         # head on the same host (see hyi3_multi_host_1 reproducer).
         per_replica_devices: list[str | None] = split_devices_for_replicas(
-            devices_str, omni_dp_size_local, devices_per_replica, stage_id
+            devices_str, omni_num_replica, devices_per_replica, stage_id
         )
         logger.info(
             "[Headless] Stage %d: %d local replicas, devices_per_replica=%d, per-replica devices: %s",
             stage_id,
-            omni_dp_size_local,
+            omni_num_replica,
             devices_per_replica,
             per_replica_devices,
         )
     else:
-        per_replica_devices = [None] * omni_dp_size_local
+        per_replica_devices = [None] * omni_num_replica
     device_control_env = current_omni_platform.device_control_env_var
 
     if stage_cfg.stage_type == "diffusion":
@@ -825,7 +855,7 @@ def run_headless(args: TrackingNamespace) -> None:
 
         logger.info(
             "[Headless] Launching %d diffusion replica(s) for stage %d via OmniMasterServer at %s:%d",
-            omni_dp_size_local,
+            omni_num_replica,
             stage_id,
             omni_master_address,
             omni_master_port,
@@ -833,7 +863,7 @@ def run_headless(args: TrackingNamespace) -> None:
 
         procs: list[Any] = []
         try:
-            for _rep_idx in range(omni_dp_size_local):
+            for _rep_idx in range(omni_num_replica):
                 # Always auto-assign: headless processes carry no knowledge
                 # of their per-replica id and the master server is the sole
                 # authority on the per-stage id namespace.
@@ -847,7 +877,7 @@ def run_headless(args: TrackingNamespace) -> None:
                     replica_bind_address=omni_replica_address,
                 )
                 # Apply this replica's CUDA_VISIBLE_DEVICES (only when
-                # ``--omni-dp-size-local > 1`` and the YAML's stage devices
+                # ``--omni-num-replica > 1`` and the YAML's stage devices
                 # field is set). The spawned subprocess inherits the env at
                 # spawn time; we restore the parent env afterwards so the
                 # next replica's setup sees the same baseline.
@@ -873,7 +903,7 @@ def run_headless(args: TrackingNamespace) -> None:
                     # above the Linux default ephemeral range
                     # (32768-60999) so torch.distributed master ports
                     # never overlap with ZMQ allocations.
-                    if omni_dp_size_local > 1:
+                    if omni_num_replica > 1:
                         od_config.master_port = od_config.settle_port(
                             61000 + _rep_idx * 100,
                             port_inc=37,
@@ -933,7 +963,7 @@ def run_headless(args: TrackingNamespace) -> None:
     )
 
     # ``runtime_cfg`` is mostly inherited from the parent's
-    # CUDA_VISIBLE_DEVICES; when ``--omni-dp-size-local > 1`` we additionally
+    # CUDA_VISIBLE_DEVICES; when ``--omni-num-replica > 1`` we additionally
     # bracket each replica's spawn below with setup_stage_devices so they
     # don't all stack on cuda:0 (see ``per_replica_devices`` above).
     engine_args_dict = build_engine_args_dict(
@@ -961,6 +991,10 @@ def run_headless(args: TrackingNamespace) -> None:
         stage_connector_spec=stage_connector_spec,
         engine_args_dict=engine_args_dict,
         headless=True,
+        # Headless: the per-runtime fan-out is the CLI --omni-num-replica,
+        # not the YAML stage_cfg.runtime.num_replicas (which is the head's
+        # full-pipeline knob). See _enforce_omni_parallel_config.
+        num_replicas_for_devices=omni_num_replica,
     )
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -1009,7 +1043,7 @@ def run_headless(args: TrackingNamespace) -> None:
     logger.info(
         "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) for stage %d "
         "via OmniMasterServer at %s:%d",
-        omni_dp_size_local,
+        omni_num_replica,
         local_engine_count,
         stage_id,
         omni_master_address,
@@ -1035,7 +1069,7 @@ def run_headless(args: TrackingNamespace) -> None:
             logger.exception("[Headless] monitor_engine_liveness raised")
 
     try:
-        for _rep_idx in range(omni_dp_size_local):
+        for _rep_idx in range(omni_num_replica):
             # Always auto-assign: see the diffusion branch comment above
             # for the rationale (headless owns no replica-id namespace).
             response = register_stage_with_omni_master(

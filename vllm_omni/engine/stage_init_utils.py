@@ -779,14 +779,153 @@ def build_engine_args_dict(
     return engine_args_dict
 
 
+_LLM_MASTER_OWNED_FIELDS: tuple[str, ...] = (
+    "data_parallel_address",
+    "data_parallel_rpc_port",
+    "data_parallel_master_port",
+    "data_parallel_rank",
+    "data_parallel_rank_local",
+    "data_parallel_size_local",
+)
+
+
+def _enforce_omni_parallel_config(
+    stage_cfg: Any,
+    engine_args_dict: dict[str, Any],
+    *,
+    num_replicas_for_devices: int,
+) -> None:
+    """Validate and normalize an LLM stage's parallel config in-place.
+
+    DiT stages early-return; the DiT runtime handles its own validation
+    in ``DiffusionParallelConfig``.
+
+    Must run in ``build_vllm_config`` BEFORE ``filter_dataclass_kwargs``
+    so that disallowed keys like a nested ``parallel_config:`` block on
+    an LLM stage are caught instead of being silently stripped.
+
+    ``num_replicas_for_devices`` is the per-runtime replica count used
+    by the devices-divisibility check. Resolved by the caller because
+    only the caller knows which launch mode is active (headless reads
+    ``args.omni_num_replica``; head-owned reads
+    ``stage_cfg.runtime.num_replicas``).
+    """
+    stage_type = getattr(stage_cfg, "stage_type", "llm")
+    sid = getattr(stage_cfg, "stage_id", "?")
+
+    if int(num_replicas_for_devices) < 1:
+        raise ValueError(
+            f"stage {sid}: num_replicas_for_devices must be >= 1, "
+            f"got {num_replicas_for_devices}"
+        )
+
+    # 1) DiT early-return.
+    if stage_type == "diffusion":
+        return
+
+    # 2) Reject nested ``parallel_config:`` on LLM stages.
+    nested = engine_args_dict.get("parallel_config")
+    if nested is not None:
+        raise ValueError(
+            f"stage {sid}: nested parallel_config: block is for DiT; "
+            f"use flat fields on LLM stages"
+        )
+
+    # 3) Reject master-owned fields.
+    for f in _LLM_MASTER_OWNED_FIELDS:
+        if engine_args_dict.get(f) is not None:
+            raise ValueError(
+                f"stage {sid}: engine_args.{f} is owned by vLLM/omni and "
+                f"must not be set in YAML or CLI"
+            )
+
+    # 4) Reject incompatible LB / EP flags.
+    for f in ("data_parallel_external_lb", "data_parallel_hybrid_lb", "enable_elastic_ep"):
+        if bool(engine_args_dict.get(f)):
+            raise ValueError(
+                f"stage {sid}: engine_args.{f}=True is incompatible with omni "
+                f"(would short-circuit one of the two LB layers or require Ray)"
+            )
+
+    # 5) Reject Ray DP backend (out of scope for PR 1; see RFC leftover).
+    dp_backend = engine_args_dict.get("data_parallel_backend")
+    if dp_backend is not None and dp_backend != "mp":
+        raise ValueError(
+            f"stage {sid}: data_parallel_backend must be 'mp' under omni, "
+            f"got {dp_backend!r}"
+        )
+
+    # 6) Reject api_server_count > 1 under omni.
+    api_server_count = engine_args_dict.get("api_server_count")
+    if api_server_count is not None and int(api_server_count) > 1:
+        raise ValueError(
+            f"stage {sid}: api_server_count > 1 is incompatible with omni "
+            f"(separate API-server pool breaks the outer LB)"
+        )
+
+    # 7) Normalize / positive-int check parallelism axes.
+    for f in ("tensor_parallel_size", "pipeline_parallel_size",
+              "prefill_context_parallel_size", "data_parallel_size"):
+        v = engine_args_dict.get(f)
+        if v is not None and int(v) < 1:
+            raise ValueError(
+                f"stage {sid}: {f} must be >= 1, got {v}"
+            )
+    if engine_args_dict.get("data_parallel_size") is None:
+        engine_args_dict["data_parallel_size"] = 1
+
+    # 8) EPLB world-size check.
+    if bool(engine_args_dict.get("enable_eplb")):
+        tp = int(engine_args_dict.get("tensor_parallel_size") or 1)
+        pcp = int(engine_args_dict.get("prefill_context_parallel_size") or 1)
+        dp = int(engine_args_dict.get("data_parallel_size") or 1)
+        if tp * pcp * dp <= 1:
+            raise ValueError(
+                f"stage {sid}: enable_eplb requires tp * pcp * dp > 1, "
+                f"got tp={tp}, pcp={pcp}, dp={dp}"
+            )
+
+    # 9) Device-count divisibility via split_devices_for_replicas. The
+    # function already enforces the template-or-pool contract and
+    # produces a stage-id-prefixed error with the accepted lengths
+    # spelled out; calling it here just runs the same check earlier.
+    runtime = getattr(stage_cfg, "runtime", None)
+    if runtime is not None:
+        devices_str = (
+            runtime.get("devices") if hasattr(runtime, "get")
+            else getattr(runtime, "devices", None)
+        )
+        if devices_str:
+            tp = int(engine_args_dict.get("tensor_parallel_size") or 1)
+            pp = int(engine_args_dict.get("pipeline_parallel_size") or 1)
+            pcp = int(engine_args_dict.get("prefill_context_parallel_size") or 1)
+            dp = int(engine_args_dict.get("data_parallel_size") or 1)
+            per_replica = tp * pp * pcp * dp
+            # ``split_devices_for_replicas`` raises ValueError with a
+            # stage-id-prefixed message on any mismatch; propagate as-is.
+            split_devices_for_replicas(
+                devices_str=devices_str,
+                num_replicas=int(num_replicas_for_devices),
+                tp_size=per_replica,
+                stage_id=int(sid) if isinstance(sid, int) else sid,
+            )
+
+
 def build_vllm_config(
     stage_config: Any,
     model: str,
     stage_connector_spec: dict[str, Any] | None = None,
     engine_args_dict: dict[str, Any] | None = None,
     headless: bool = False,
+    *,
+    num_replicas_for_devices: int = 1,
 ) -> tuple[Any, type]:
     """Build engine args, then create VllmConfig and executor_class.
+
+    ``num_replicas_for_devices`` is forwarded to
+    ``_enforce_omni_parallel_config`` for the devices-divisibility
+    check. The caller is responsible for resolving the correct value
+    (CLI vs YAML — see ``_enforce_omni_parallel_config``).
 
     Returns:
         (vllm_config, executor_class)
@@ -797,6 +936,15 @@ def build_vllm_config(
             model,
             stage_connector_spec=stage_connector_spec,
         )
+
+    # Validate / normalize parallel config BEFORE filter_dataclass_kwargs
+    # so disallowed keys (e.g. nested ``parallel_config:`` on an LLM
+    # stage) are caught instead of silently stripped.
+    _enforce_omni_parallel_config(
+        stage_config,
+        engine_args_dict,
+        num_replicas_for_devices=num_replicas_for_devices,
+    )
 
     filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
 

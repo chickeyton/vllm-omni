@@ -128,10 +128,15 @@ class StageEngineCoreProc(EngineCoreProc):
                 **kwargs,
             )
 
-            # Each subprocess corresponds to exactly one omni replica with
-            # its own OmniMasterServer allocation, so the heartbeat client
-            # runs unconditionally — there is no dp_rank-based gating.
-            if omni_coordinator_address is not None:
+            # Only DP rank 0 of each omni replica heartbeats. Inner-DP
+            # routing is DPLBAsyncMPClient's job; multiple coord clients
+            # per replica would multiply ReplicaList entries by ``dp``
+            # (it keys by input_addr). See docs/design/pr1-yaml-only.md §5.
+            should_open_coord_client = (
+                omni_coordinator_address is not None
+                and int(local_dp_rank) == 0
+            )
+            if should_open_coord_client:
                 if omni_stage_id is None:
                     raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
                 addresses: EngineZmqAddresses = engine_core.addresses

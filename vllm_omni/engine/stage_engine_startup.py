@@ -242,7 +242,7 @@ class OmniMasterServer:
         same-host headless that registers before the head's own
         ``register_stage_with_omni_master`` call would steal slot 0.
 
-        Without this, a headless contributor using ``--omni-dp-size-local > 1``
+        Without this, a headless contributor using ``--omni-num-replica > 1``
         (auto-assign mode) would skip past pre-allocated slot 0 and pick ids
         beyond ``num_replicas``, deadlocking the head's
         ``connect_remote_engine_cores`` wait.
