@@ -833,6 +833,7 @@ class AsyncOmniEngine:
         proc = None
         engine_manager = None
         coordinator = None
+        launch = None
         stage_client = None
         lock_fds: list[int] = []
         device_control_env = current_omni_platform.device_control_env_var
@@ -885,7 +886,6 @@ class AsyncOmniEngine:
                     coordinator=coordinator,
                 )
             else:
-                handshake_address = None
                 with ExitStack() as launch_stack:
                     with llm_stage_launch_lock:
                         previous_visible_devices = os.environ.get(device_control_env)
@@ -928,13 +928,17 @@ class AsyncOmniEngine:
                                         )
                                     )
                                 else:
-                                    addresses, proc, handshake_address = spawn_stage_core(
+                                    launch = spawn_stage_core(
                                         vllm_config=vllm_config,
                                         executor_class=executor_class,
                                         log_stats=self._log_stats,
                                         omni_stage_id=plan.metadata.stage_id,
                                         omni_replica_id=plan.replica_id,
                                     )
+                                    addresses = launch.addresses
+                                    proc = launch.proc
+                                    engine_manager = launch.engine_manager
+                                    coordinator = launch.coordinator
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s engine launch started",
                                     plan.metadata.stage_id,
@@ -948,9 +952,7 @@ class AsyncOmniEngine:
                     if self.single_stage_mode and self._omni_master_server is not None:
                         launch_stack.close()
                     else:
-                        assert proc is not None
-                        assert handshake_address is not None
-                        complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
+                        complete_stage_handshake(launch, vllm_config, stage_init_timeout)
                     logger.info(
                         "[AsyncOmniEngine] Stage %s engine startup completed",
                         plan.metadata.stage_id,
