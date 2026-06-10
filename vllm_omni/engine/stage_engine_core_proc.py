@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Any
 
@@ -26,12 +27,16 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.engine import EngineCoreRequestType
-from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.utils import (
+    CoreEngine,
+    CoreEngineProcManager,
     EngineHandshakeMetadata,
     EngineZmqAddresses,
     SignalCallback,
     get_engine_zmq_addresses,
+    wait_for_engine_startup,
 )
 from vllm.v1.utils import shutdown
 
@@ -122,11 +127,35 @@ class StageEngineCoreProc(EngineCoreProc):
             os.environ.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
             os.environ["VLLM_OMNI_REPLICA_ID"] = str(max(int(omni_replica_id), 0))
 
-            engine_core = StageEngineCoreProc(
-                *args,
-                engine_index=dp_rank,
-                **kwargs,
-            )
+            # Per-process DP wiring, mirroring
+            # ``vllm.v1.engine.core.EngineCoreProc.run_engine_core``: every
+            # engine-core proc must own a *distinct* DP rank. Without this each
+            # proc kept ``data_parallel_rank == 0`` and collided binding the DP
+            # rendezvous port (EADDRINUSE). ``StageEngineCoreProc`` adds no
+            # engine-behavior overrides over ``EngineCoreProc``, so the MoE-DP
+            # case can use ``DPEngineCoreProc`` directly to get wave/stat
+            # coordination — the stage I/O lives in the executor/connectors.
+            vllm_config = kwargs["vllm_config"]
+            parallel_config = vllm_config.parallel_config
+            data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
+            if data_parallel:
+                parallel_config.data_parallel_rank_local = local_dp_rank
+            parallel_config.data_parallel_index = dp_rank
+            if data_parallel and vllm_config.model_config.is_moe:
+                parallel_config.data_parallel_rank = dp_rank
+                engine_core = DPEngineCoreProc(*args, **kwargs)
+            else:
+                if data_parallel:
+                    # Non-MoE DP ranks are fully independent — treat like DP=1;
+                    # the outer DPLB client fans requests across the procs.
+                    parallel_config.data_parallel_size = 1
+                    parallel_config.data_parallel_size_local = 1
+                    parallel_config.data_parallel_rank = 0
+                engine_core = StageEngineCoreProc(
+                    *args,
+                    engine_index=dp_rank,
+                    **kwargs,
+                )
 
             # Only DP rank 0 of each omni replica heartbeats. Inner-DP
             # routing is DPLBAsyncMPClient's job; multiple coord clients
@@ -205,54 +234,173 @@ class StageEngineCoreProc(EngineCoreProc):
                 engine_core.shutdown()
 
 
+@dataclass
+class StageCoreLaunch:
+    """Handles for an in-process stage launch, returned by ``spawn_stage_core``.
+
+    ``proc`` is set for the single-engine (``data_parallel_size == 1``) path.
+    ``engine_manager`` / ``coordinator`` / ``engines_to_handshake`` are set for
+    the inner-vLLM-DP path (``data_parallel_size > 1``), which spawns one
+    engine-core process per local DP rank plus a DP coordinator.
+    """
+
+    addresses: EngineZmqAddresses
+    handshake_address: str
+    proc: BaseProcess | None = None
+    engine_manager: CoreEngineProcManager | None = None
+    coordinator: DPCoordinator | None = None
+    engines_to_handshake: list[CoreEngine] | None = None
+
+
 def spawn_stage_core(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool = False,
-) -> tuple[EngineZmqAddresses, BaseProcess, str]:
-    """Spawn a *StageEngineCoreProc* subprocess without performing the handshake.
+    *,
+    omni_stage_id: int | None = None,
+    omni_replica_id: int = 0,
+) -> StageCoreLaunch:
+    """Spawn the *StageEngineCoreProc* subprocess(es) without handshaking.
 
     Must be called while the correct device env vars are set (e.g. under
     the stage-launch lock).  Call ``complete_stage_handshake`` afterwards.
 
-    Returns ``(addresses, process, handshake_address)``.
+    For ``data_parallel_size == 1`` this spawns a single engine-core process
+    (the lightweight path). For ``data_parallel_size > 1`` it spawns one
+    engine-core process per *local* DP rank and (when the model needs it) a
+    :class:`DPCoordinator`, mirroring ``vllm.v1.engine.utils.launch_core_engines``
+    for the single-host internal-LB case but launching
+    :meth:`StageEngineCoreProc.run_stage_core`.
     """
+    parallel_config = vllm_config.parallel_config
+    dp_size = parallel_config.data_parallel_size
+
+    # ---- Single-engine path (unchanged): no inner vLLM DP. ----
+    if dp_size <= 1:
+        addresses = get_engine_zmq_addresses(vllm_config)
+        handshake_address = get_open_zmq_ipc_path()
+
+        ctx = get_mp_context()
+        proc = ctx.Process(
+            target=StageEngineCoreProc.run_stage_core,
+            name="StageEngineCoreProc",
+            kwargs={
+                "vllm_config": vllm_config,
+                "local_client": True,
+                "handshake_address": handshake_address,
+                "executor_class": executor_class,
+                "log_stats": log_stats,
+                "dp_rank": 0,
+                "local_dp_rank": 0,
+            },
+        )
+        proc.start()
+        return StageCoreLaunch(addresses=addresses, handshake_address=handshake_address, proc=proc)
+
+    # ---- Inner vLLM-DP path: one engine-core proc per local DP rank. ----
+    # Without this, a stage carrying ``data_parallel_size > 1`` in head mode
+    # spawned only DP rank 0; ranks 1..N never joined the TP x DP NCCL world
+    # and init blocked until the handshake timed out. See
+    # docs/design/pr1-test-report.md (S2 root cause).
+    from vllm_omni.engine.omni_core_engine_proc_manager import OmniCoreEngineProcManager
+
+    local_engine_count = (
+        parallel_config.data_parallel_size_local
+        if parallel_config.data_parallel_size_local is not None and parallel_config.data_parallel_size_local > 0
+        else max(1, dp_size)
+    )
+    # ``get_engine_zmq_addresses`` reads ``data_parallel_size_local`` to choose
+    # IPC vs TCP transport; on a single host every DP rank is local, so make
+    # the count explicit before allocating addresses.
+    parallel_config.data_parallel_size_local = local_engine_count
+    dp_rank = parallel_config.data_parallel_rank or 0
+
     addresses = get_engine_zmq_addresses(vllm_config)
+
+    # Internal-LB / MoE DP needs a coordinator for queue-stats load balancing
+    # and (for MoE) wave coordination. Rank 0 owns it.
+    coordinator: DPCoordinator | None = None
+    if vllm_config.needs_dp_coordinator and dp_rank == 0:
+        coordinator = DPCoordinator(
+            parallel_config,
+            enable_wave_coordination=vllm_config.model_config.is_moe,
+        )
+        addresses.coordinator_input, addresses.coordinator_output = coordinator.get_engine_socket_addresses()
+        addresses.frontend_stats_publish_address = coordinator.get_stats_publish_address()
+
     handshake_address = get_open_zmq_ipc_path()
 
-    ctx = get_mp_context()
-    proc = ctx.Process(
-        target=StageEngineCoreProc.run_stage_core,
-        name="StageEngineCoreProc",
-        kwargs={
-            "vllm_config": vllm_config,
-            "local_client": True,
-            "handshake_address": handshake_address,
-            "executor_class": executor_class,
-            "log_stats": log_stats,
-            "dp_rank": 0,
-            "local_dp_rank": 0,
-        },
+    engine_manager = OmniCoreEngineProcManager(
+        local_engine_count=local_engine_count,
+        start_index=dp_rank,
+        local_start_index=0,
+        vllm_config=vllm_config,
+        local_client=True,
+        handshake_address=handshake_address,
+        executor_class=executor_class,
+        log_stats=log_stats,
+        omni_stage_id=int(omni_stage_id) if omni_stage_id is not None else 0,
+        omni_coordinator_address=None,
+        omni_replica_base_id=omni_replica_id,
     )
-    proc.start()
-    return addresses, proc, handshake_address
+
+    engines_to_handshake = [CoreEngine(index=dp_rank + i, local=True) for i in range(local_engine_count)]
+
+    return StageCoreLaunch(
+        addresses=addresses,
+        handshake_address=handshake_address,
+        engine_manager=engine_manager,
+        coordinator=coordinator,
+        engines_to_handshake=engines_to_handshake,
+    )
 
 
 def complete_stage_handshake(
-    proc: BaseProcess,
-    handshake_address: str,
-    addresses: EngineZmqAddresses,
+    launch: StageCoreLaunch,
     vllm_config: VllmConfig,
     handshake_timeout: int,
 ) -> None:
-    """Perform the HELLO/INIT/READY handshake with an already-spawned proc.
+    """Perform the HELLO/INIT/READY handshake with the spawned engine(s).
 
-    On failure the process is terminated before re-raising.
+    On failure the spawned process(es) and coordinator are torn down before
+    re-raising.
     """
+    if launch.engine_manager is not None:
+        _complete_dp_handshake(launch, vllm_config)
+        return
+
+    assert launch.proc is not None
     try:
-        _perform_handshake(proc, handshake_address, addresses, vllm_config, handshake_timeout)
+        _perform_handshake(launch.proc, launch.handshake_address, launch.addresses, vllm_config, handshake_timeout)
     except Exception:
-        shutdown([proc])
+        shutdown([launch.proc])
+        raise
+
+
+def _complete_dp_handshake(launch: StageCoreLaunch, vllm_config: VllmConfig) -> None:
+    """Handshake every local DP-rank engine via vLLM's multi-engine waiter."""
+    parallel_config = vllm_config.parallel_config
+    coordinated_dp = parallel_config.data_parallel_size > 1 and vllm_config.model_config.is_moe
+    assert launch.engine_manager is not None
+    assert launch.engines_to_handshake is not None
+    try:
+        with zmq_socket_ctx(launch.handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
+            wait_for_engine_startup(
+                handshake_socket,
+                launch.addresses,
+                launch.engines_to_handshake,
+                parallel_config,
+                coordinated_dp,
+                vllm_config.cache_config,
+                launch.engine_manager,
+                launch.coordinator.proc if launch.coordinator else None,
+            )
+    except Exception:
+        with contextlib.suppress(Exception):
+            launch.engine_manager.shutdown()
+        if launch.coordinator is not None:
+            with contextlib.suppress(Exception):
+                launch.coordinator.close()
         raise
 
 
