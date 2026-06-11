@@ -759,10 +759,10 @@ class AsyncOmniEngine:
                 stage_id=stage_id,
                 replica_id=replica_id,
             ) as remote_resources:
-                _engine_manager, _coordinator, addresses, _ = remote_resources
-                return _engine_manager, _coordinator, addresses
+                _engine_manager, _dp_coordinator, addresses, _ = remote_resources
+                return _engine_manager, _dp_coordinator, addresses
 
-        engine_manager, coordinator, addresses = await asyncio.to_thread(_run_handshake)
+        engine_manager, dp_coordinator, addresses = await asyncio.to_thread(_run_handshake)
 
         client_addresses: dict[str, str] = {
             "input_address": addresses.inputs[0],
@@ -778,7 +778,7 @@ class AsyncOmniEngine:
             client_addresses=client_addresses,
             proc=None,
             engine_manager=engine_manager,
-            coordinator=coordinator,
+            coordinator=dp_coordinator,
         )
         logger.info(
             "[AsyncOmniEngine] Built remote LLM client for stage=%d replica=%d (input=%s)",
@@ -832,7 +832,7 @@ class AsyncOmniEngine:
 
         proc = None
         engine_manager = None
-        coordinator = None
+        dp_coordinator = None
         launch = None
         stage_client = None
         lock_fds: list[int] = []
@@ -865,7 +865,7 @@ class AsyncOmniEngine:
                     plan.metadata.stage_id,
                 )
                 with launch_cm as remote_resources:
-                    engine_manager, coordinator, addresses, _tensor_queue = remote_resources
+                    engine_manager, dp_coordinator, addresses, _tensor_queue = remote_resources
 
                 logger.info(
                     "[AsyncOmniEngine] Stage %s remote engine startup completed",
@@ -883,7 +883,7 @@ class AsyncOmniEngine:
                     metadata=plan.metadata,
                     client_addresses=client_addresses,
                     engine_manager=engine_manager,
-                    coordinator=coordinator,
+                    coordinator=dp_coordinator,
                 )
             else:
                 with ExitStack() as launch_stack:
@@ -915,7 +915,7 @@ class AsyncOmniEngine:
                                         if self._coordinator_runtime is not None
                                         else None
                                     )
-                                    engine_manager, coordinator, addresses = launch_stack.enter_context(
+                                    engine_manager, dp_coordinator, addresses = launch_stack.enter_context(
                                         launch_omni_core_engines(
                                             vllm_config=vllm_config,
                                             executor_class=executor_class,
@@ -938,7 +938,7 @@ class AsyncOmniEngine:
                                     addresses = launch.addresses
                                     proc = launch.proc
                                     engine_manager = launch.engine_manager
-                                    coordinator = launch.coordinator
+                                    dp_coordinator = launch.dp_coordinator
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s engine launch started",
                                     plan.metadata.stage_id,
@@ -971,7 +971,7 @@ class AsyncOmniEngine:
                         client_addresses=client_addresses,
                         proc=proc,
                         engine_manager=engine_manager,
-                        coordinator=coordinator,
+                        coordinator=dp_coordinator,
                     )
 
             logger.info("[AsyncOmniEngine] Stage %s initialized", plan.metadata.stage_id)
@@ -991,7 +991,7 @@ class AsyncOmniEngine:
                     stage_id=plan.metadata.stage_id,
                     proc=proc,
                     engine_manager=engine_manager,
-                    coordinator=coordinator,
+                    coordinator=dp_coordinator,
                 )
             raise
         finally:
