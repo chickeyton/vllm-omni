@@ -495,7 +495,7 @@ def _maybe_set_qwen3_omni_moe_env(engine_args_dict: dict[str, Any]) -> None:
 def split_devices_for_replicas(
     devices_str: str | None,
     num_replicas: int,
-    tp_size: int,
+    devices_per_replica: int,
     stage_id: int,
 ) -> list[str]:
     """Split a devices string into per-replica subsets.
@@ -503,19 +503,19 @@ def split_devices_for_replicas(
     When ``num_replicas`` is 1, returns ``[devices_str]`` unchanged.
     Otherwise, two YAML shapes are accepted:
 
-    1. **Legacy / pool mode** — ``len(devices) == num_replicas * tp_size``:
+    1. **Legacy / pool mode** — ``len(devices) == num_replicas * devices_per_replica``:
        the string enumerates the full per-stage pool. Each replica gets
-       ``tp_size`` consecutive entries. The values are logical indices
-       into the launcher's ``CUDA_VISIBLE_DEVICES``.
+       ``devices_per_replica`` consecutive entries. The values are logical
+       indices into the launcher's ``CUDA_VISIBLE_DEVICES``.
 
        ``split_devices_for_replicas("1,2,3,4", 2, 2, 1) → ["1,2", "3,4"]``
 
-    2. **Template mode** — ``len(devices) == tp_size``: the YAML declares
-       a single per-replica template (the same shape one replica would
-       use), and is **dp-independent**. Each replica r gets the offsets
-       ``[r*tp_size + a for a in template]`` of the launcher's
+    2. **Template mode** — ``len(devices) == devices_per_replica``: the YAML
+       declares a single per-replica template (the same shape one replica
+       would use), and is **dp-independent**. Each replica r gets the offsets
+       ``[r*devices_per_replica + a for a in template]`` of the launcher's
        ``CUDA_VISIBLE_DEVICES``. The template's entries must lie in
-       ``[0, tp_size)``.
+       ``[0, devices_per_replica)``.
 
        ``split_devices_for_replicas("0,1", 2, 2, 1) → ["0,1", "2,3"]``
        ``split_devices_for_replicas("0,1", 4, 2, 1) → ["0,1", "2,3", "4,5", "6,7"]``
@@ -532,27 +532,30 @@ def split_devices_for_replicas(
 
     device_list = [d.strip() for d in devices_str.split(",") if d.strip()]
 
-    if len(device_list) == num_replicas * tp_size:
-        return [",".join(device_list[r * tp_size : (r + 1) * tp_size]) for r in range(num_replicas)]
+    if len(device_list) == num_replicas * devices_per_replica:
+        return [
+            ",".join(device_list[r * devices_per_replica : (r + 1) * devices_per_replica])
+            for r in range(num_replicas)
+        ]
 
-    if len(device_list) == tp_size:
+    if len(device_list) == devices_per_replica:
         try:
             offsets = [int(a) for a in device_list]
         except ValueError as e:
             raise ValueError(f"Stage {stage_id}: template-mode devices must be ints, got {devices_str!r}") from e
-        bad = [a for a in offsets if not (0 <= a < tp_size)]
+        bad = [a for a in offsets if not (0 <= a < devices_per_replica)]
         if bad:
             raise ValueError(
                 f"Stage {stage_id}: template-mode device offset(s) {bad} "
-                f"out of range [0, {tp_size}); devices={devices_str!r}"
+                f"out of range [0, {devices_per_replica}); devices={devices_str!r}"
             )
-        return [",".join(str(r * tp_size + a) for a in offsets) for r in range(num_replicas)]
+        return [",".join(str(r * devices_per_replica + a) for a in offsets) for r in range(num_replicas)]
 
     raise ValueError(
         f"Stage {stage_id}: devices={devices_str!r} has {len(device_list)} id(s); "
-        f"need either {tp_size} (template, dp-independent) or "
-        f"{num_replicas * tp_size} (pool / legacy). "
-        f"num_replicas={num_replicas}, tensor_parallel_size={tp_size}."
+        f"need either {devices_per_replica} (template, dp-independent) or "
+        f"{num_replicas * devices_per_replica} (pool / legacy). "
+        f"num_replicas={num_replicas}, devices_per_replica={devices_per_replica}."
     )
 
 
@@ -906,7 +909,7 @@ def _enforce_omni_parallel_config(
             split_devices_for_replicas(
                 devices_str=devices_str,
                 num_replicas=int(num_replicas_for_devices),
-                tp_size=per_replica,
+                devices_per_replica=per_replica,
                 stage_id=int(sid) if isinstance(sid, int) else sid,
             )
 

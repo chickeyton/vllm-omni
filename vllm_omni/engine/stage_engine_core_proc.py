@@ -253,8 +253,8 @@ class StageCoreLaunch:
     """Handles for an in-process stage launch, returned by ``spawn_stage_core``.
 
     ``proc`` is set for the single-engine (``data_parallel_size == 1``) path.
-    ``engine_manager`` / ``coordinator`` / ``engines_to_handshake`` are set for
-    the inner-vLLM-DP path (``data_parallel_size > 1``), which spawns one
+    ``engine_manager`` / ``dp_coordinator`` / ``engines_to_handshake`` are set
+    for the inner-vLLM-DP path (``data_parallel_size > 1``), which spawns one
     engine-core process per local DP rank plus a DP coordinator.
     """
 
@@ -262,7 +262,7 @@ class StageCoreLaunch:
     handshake_address: str
     proc: BaseProcess | None = None
     engine_manager: CoreEngineProcManager | None = None
-    coordinator: DPCoordinator | None = None
+    dp_coordinator: DPCoordinator | None = None
     engines_to_handshake: list[CoreEngine] | None = None
 
 
@@ -333,14 +333,14 @@ def spawn_stage_core(
 
     # Internal-LB / MoE DP needs a coordinator for queue-stats load balancing
     # and (for MoE) wave coordination. Rank 0 owns it.
-    coordinator: DPCoordinator | None = None
+    dp_coordinator: DPCoordinator | None = None
     if vllm_config.needs_dp_coordinator and dp_rank == 0:
-        coordinator = DPCoordinator(
+        dp_coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
         )
-        addresses.coordinator_input, addresses.coordinator_output = coordinator.get_engine_socket_addresses()
-        addresses.frontend_stats_publish_address = coordinator.get_stats_publish_address()
+        addresses.coordinator_input, addresses.coordinator_output = dp_coordinator.get_engine_socket_addresses()
+        addresses.frontend_stats_publish_address = dp_coordinator.get_stats_publish_address()
 
     handshake_address = get_open_zmq_ipc_path()
 
@@ -364,7 +364,7 @@ def spawn_stage_core(
         addresses=addresses,
         handshake_address=handshake_address,
         engine_manager=engine_manager,
-        coordinator=coordinator,
+        dp_coordinator=dp_coordinator,
         engines_to_handshake=engines_to_handshake,
     )
 
@@ -407,14 +407,14 @@ def _complete_dp_handshake(launch: StageCoreLaunch, vllm_config: VllmConfig) -> 
                 coordinated_dp,
                 vllm_config.cache_config,
                 launch.engine_manager,
-                launch.coordinator.proc if launch.coordinator else None,
+                launch.dp_coordinator.proc if launch.dp_coordinator else None,
             )
     except Exception:
         with contextlib.suppress(Exception):
             launch.engine_manager.shutdown()
-        if launch.coordinator is not None:
+        if launch.dp_coordinator is not None:
             with contextlib.suppress(Exception):
-                launch.coordinator.close()
+                launch.dp_coordinator.close()
         raise
 
 

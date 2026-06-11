@@ -127,7 +127,7 @@ class OmniServeCommand(CLISubcommand):
         # the canonical attribute is ``args.omni_num_replica``.
         args.omni_num_replica = resolve_omni_num_replica(
             new=getattr(args, "omni_num_replica", None),
-            legacy=getattr(args, "_omni_dp_size_local_alias", None),
+            legacy=getattr(args, "omni_dp_size_local", None),
             label_new="--omni-num-replica",
             label_legacy="--omni-dp-size-local",
         )
@@ -364,7 +364,7 @@ class OmniServeCommand(CLISubcommand):
         )
         omni_config_group.add_argument(
             "--omni-dp-size-local",
-            dest="_omni_dp_size_local_alias",
+            dest="omni_dp_size_local",
             type=int,
             default=None,
             help="[Deprecated] Use --omni-num-replica. Will be removed in the next release.",
@@ -1028,16 +1028,16 @@ def run_headless(args: TrackingNamespace) -> None:
         return
 
     dp_rank = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
-    coordinator = None
+    dp_coordinator = None
     if vllm_config.needs_dp_coordinator and dp_rank == 0:
-        coordinator = DPCoordinator(
+        dp_coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
         )
         logger.info(
             "[Headless] Started DP Coordinator process for stage %d (PID: %d)",
             stage_id,
-            coordinator.proc.pid,
+            dp_coordinator.proc.pid,
         )
 
     logger.info(
@@ -1077,7 +1077,7 @@ def run_headless(args: TrackingNamespace) -> None:
                 omni_master_port=omni_master_port,
                 omni_stage_id=stage_id,
                 omni_stage_config=stage_cfg,
-                coordinator=coordinator,
+                dp_coordinator=dp_coordinator,
                 replica_id=None,
                 return_full_response=True,
                 replica_bind_address=omni_replica_address,
