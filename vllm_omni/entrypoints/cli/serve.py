@@ -1145,8 +1145,8 @@ def run_headless(args: TrackingNamespace) -> None:
                 mgr.shutdown()
             except Exception:
                 logger.exception("[Headless] engine manager shutdown failed")
-        if coordinator is not None:
-            coordinator.shutdown()
+        if dp_coordinator is not None:
+            dp_coordinator.shutdown()
 
 
 def cmd_init() -> list[CLISubcommand]:

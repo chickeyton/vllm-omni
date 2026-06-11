@@ -616,9 +616,19 @@ def test_initialize_llm_replica_passes_stage_init_timeout_to_complete_stage_hand
     monkeypatch.setattr(engine_mod, "stage_runtime_setup", _noop_stage_runtime_setup)
     monkeypatch.setattr(engine_mod, "build_engine_args_dict", lambda *_, **__: {})
     monkeypatch.setattr(engine_mod, "acquire_device_locks", lambda *_: [])
-    monkeypatch.setattr(engine_mod, "spawn_stage_core", lambda **_: (fake_addresses, fake_proc, "ipc://handshake"))
+    from vllm_omni.engine.stage_engine_core_proc import StageCoreLaunch
 
-    def _capture_stage_timeout(_proc, _handshake_addr, _addresses, _vllm_cfg, handshake_timeout):
+    monkeypatch.setattr(
+        engine_mod,
+        "spawn_stage_core",
+        lambda **_: StageCoreLaunch(
+            addresses=fake_addresses,
+            handshake_address="ipc://handshake",
+            proc=fake_proc,
+        ),
+    )
+
+    def _capture_stage_timeout(_launch, _vllm_cfg, handshake_timeout):
         nonlocal captured_timeout
         captured_timeout = handshake_timeout
 
