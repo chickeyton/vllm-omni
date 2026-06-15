@@ -30,6 +30,7 @@ from vllm import envs as vllm_envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_ports_list
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -604,6 +605,31 @@ class AsyncOmniEngine:
                 if launch_mode == "remote" and replica_metadata.stage_type != "diffusion":
                     replica_metadata.runtime_cfg = None
 
+                # Each omni replica with inner vLLM DP runs its own
+                # independent DP NCCL world and must rendezvous on its own
+                # ports. All replicas otherwise share one ``stage_vllm_config``
+                # (built once above) — and thus one
+                # ``_data_parallel_master_port_list`` — so replica 1+ would
+                # draw the *same* DP init ports as replica 0, collide on bind
+                # ("Address already in use. Retrying with a new port"), and
+                # never form their DP group (their DP ranks then disagree on
+                # the retried port). Give every inner-DP replica its own
+                # vllm_config copy with a freshly-seeded port list; DP ranks
+                # *within* a replica still share that copy, so they agree on
+                # the rendezvous port as required. replica 0 keeps the
+                # original config (its ports are already open).
+                replica_vllm_config = stage_vllm_config
+                if (
+                    replica_id > 0
+                    and launch_mode == "local"
+                    and getattr(stage_vllm_config, "parallel_config", None) is not None
+                    and stage_vllm_config.parallel_config.data_parallel_size > 1
+                ):
+                    replica_vllm_config = copy.deepcopy(stage_vllm_config)
+                    replica_pc = replica_vllm_config.parallel_config
+                    replica_pc._data_parallel_master_port_list = get_open_ports_list(5)
+                    replica_pc.data_parallel_master_port = replica_pc._data_parallel_master_port_list[-1]
+
                 replicas.append(
                     ReplicaInitPlan(
                         replica_id=replica_id,
@@ -613,7 +639,7 @@ class AsyncOmniEngine:
                         metadata=replica_metadata,
                         stage_connector_spec=stage_connector_spec,
                         omni_kv_connector=omni_kv_connector,
-                        stage_vllm_config=stage_vllm_config,
+                        stage_vllm_config=replica_vllm_config,
                         executor_class=executor_class,
                     )
                 )
