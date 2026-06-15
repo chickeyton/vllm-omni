@@ -88,6 +88,54 @@ def register_omni_models_to_vllm():
     import vllm_omni.reasoning  # noqa: F401
 
 
+# Module-level guard so the deprecation warning fires at most once per
+# process even when validate() / __init__ / run_headless all touch the
+# alias path during the same launch.
+_OMNI_DP_SIZE_LOCAL_WARNED = False
+
+
+def resolve_omni_num_replica(
+    new: int | None,
+    legacy: int | None,
+    *,
+    label_new: str,
+    label_legacy: str,
+) -> int:
+    """Resolve ``omni_num_replica`` from the new flag + deprecated alias.
+
+    Used by every code path that reads the per-runtime replica count
+    (CLI parse, embedder kwargs, headless launcher) so the conflict
+    rule and the deprecation warning have exactly one implementation.
+
+    Args:
+        new: Value from ``--omni-num-replica`` / ``omni_num_replica`` kwarg.
+        legacy: Value from ``--omni-dp-size-local`` / ``omni_dp_size_local``
+            kwarg (deprecated alias).
+        label_new: Human-readable name of the new flag for error messages.
+        label_legacy: Human-readable name of the deprecated alias.
+
+    Returns:
+        Resolved replica count. Defaults to 1 when neither is set.
+
+    Raises:
+        ValueError: when both ``new`` and ``legacy`` are set.
+    """
+    if new is not None and legacy is not None:
+        raise ValueError(f"Specify only one of {label_new} / {label_legacy}")
+    if legacy is not None and new is None:
+        global _OMNI_DP_SIZE_LOCAL_WARNED
+        if not _OMNI_DP_SIZE_LOCAL_WARNED:
+            logger.warning(
+                "%s is deprecated; use %s. The old name will be removed "
+                "in the next release.",
+                label_legacy,
+                label_new,
+            )
+            _OMNI_DP_SIZE_LOCAL_WARNED = True
+        return int(legacy)
+    return int(new) if new is not None else 1
+
+
 @dataclass
 class OmniEngineArgs(EngineArgs):
     """Engine arguments for omni models, extending base EngineArgs.
@@ -174,7 +222,7 @@ class OmniEngineArgs(EngineArgs):
     omni_master_address: str | None = None
     omni_master_port: int | None = None
     # OmniCoordinator integration knobs (process-local).
-    omni_dp_size_local: int = 1
+    omni_num_replica: int = 1
     omni_lb_policy: str = "random"
     omni_heartbeat_timeout: float = 30.0
     stage_configs_path: str | None = None

@@ -30,6 +30,7 @@ from vllm import envs as vllm_envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_ports_list
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -50,6 +51,7 @@ from vllm_omni.distributed.omni_coordinator import (
     build_load_balancer_factory,
 )
 from vllm_omni.engine import OmniEngineCoreRequest
+from vllm_omni.engine.arg_utils import resolve_omni_num_replica
 from vllm_omni.engine.messages import (
     AbortRequestMessage,
     AddCompanionRequestMessage,
@@ -310,12 +312,16 @@ class AsyncOmniEngine:
         self._omni_master_port: int | None = kwargs.get("omni_master_port")
         self._omni_master_server: OmniMasterServer | None = None
 
-        # New omni-coordinator flags. Consumed only in single_stage_mode.
-        # ``omni_dp_size_local`` is process-local: each invocation (head and
-        # every headless) launches that many replicas for its own stage.
-        self._omni_dp_size_local: int = int(kwargs.get("omni_dp_size_local") or 1)
-        if self._omni_dp_size_local < 1:
-            raise ValueError(f"--omni-dp-size-local must be >= 1, got {self._omni_dp_size_local}")
+        # Process-local per-runtime replica count. ``omni_dp_size_local``
+        # is accepted as a deprecated kwarg alias for one release.
+        self._omni_num_replica: int = resolve_omni_num_replica(
+            new=kwargs.get("omni_num_replica"),
+            legacy=kwargs.get("omni_dp_size_local"),
+            label_new="omni_num_replica",
+            label_legacy="omni_dp_size_local",
+        )
+        if self._omni_num_replica < 1:
+            raise ValueError(f"omni_num_replica must be >= 1, got {self._omni_num_replica}")
         self._omni_lb_policy: str = str(kwargs.get("omni_lb_policy") or "random")
         self._omni_heartbeat_timeout: float = float(kwargs.get("omni_heartbeat_timeout") or 30.0)
         if self._omni_heartbeat_timeout <= 0:
@@ -476,12 +482,12 @@ class AsyncOmniEngine:
                 )
 
     def _validate_single_stage_mode_replica_constraints(self) -> None:
-        """Apply --omni-dp-size-local to the local stage's runtime.num_replicas.
+        """Apply --omni-num-replica to the local stage's runtime.num_replicas.
 
         In the previous revision this method rejected LLM stages with
-        ``num_replicas > 1``. The whole point of ``--omni-dp-size-local`` is
+        ``num_replicas > 1``. The whole point of ``--omni-num-replica`` is
         to lift that restriction for the *local* stage, so the rejection is
-        gone. We now use this hook to write ``--omni-dp-size-local`` onto
+        gone. We now use this hook to write ``--omni-num-replica`` onto
         the self-stage's runtime config so downstream code
         (``compute_replica_layout`` → ``_build_logical_stage_init_plans``)
         sees a consistent view.
@@ -498,12 +504,12 @@ class AsyncOmniEngine:
             if runtime_cfg is None:
                 continue
             if stage_id == target_stage_id:
-                # Self stage: take --omni-dp-size-local from this process.
+                # Self stage: take --omni-num-replica from this process.
                 try:
-                    runtime_cfg.num_replicas = self._omni_dp_size_local
+                    runtime_cfg.num_replicas = self._omni_num_replica
                 except Exception:
                     if hasattr(runtime_cfg, "__setitem__"):
-                        runtime_cfg["num_replicas"] = self._omni_dp_size_local
+                        runtime_cfg["num_replicas"] = self._omni_num_replica
             # Other stages keep their config-declared num_replicas; in
             # head-distributed mode they will be launched as ``launch_mode
             # == "remote"`` with the configured count.
@@ -571,6 +577,12 @@ class AsyncOmniEngine:
                     self.model,
                     stage_connector_spec=stage_connector_spec,
                     engine_args_dict=engine_args_dict,
+                    # Head-owned: per-stage replica count resolved by
+                    # compute_replica_layout from runtime.num_replicas
+                    # (which, in single_stage_mode, has already had
+                    # --omni-num-replica written onto it by
+                    # _validate_single_stage_mode_replica_constraints).
+                    num_replicas_for_devices=num_replicas,
                 )
 
             for replica_id in range(num_replicas):
@@ -593,6 +605,31 @@ class AsyncOmniEngine:
                 if launch_mode == "remote" and replica_metadata.stage_type != "diffusion":
                     replica_metadata.runtime_cfg = None
 
+                # Each omni replica with inner vLLM DP runs its own
+                # independent DP NCCL world and must rendezvous on its own
+                # ports. All replicas otherwise share one ``stage_vllm_config``
+                # (built once above) — and thus one
+                # ``_data_parallel_master_port_list`` — so replica 1+ would
+                # draw the *same* DP init ports as replica 0, collide on bind
+                # ("Address already in use. Retrying with a new port"), and
+                # never form their DP group (their DP ranks then disagree on
+                # the retried port). Give every inner-DP replica its own
+                # vllm_config copy with a freshly-seeded port list; DP ranks
+                # *within* a replica still share that copy, so they agree on
+                # the rendezvous port as required. replica 0 keeps the
+                # original config (its ports are already open).
+                replica_vllm_config = stage_vllm_config
+                if (
+                    replica_id > 0
+                    and launch_mode == "local"
+                    and getattr(stage_vllm_config, "parallel_config", None) is not None
+                    and stage_vllm_config.parallel_config.data_parallel_size > 1
+                ):
+                    replica_vllm_config = copy.deepcopy(stage_vllm_config)
+                    replica_pc = replica_vllm_config.parallel_config
+                    replica_pc._data_parallel_master_port_list = get_open_ports_list(5)
+                    replica_pc.data_parallel_master_port = replica_pc._data_parallel_master_port_list[-1]
+
                 replicas.append(
                     ReplicaInitPlan(
                         replica_id=replica_id,
@@ -602,7 +639,7 @@ class AsyncOmniEngine:
                         metadata=replica_metadata,
                         stage_connector_spec=stage_connector_spec,
                         omni_kv_connector=omni_kv_connector,
-                        stage_vllm_config=stage_vllm_config,
+                        stage_vllm_config=replica_vllm_config,
                         executor_class=executor_class,
                     )
                 )
@@ -748,10 +785,10 @@ class AsyncOmniEngine:
                 stage_id=stage_id,
                 replica_id=replica_id,
             ) as remote_resources:
-                _engine_manager, _coordinator, addresses, _ = remote_resources
-                return _engine_manager, _coordinator, addresses
+                _engine_manager, _dp_coordinator, addresses, _ = remote_resources
+                return _engine_manager, _dp_coordinator, addresses
 
-        engine_manager, coordinator, addresses = await asyncio.to_thread(_run_handshake)
+        engine_manager, dp_coordinator, addresses = await asyncio.to_thread(_run_handshake)
 
         client_addresses: dict[str, str] = {
             "input_address": addresses.inputs[0],
@@ -767,7 +804,7 @@ class AsyncOmniEngine:
             client_addresses=client_addresses,
             proc=None,
             engine_manager=engine_manager,
-            coordinator=coordinator,
+            coordinator=dp_coordinator,
         )
         logger.info(
             "[AsyncOmniEngine] Built remote LLM client for stage=%d replica=%d (input=%s)",
@@ -821,7 +858,8 @@ class AsyncOmniEngine:
 
         proc = None
         engine_manager = None
-        coordinator = None
+        dp_coordinator = None
+        launch = None
         stage_client = None
         lock_fds: list[int] = []
         device_control_env = current_omni_platform.device_control_env_var
@@ -853,7 +891,7 @@ class AsyncOmniEngine:
                     plan.metadata.stage_id,
                 )
                 with launch_cm as remote_resources:
-                    engine_manager, coordinator, addresses, _tensor_queue = remote_resources
+                    engine_manager, dp_coordinator, addresses, _tensor_queue = remote_resources
 
                 logger.info(
                     "[AsyncOmniEngine] Stage %s remote engine startup completed",
@@ -871,10 +909,9 @@ class AsyncOmniEngine:
                     metadata=plan.metadata,
                     client_addresses=client_addresses,
                     engine_manager=engine_manager,
-                    coordinator=coordinator,
+                    coordinator=dp_coordinator,
                 )
             else:
-                handshake_address = None
                 with ExitStack() as launch_stack:
                     with llm_stage_launch_lock:
                         previous_visible_devices = os.environ.get(device_control_env)
@@ -904,7 +941,7 @@ class AsyncOmniEngine:
                                         if self._coordinator_runtime is not None
                                         else None
                                     )
-                                    engine_manager, coordinator, addresses = launch_stack.enter_context(
+                                    engine_manager, dp_coordinator, addresses = launch_stack.enter_context(
                                         launch_omni_core_engines(
                                             vllm_config=vllm_config,
                                             executor_class=executor_class,
@@ -917,11 +954,17 @@ class AsyncOmniEngine:
                                         )
                                     )
                                 else:
-                                    addresses, proc, handshake_address = spawn_stage_core(
+                                    launch = spawn_stage_core(
                                         vllm_config=vllm_config,
                                         executor_class=executor_class,
                                         log_stats=self._log_stats,
+                                        omni_stage_id=plan.metadata.stage_id,
+                                        omni_replica_id=plan.replica_id,
                                     )
+                                    addresses = launch.addresses
+                                    proc = launch.proc
+                                    engine_manager = launch.engine_manager
+                                    dp_coordinator = launch.dp_coordinator
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s engine launch started",
                                     plan.metadata.stage_id,
@@ -935,9 +978,7 @@ class AsyncOmniEngine:
                     if self.single_stage_mode and self._omni_master_server is not None:
                         launch_stack.close()
                     else:
-                        assert proc is not None
-                        assert handshake_address is not None
-                        complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
+                        complete_stage_handshake(launch, vllm_config, stage_init_timeout)
                     logger.info(
                         "[AsyncOmniEngine] Stage %s engine startup completed",
                         plan.metadata.stage_id,
@@ -956,7 +997,7 @@ class AsyncOmniEngine:
                         client_addresses=client_addresses,
                         proc=proc,
                         engine_manager=engine_manager,
-                        coordinator=coordinator,
+                        coordinator=dp_coordinator,
                     )
 
             logger.info("[AsyncOmniEngine] Stage %s initialized", plan.metadata.stage_id)
@@ -976,7 +1017,7 @@ class AsyncOmniEngine:
                     stage_id=plan.metadata.stage_id,
                     proc=proc,
                     engine_manager=engine_manager,
-                    coordinator=coordinator,
+                    coordinator=dp_coordinator,
                 )
             raise
         finally:

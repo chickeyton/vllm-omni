@@ -242,7 +242,7 @@ class OmniMasterServer:
         same-host headless that registers before the head's own
         ``register_stage_with_omni_master`` call would steal slot 0.
 
-        Without this, a headless contributor using ``--omni-dp-size-local > 1``
+        Without this, a headless contributor using ``--omni-num-replica > 1``
         (auto-assign mode) would skip past pre-allocated slot 0 and pick ids
         beyond ``num_replicas``, deadlocking the head's
         ``connect_remote_engine_cores`` wait.
@@ -619,7 +619,7 @@ def register_stage_with_omni_master(
     omni_master_port: int,
     omni_stage_id: int,
     omni_stage_config: Any = None,
-    coordinator: DPCoordinator | None = None,
+    dp_coordinator: DPCoordinator | None = None,
     return_addresses: bool = False,
     replica_id: int | None = 0,
     return_full_response: bool = False,
@@ -654,11 +654,11 @@ def register_stage_with_omni_master(
                 "replica_id": wire_replica_id,
                 "stage_config": _serialize_stage_config(omni_stage_config),
             }
-            if coordinator is not None:
-                coordinator_input, coordinator_output = coordinator.get_engine_socket_addresses()
+            if dp_coordinator is not None:
+                coordinator_input, coordinator_output = dp_coordinator.get_engine_socket_addresses()
                 payload["coordinator_input"] = coordinator_input
                 payload["coordinator_output"] = coordinator_output
-                payload["frontend_stats_publish_address"] = coordinator.get_stats_publish_address()
+                payload["frontend_stats_publish_address"] = dp_coordinator.get_stats_publish_address()
 
             # Always advertise THIS host's local bind address + 3 locally
             # free ports so the master can root the per-stage socket
@@ -806,7 +806,7 @@ def connect_remote_engine_cores(
         else max(1, parallel_config.data_parallel_size)
     )
     start_index = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
-    coordinator = None
+    dp_coordinator = None
 
     registered_coordinator_addresses = omni_master_server.get_stage_coordinator_addresses(
         stage_id,
@@ -828,7 +828,7 @@ def connect_remote_engine_cores(
     handshake_bind_address = omni_master_server.get_allocation(stage_id, replica_id=replica_id).handshake_bind_address
 
     with zmq_socket_ctx(handshake_bind_address, zmq.ROUTER, bind=True) as handshake_socket:
-        yield None, coordinator, addresses, None
+        yield None, dp_coordinator, addresses, None
 
         _wait_for_omni_engine_startup(
             handshake_socket,
@@ -876,22 +876,22 @@ def launch_omni_core_engines(
     run_coordinator = vllm_config.needs_dp_coordinator and dp_rank == 0
 
     if run_coordinator:
-        coordinator = DPCoordinator(
+        dp_coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
         )
 
-        addresses.coordinator_input, addresses.coordinator_output = coordinator.get_engine_socket_addresses()
-        addresses.frontend_stats_publish_address = coordinator.get_stats_publish_address()
+        addresses.coordinator_input, addresses.coordinator_output = dp_coordinator.get_engine_socket_addresses()
+        addresses.frontend_stats_publish_address = dp_coordinator.get_stats_publish_address()
 
         logger.info(
             "[omni] Started DP Coordinator process for stage %d replica %d (PID: %d)",
             stage_id,
             replica_id,
-            coordinator.proc.pid,
+            dp_coordinator.proc.pid,
         )
     else:
-        coordinator = None
+        dp_coordinator = None
 
     logger.info(
         "Starting %d local engine(s) for stage %d replica %d (dp_rank=%d)",
@@ -908,7 +908,7 @@ def launch_omni_core_engines(
         omni_master_port=omni_master_server.port,
         omni_stage_id=stage_id,
         omni_stage_config=stage_config,
-        coordinator=coordinator,
+        dp_coordinator=dp_coordinator,
         replica_id=replica_id,
     )
 
@@ -950,7 +950,7 @@ def launch_omni_core_engines(
                 log_stats=log_stats,
             )
 
-        yield local_engine_manager, coordinator, addresses
+        yield local_engine_manager, dp_coordinator, addresses
 
         # Wait for all local engine-core processes to complete the
         # standard HELLO/READY handshake — mirrors launch_core_engines.
@@ -963,5 +963,5 @@ def launch_omni_core_engines(
             coordinated_dp,
             vllm_config.cache_config,
             local_engine_manager,
-            coordinator.proc if coordinator else None,
+            dp_coordinator.proc if dp_coordinator else None,
         )

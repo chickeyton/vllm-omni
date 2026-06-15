@@ -471,6 +471,16 @@ class StageDeployConfig:
     hsdp_shard_size: int | None = None
     hsdp_replicate_size: int | None = None
 
+    # LLM-stage inner vLLM DP + context-parallel + EP/EPLB fields.
+    # On DiT stages these are unused; the DiT runtime consumes the
+    # nested ``parallel_config:`` block instead.
+    data_parallel_size: int | None = None
+    prefill_context_parallel_size: int | None = None
+    enable_eplb: bool | None = None
+    eplb_config: dict[str, Any] | None = None
+    expert_placement_strategy: str | None = None
+    all2all_backend: str | None = None
+
     # Compilation, profiling, tokenizer/config parsing, and model loading.
     compilation_config: dict[str, Any] | None = None
     profiler_config: dict[str, Any] | None = None
