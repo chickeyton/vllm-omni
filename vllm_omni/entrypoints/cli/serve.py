@@ -126,10 +126,10 @@ class OmniServeCommand(CLISubcommand):
         # and emits the one-shot deprecation warning. After this point
         # the canonical attribute is ``args.omni_num_replica``.
         args.omni_num_replica = resolve_omni_num_replica(
-            new=getattr(args, "omni_num_replica", None),
-            legacy=getattr(args, "omni_dp_size_local", None),
-            label_new="--omni-num-replica",
-            label_legacy="--omni-dp-size-local",
+            omni_num_replica=getattr(args, "omni_num_replica", None),
+            omni_dp_size_local=getattr(args, "omni_dp_size_local", None),
+            label_omni_num_replica="--omni-num-replica",
+            label_omni_dp_size_local="--omni-dp-size-local",
         )
 
         # Process-local replica count. A value other than 1 only makes
@@ -752,16 +752,11 @@ def run_headless(args: TrackingNamespace) -> None:
     worker_backend: str | None = args.worker_backend
     stage_configs_path: str | None = args.stage_configs_path
     omni_replica_address: str | None = getattr(args, "omni_replica_address", None)
-    # ``args.omni_num_replica`` is set by ``OmniServeCommand.validate``
-    # after merging the deprecated alias. Programmatic callers that
-    # construct a raw argparse.Namespace and bypass validate() may still
-    # expose the old name; ``resolve_omni_num_replica`` handles both.
-    omni_num_replica: int = resolve_omni_num_replica(
-        new=getattr(args, "omni_num_replica", None),
-        legacy=getattr(args, "omni_dp_size_local", None),
-        label_new="omni_num_replica",
-        label_legacy="omni_dp_size_local",
-    )
+    # ``args.omni_num_replica`` is the canonical per-runtime replica count,
+    # already merged from the deprecated ``--omni-dp-size-local`` CLI alias
+    # by ``OmniServeCommand.validate`` during argument parsing. The alias is
+    # confined to that parse step; launch logic only reads the new name.
+    omni_num_replica: int = int(getattr(args, "omni_num_replica", 1) or 1)
 
     if not model:
         raise ValueError("Failed to pass model from kwargs")

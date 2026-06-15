@@ -95,45 +95,48 @@ _OMNI_DP_SIZE_LOCAL_WARNED = False
 
 
 def resolve_omni_num_replica(
-    new: int | None,
-    legacy: int | None,
+    omni_num_replica: int | None,
+    omni_dp_size_local: int | None,
     *,
-    label_new: str,
-    label_legacy: str,
+    label_omni_num_replica: str,
+    label_omni_dp_size_local: str,
 ) -> int:
-    """Resolve ``omni_num_replica`` from the new flag + deprecated alias.
+    """Resolve ``omni_num_replica`` from the new flag + deprecated CLI alias.
 
-    Used by every code path that reads the per-runtime replica count
-    (CLI parse, embedder kwargs, headless launcher) so the conflict
-    rule and the deprecation warning have exactly one implementation.
+    Called once, from CLI argument parsing (``OmniServeCommand.validate``),
+    to fold the deprecated ``--omni-dp-size-local`` alias into the canonical
+    ``omni_num_replica``. The alias is confined to that parse step; all
+    downstream engine/launch logic reads only ``omni_num_replica``.
 
     Args:
-        new: Value from ``--omni-num-replica`` / ``omni_num_replica`` kwarg.
-        legacy: Value from ``--omni-dp-size-local`` / ``omni_dp_size_local``
-            kwarg (deprecated alias).
-        label_new: Human-readable name of the new flag for error messages.
-        label_legacy: Human-readable name of the deprecated alias.
+        omni_num_replica: Value from ``--omni-num-replica``.
+        omni_dp_size_local: Value from the deprecated ``--omni-dp-size-local``
+            alias.
+        label_omni_num_replica: Human-readable name of the new flag for
+            error messages.
+        label_omni_dp_size_local: Human-readable name of the deprecated alias.
 
     Returns:
         Resolved replica count. Defaults to 1 when neither is set.
 
     Raises:
-        ValueError: when both ``new`` and ``legacy`` are set.
+        ValueError: when both ``omni_num_replica`` and ``omni_dp_size_local``
+            are set.
     """
-    if new is not None and legacy is not None:
-        raise ValueError(f"Specify only one of {label_new} / {label_legacy}")
-    if legacy is not None and new is None:
+    if omni_num_replica is not None and omni_dp_size_local is not None:
+        raise ValueError(f"Specify only one of {label_omni_num_replica} / {label_omni_dp_size_local}")
+    if omni_dp_size_local is not None and omni_num_replica is None:
         global _OMNI_DP_SIZE_LOCAL_WARNED
         if not _OMNI_DP_SIZE_LOCAL_WARNED:
             logger.warning(
                 "%s is deprecated; use %s. The old name will be removed "
                 "in the next release.",
-                label_legacy,
-                label_new,
+                label_omni_dp_size_local,
+                label_omni_num_replica,
             )
             _OMNI_DP_SIZE_LOCAL_WARNED = True
-        return int(legacy)
-    return int(new) if new is not None else 1
+        return int(omni_dp_size_local)
+    return int(omni_num_replica) if omni_num_replica is not None else 1
 
 
 @dataclass

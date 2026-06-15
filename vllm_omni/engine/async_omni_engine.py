@@ -51,7 +51,6 @@ from vllm_omni.distributed.omni_coordinator import (
     build_load_balancer_factory,
 )
 from vllm_omni.engine import OmniEngineCoreRequest
-from vllm_omni.engine.arg_utils import resolve_omni_num_replica
 from vllm_omni.engine.messages import (
     AbortRequestMessage,
     AddCompanionRequestMessage,
@@ -312,14 +311,11 @@ class AsyncOmniEngine:
         self._omni_master_port: int | None = kwargs.get("omni_master_port")
         self._omni_master_server: OmniMasterServer | None = None
 
-        # Process-local per-runtime replica count. ``omni_dp_size_local``
-        # is accepted as a deprecated kwarg alias for one release.
-        self._omni_num_replica: int = resolve_omni_num_replica(
-            new=kwargs.get("omni_num_replica"),
-            legacy=kwargs.get("omni_dp_size_local"),
-            label_new="omni_num_replica",
-            label_legacy="omni_dp_size_local",
-        )
+        # Process-local per-runtime replica count. The deprecated CLI alias
+        # ``--omni-dp-size-local`` is resolved to ``omni_num_replica`` during
+        # CLI argument parsing (OmniServeCommand.validate); inner logic only
+        # ever sees the canonical name.
+        self._omni_num_replica: int = int(kwargs.get("omni_num_replica") or 1)
         if self._omni_num_replica < 1:
             raise ValueError(f"omni_num_replica must be >= 1, got {self._omni_num_replica}")
         self._omni_lb_policy: str = str(kwargs.get("omni_lb_policy") or "random")
