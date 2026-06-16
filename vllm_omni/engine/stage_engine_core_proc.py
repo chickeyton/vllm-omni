@@ -28,8 +28,8 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.engine import EngineCoreRequestType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
     CoreEngine,
     CoreEngineProcManager,
@@ -175,10 +175,7 @@ class StageEngineCoreProc(EngineCoreProc):
             # routing is DPLBAsyncMPClient's job; multiple coord clients
             # per replica would multiply ReplicaList entries by ``dp``
             # (it keys by input_addr). See docs/design/pr1-yaml-only.md §5.
-            should_open_coord_client = (
-                omni_coordinator_address is not None
-                and int(local_dp_rank) == 0
-            )
+            should_open_coord_client = omni_coordinator_address is not None and int(local_dp_rank) == 0
             if should_open_coord_client:
                 if omni_stage_id is None:
                     raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")

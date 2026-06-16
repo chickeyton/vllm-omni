@@ -534,8 +534,7 @@ def split_devices_for_replicas(
 
     if len(device_list) == num_replicas * devices_per_replica:
         return [
-            ",".join(device_list[r * devices_per_replica : (r + 1) * devices_per_replica])
-            for r in range(num_replicas)
+            ",".join(device_list[r * devices_per_replica : (r + 1) * devices_per_replica]) for r in range(num_replicas)
         ]
 
     if len(device_list) == devices_per_replica:
@@ -843,10 +842,7 @@ def _enforce_omni_parallel_config(
     sid = getattr(stage_cfg, "stage_id", "?")
 
     if int(num_replicas_for_devices) < 1:
-        raise ValueError(
-            f"stage {sid}: num_replicas_for_devices must be >= 1, "
-            f"got {num_replicas_for_devices}"
-        )
+        raise ValueError(f"stage {sid}: num_replicas_for_devices must be >= 1, got {num_replicas_for_devices}")
 
     # 1) DiT early-return.
     if stage_type == "diffusion":
@@ -855,18 +851,12 @@ def _enforce_omni_parallel_config(
     # 2) Reject nested ``parallel_config:`` on LLM stages.
     nested = engine_args_dict.get("parallel_config")
     if nested is not None:
-        raise ValueError(
-            f"stage {sid}: nested parallel_config: block is for DiT; "
-            f"use flat fields on LLM stages"
-        )
+        raise ValueError(f"stage {sid}: nested parallel_config: block is for DiT; use flat fields on LLM stages")
 
     # 3) Reject master-owned fields.
     for f in _LLM_MASTER_OWNED_FIELDS:
         if engine_args_dict.get(f) is not None:
-            raise ValueError(
-                f"stage {sid}: engine_args.{f} is owned by vLLM/omni and "
-                f"must not be set in YAML or CLI"
-            )
+            raise ValueError(f"stage {sid}: engine_args.{f} is owned by vLLM/omni and must not be set in YAML or CLI")
 
     # 4) Reject incompatible LB / EP flags.
     for f in ("data_parallel_external_lb", "data_parallel_hybrid_lb", "enable_elastic_ep"):
@@ -879,10 +869,7 @@ def _enforce_omni_parallel_config(
     # 5) Reject Ray DP backend (out of scope for PR 1; see RFC leftover).
     dp_backend = engine_args_dict.get("data_parallel_backend")
     if dp_backend is not None and dp_backend != "mp":
-        raise ValueError(
-            f"stage {sid}: data_parallel_backend must be 'mp' under omni, "
-            f"got {dp_backend!r}"
-        )
+        raise ValueError(f"stage {sid}: data_parallel_backend must be 'mp' under omni, got {dp_backend!r}")
 
     # 6) Reject api_server_count > 1 under omni.
     api_server_count = engine_args_dict.get("api_server_count")
@@ -893,13 +880,10 @@ def _enforce_omni_parallel_config(
         )
 
     # 7) Normalize / positive-int check parallelism axes.
-    for f in ("tensor_parallel_size", "pipeline_parallel_size",
-              "prefill_context_parallel_size", "data_parallel_size"):
+    for f in ("tensor_parallel_size", "pipeline_parallel_size", "prefill_context_parallel_size", "data_parallel_size"):
         v = engine_args_dict.get(f)
         if v is not None and int(v) < 1:
-            raise ValueError(
-                f"stage {sid}: {f} must be >= 1, got {v}"
-            )
+            raise ValueError(f"stage {sid}: {f} must be >= 1, got {v}")
     if engine_args_dict.get("data_parallel_size") is None:
         engine_args_dict["data_parallel_size"] = 1
 
@@ -909,10 +893,7 @@ def _enforce_omni_parallel_config(
         pcp = int(engine_args_dict.get("prefill_context_parallel_size") or 1)
         dp = int(engine_args_dict.get("data_parallel_size") or 1)
         if tp * pcp * dp <= 1:
-            raise ValueError(
-                f"stage {sid}: enable_eplb requires tp * pcp * dp > 1, "
-                f"got tp={tp}, pcp={pcp}, dp={dp}"
-            )
+            raise ValueError(f"stage {sid}: enable_eplb requires tp * pcp * dp > 1, got tp={tp}, pcp={pcp}, dp={dp}")
 
     # 9) Device-count divisibility via split_devices_for_replicas. The
     # function already enforces the template-or-pool contract and
@@ -920,10 +901,7 @@ def _enforce_omni_parallel_config(
     # spelled out; calling it here just runs the same check earlier.
     runtime = getattr(stage_cfg, "runtime", None)
     if runtime is not None:
-        devices_str = (
-            runtime.get("devices") if hasattr(runtime, "get")
-            else getattr(runtime, "devices", None)
-        )
+        devices_str = runtime.get("devices") if hasattr(runtime, "get") else getattr(runtime, "devices", None)
         if devices_str:
             tp = int(engine_args_dict.get("tensor_parallel_size") or 1)
             pp = int(engine_args_dict.get("pipeline_parallel_size") or 1)

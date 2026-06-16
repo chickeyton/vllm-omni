@@ -129,8 +129,7 @@ def resolve_omni_num_replica(
         global _OMNI_DP_SIZE_LOCAL_WARNED
         if not _OMNI_DP_SIZE_LOCAL_WARNED:
             logger.warning(
-                "%s is deprecated; use %s. The old name will be removed "
-                "in the next release.",
+                "%s is deprecated; use %s. The old name will be removed in the next release.",
                 label_omni_dp_size_local,
                 label_omni_num_replica,
             )
