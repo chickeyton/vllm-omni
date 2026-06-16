@@ -1212,7 +1212,8 @@ class Orchestrator:
                         "kv_sender_info": self._build_kv_sender_info(
                             list(getattr(next_client, "engine_input_source", None) or [src_stage_id]),
                             request_id=req_id,
-                            sender_dp_rank=int((getattr(output, "kv_transfer_params", None) or {}).get("kv_sender_dp_rank", 0) or 0),
+                            sender_dp_rank=int((getattr(output, "kv_transfer_params", None) or {})
+                            .get("kv_sender_dp_rank", 0) or 0),
                         )
                     },
                     params_override=self._maybe_clone_diffusion_params_for_cfg(req_id, params),
