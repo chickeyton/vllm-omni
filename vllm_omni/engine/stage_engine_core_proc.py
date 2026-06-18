@@ -22,7 +22,7 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.engine import EngineCoreRequestType
-from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     SignalCallback,
@@ -124,11 +124,35 @@ class StageEngineCoreProc(EngineCoreProc):
                 _vllm_engine_core_module.EngineCoreRequest,
             )
 
-            engine_core = StageEngineCoreProc(
-                *args,
-                engine_index=dp_rank,
-                **kwargs,
-            )
+            # Per-process DP wiring: each inner-DP engine core must own a
+            # *distinct* DP rank. #3855 passed only ``engine_index=dp_rank``,
+            # which left every engine at ``node_rank_within_dp=0`` -> all DP ranks
+            # computed global rank 0 and collided binding the DP rendezvous port
+            # (EADDRINUSE on the ``world_size = DP x TP`` group). For MoE inner-DP
+            # use vLLM's ``DPEngineCoreProc`` (proper per-rank/wave setup);
+            # ``StageEngineCoreProc`` adds no engine-behavior overrides, so the
+            # stage I/O (executor/connectors) is unaffected. Non-MoE DP ranks are
+            # fully independent and run as DP=1 (the outer DPLB client fans
+            # requests across the procs).
+            vllm_config = kwargs["vllm_config"]
+            parallel_config = vllm_config.parallel_config
+            data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
+            if data_parallel:
+                parallel_config.data_parallel_rank_local = local_dp_rank
+            parallel_config.data_parallel_index = dp_rank
+            if data_parallel and vllm_config.model_config.is_moe:
+                parallel_config.data_parallel_rank = dp_rank
+                engine_core = DPEngineCoreProc(*args, **kwargs)
+            else:
+                if data_parallel:
+                    parallel_config.data_parallel_size = 1
+                    parallel_config.data_parallel_size_local = 1
+                    parallel_config.data_parallel_rank = 0
+                engine_core = StageEngineCoreProc(
+                    *args,
+                    engine_index=dp_rank,
+                    **kwargs,
+                )
 
             # Each subprocess corresponds to exactly one omni replica with
             # its own OmniMasterServer allocation, so the heartbeat client

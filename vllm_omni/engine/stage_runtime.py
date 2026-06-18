@@ -17,6 +17,7 @@ from typing import Any
 import janus
 from omegaconf import OmegaConf
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_ports_list
 
 from vllm_omni.distributed.omni_connectors.utils.initialization import (
     resolve_omni_kv_config_for_stage,
@@ -140,6 +141,11 @@ class StageRuntime:
         self.stage_pools: list[StagePool] = []
         self._stage_init_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._spawn_device_lock = threading.Lock()
+        # Serializes local LLM engine-core spawn+startup across replicas. vLLM's
+        # multiproc executor picks its worker TCPStore init port via get_open_port()
+        # (not config-driven), so concurrently-spawned inner-DP replicas race on
+        # that port and collide (EADDRINUSE). See _initialize_local_llm_replica.
+        self._local_llm_spawn_lock = threading.Lock()
         self._init_visible_devices_baseline: str | None = None
 
     @staticmethod
@@ -390,6 +396,29 @@ class StageRuntime:
                 if launch_mode == "remote" and replica_metadata.stage_type != "diffusion":
                     replica_metadata.runtime_cfg = None
 
+                # Per-replica inner-DP port reseed. ``stage_vllm_config`` is built
+                # once above and shared across replicas, so every local inner-DP
+                # replica would draw replica 0's ``data_parallel_master_port`` and
+                # collide binding the DP/worker TCPStore init port
+                # (EADDRINUSE on tcp://127.0.0.1:<port>), never forming its group.
+                # Give each replica 1+ its own vllm_config copy with a freshly
+                # seeded master-port list; DP ranks *within* a replica still share
+                # that copy, so they agree on the rendezvous port. replica 0 keeps
+                # the original (its ports are already assigned).
+                replica_vllm_config = stage_vllm_config
+                pc = getattr(stage_vllm_config, "parallel_config", None)
+                if (
+                    replica_id > 0
+                    and launch_mode == "local"
+                    and stage_vllm_config is not None
+                    and pc is not None
+                    and getattr(pc, "data_parallel_size", 1) > 1
+                ):
+                    replica_vllm_config = copy.deepcopy(stage_vllm_config)
+                    replica_pc = replica_vllm_config.parallel_config
+                    replica_pc._data_parallel_master_port_list = get_open_ports_list(5)
+                    replica_pc.data_parallel_master_port = replica_pc._data_parallel_master_port_list[-1]
+
                 replicas.append(
                     ReplicaInitPlan(
                         replica_id=replica_id,
@@ -399,7 +428,7 @@ class StageRuntime:
                         metadata=replica_metadata,
                         stage_connector_spec=stage_connector_spec,
                         omni_kv_connector=omni_kv_connector,
-                        stage_vllm_config=stage_vllm_config,
+                        stage_vllm_config=replica_vllm_config,
                         executor_class=executor_class,
                         engine_args_dict=copy.deepcopy(engine_args_dict) if engine_args_dict is not None else None,
                     )
@@ -559,19 +588,25 @@ class StageRuntime:
                     plan.engine_args_dict,
                     stage_init_timeout,
                 )
-            with launch_stage_replica(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-                stage_id=plan.metadata.stage_id,
-                replica_id=plan.replica_id,
-                stage_config=plan.stage_cfg,
-                omni_master_server=self._get_omni_master_server(),
-                omni_coordinator_address=self._get_coordinator_address(),
-                stage_visible_devices=physical_devices,
-                spawn_device_lock=self._spawn_device_lock,
-            ) as resources:
-                pass
+            # Serialize spawn+startup across local LLM replicas so each replica's
+            # engine cores bind their (get_open_port-derived) worker init ports
+            # before the next replica begins — otherwise concurrent inner-DP
+            # replicas race and collide (EADDRINUSE). Diffusion replicas use a
+            # separate inline path and are unaffected.
+            with self._local_llm_spawn_lock:
+                with launch_stage_replica(
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=False,
+                    stage_id=plan.metadata.stage_id,
+                    replica_id=plan.replica_id,
+                    stage_config=plan.stage_cfg,
+                    omni_master_server=self._get_omni_master_server(),
+                    omni_coordinator_address=self._get_coordinator_address(),
+                    stage_visible_devices=physical_devices,
+                    spawn_device_lock=self._spawn_device_lock,
+                ) as resources:
+                    pass
 
             logger.info("[StageRuntime] Stage %s engine startup completed", plan.metadata.stage_id)
             if resources is None:
