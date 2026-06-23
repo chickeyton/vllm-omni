@@ -609,7 +609,7 @@ def register_stage_with_omni_master(
     omni_master_port: int,
     omni_stage_id: int,
     omni_stage_config: Any = None,
-    coordinator: DPCoordinator | None = None,
+    dp_coordinator: DPCoordinator | None = None,
     replica_id: int | None = 0,
     replica_bind_address: str | None = None,
 ) -> StageRegistrationResponse:
@@ -634,11 +634,11 @@ def register_stage_with_omni_master(
                 "replica_id": wire_replica_id,
                 "stage_config": _serialize_stage_config(omni_stage_config),
             }
-            if coordinator is not None:
-                coordinator_input, coordinator_output = coordinator.get_engine_socket_addresses()
+            if dp_coordinator is not None:
+                coordinator_input, coordinator_output = dp_coordinator.get_engine_socket_addresses()
                 payload["coordinator_input"] = coordinator_input
                 payload["coordinator_output"] = coordinator_output
-                payload["frontend_stats_publish_address"] = coordinator.get_stats_publish_address()
+                payload["frontend_stats_publish_address"] = dp_coordinator.get_stats_publish_address()
 
             # Advertise this host for KV connector routing. Serving/control
             # sockets stay head-owned; remote workers only connect to them.
@@ -850,7 +850,7 @@ def _launch_omni_core_engines(
         omni_master_port=omni_master_server.port,
         omni_stage_id=stage_id,
         omni_stage_config=stage_config,
-        coordinator=coordinator,
+        dp_coordinator=coordinator,
         replica_id=replica_id,
     )
     handshake_address = registration.handshake_address
@@ -999,7 +999,7 @@ def launch_headless_llm_replica(
     omni_master_port: int,
     stage_id: int,
     stage_config: Any,
-    coordinator: DPCoordinator | None = None,
+    dp_coordinator: DPCoordinator | None = None,
     replica_bind_address: str | None = None,
 ) -> CoreEngineProcManager:
     """Register and launch one headless LLM replica.
@@ -1022,7 +1022,7 @@ def launch_headless_llm_replica(
         omni_master_port=omni_master_port,
         omni_stage_id=stage_id,
         omni_stage_config=stage_config,
-        coordinator=coordinator,
+        dp_coordinator=dp_coordinator,
         replica_id=None,
         replica_bind_address=replica_bind_address,
     )
@@ -1102,7 +1102,7 @@ def launch_headless_llm_replicas(
                 omni_master_port=omni_master_port,
                 stage_id=stage_id,
                 stage_config=stage_config,
-                coordinator=coordinator,
+                dp_coordinator=coordinator,
                 replica_bind_address=replica_bind_address,
             )
 
