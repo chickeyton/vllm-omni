@@ -553,6 +553,8 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     replica by a factor of ``dp`` and made ``num_replicas > 1`` combined
     with ``data_parallel_size > 1`` unrunnable: the device split demanded
     ``tp`` GPUs/replica while the runtime placed workers across ``tp x dp``.
+
+    For diffusion stages it is the diffusion ``parallel_config.world_size``.
     """
     if getattr(stage_cfg, "stage_type", "llm") != "diffusion":
         tp = _stage_engine_arg_int(stage_cfg, "tensor_parallel_size", 1)
@@ -561,7 +563,8 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
         dp = _stage_engine_arg_int(stage_cfg, "data_parallel_size", 1)
         return max(1, tp * pp * pcp * dp)
 
-    parallel_config = _get_attr_or_item(getattr(stage_cfg, "engine_args", {}), "parallel_config")
+    engine_args = getattr(stage_cfg, "engine_args", {})
+    parallel_config = _get_attr_or_item(engine_args, "parallel_config")
     if parallel_config is None:
         return 1
 
