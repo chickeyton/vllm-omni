@@ -542,39 +542,38 @@ def get_stage_tp_size(stage_cfg: Any) -> int:
 def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     """Return the number of devices consumed by one replica of *stage_cfg*.
 
-    For LLM stages this is the full intra-replica GPU count
-    ``tp x pp x pcp x dp``: every inner vLLM-DP rank needs its own
+    Diffusion stages derive their device count from the diffusion
+    ``parallel_config`` world size. LLM stages use the full intra-replica GPU
+    count ``tp x pp x pcp x dp``: every inner vLLM-DP rank needs its own
     ``tp x pp`` GPUs, so a replica running ``data_parallel_size`` ranks
-    consumes ``dp`` times the TP world (matches PR1 design §3.2 rule 9 and
-    how single-replica ``devices:`` are written — e.g. ``"0,1,2,3"`` for
-    ``tp=2, dp=2``).
-
-    Returning ``tp`` alone (the prior behavior) under-provisioned every
-    replica by a factor of ``dp`` and made ``num_replicas > 1`` combined
-    with ``data_parallel_size > 1`` unrunnable: the device split demanded
-    ``tp`` GPUs/replica while the runtime placed workers across ``tp x dp``.
+    consumes ``dp`` times the TP world (matches PR1 design 3.2 rule 9 and how
+    single-replica ``devices:`` are written -- e.g. ``\"0,1,2,3\"`` for
+    ``tp=2, dp=2``). Returning ``tp`` alone under-provisioned every replica by
+    ``dp`` and made ``num_replicas > 1`` with ``data_parallel_size > 1``
+    unrunnable.
     """
-    if getattr(stage_cfg, "stage_type", "llm") != "diffusion":
-        tp = _stage_engine_arg_int(stage_cfg, "tensor_parallel_size", 1)
-        pp = _stage_engine_arg_int(stage_cfg, "pipeline_parallel_size", 1)
-        pcp = _stage_engine_arg_int(stage_cfg, "prefill_context_parallel_size", 1)
-        dp = _stage_engine_arg_int(stage_cfg, "data_parallel_size", 1)
-        return max(1, tp * pp * pcp * dp)
+    engine_args = getattr(stage_cfg, "engine_args", {})
+    if getattr(stage_cfg, "stage_type", "llm") == "diffusion":
+        parallel_config = _get_attr_or_item(engine_args, "parallel_config")
+        if parallel_config is None:
+            return 1
 
-    parallel_config = _get_attr_or_item(getattr(stage_cfg, "engine_args", {}), "parallel_config")
-    if parallel_config is None:
-        return 1
+        world_size = _get_attr_or_item(parallel_config, "world_size")
+        if world_size is not None:
+            return max(1, int(world_size))
 
-    world_size = _get_attr_or_item(parallel_config, "world_size")
-    if world_size is not None:
-        return max(1, int(world_size))
+        try:
+            from vllm_omni.diffusion.data import DiffusionParallelConfig
 
-    try:
-        from vllm_omni.diffusion.data import DiffusionParallelConfig
+            return max(1, int(DiffusionParallelConfig.from_dict(_to_dict(parallel_config)).world_size))
+        except Exception:
+            return 1
 
-        return max(1, int(DiffusionParallelConfig.from_dict(_to_dict(parallel_config)).world_size))
-    except Exception:
-        return 1
+    tp = _stage_engine_arg_int(stage_cfg, "tensor_parallel_size", 1)
+    pp = _stage_engine_arg_int(stage_cfg, "pipeline_parallel_size", 1)
+    pcp = _stage_engine_arg_int(stage_cfg, "prefill_context_parallel_size", 1)
+    dp = _stage_engine_arg_int(stage_cfg, "data_parallel_size", 1)
+    return max(1, tp * pp * pcp * dp)
 
 
 def compute_replica_layout(
