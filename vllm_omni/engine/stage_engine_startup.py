@@ -725,7 +725,7 @@ def connect_remote_engine_cores(
             addresses,
             engines_to_handshake,
             vllm_config.parallel_config,
-            False,  # coordinated_dp
+            parallel_config.data_parallel_size > 1 and vllm_config.model_config.is_moe,  # coordinated_dp
             vllm_config.cache_config,
             None,  # proc_manager (remote — no local procs)
             None,  # coord_process
@@ -955,12 +955,30 @@ def launch_stage_replica(
 
     from vllm_omni.engine.stage_engine_core_proc_manager import StageEngineCoreProcManager
 
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = _engine_count(parallel_config)
     addresses = get_engine_zmq_addresses(vllm_config)
     handshake_address = get_open_zmq_ipc_path()
-    engines_to_handshake = [CoreEngine(index=0, local=True)]
+    engines_to_handshake = [CoreEngine(index=i, local=True) for i in range(local_engine_count)]
+
+    # Inner vLLM DP (data_parallel_size > 1) needs a DP coordinator for wave
+    # coordination (MoE) and stats publishing, mirroring the master/distributed
+    # path. Without it the DP-aware engine client asserts on a missing
+    # stats_update_address. DP=1 stages have needs_dp_coordinator=False, so this
+    # leaves the non-DP colocated path unchanged.
+    if vllm_config.needs_dp_coordinator:
+        coordinator: DPCoordinator | None = DPCoordinator(
+            parallel_config,
+            enable_wave_coordination=vllm_config.model_config.is_moe,
+        )
+        addresses.coordinator_input, addresses.coordinator_output = coordinator.get_engine_socket_addresses()
+        addresses.frontend_stats_publish_address = coordinator.get_stats_publish_address()
+    else:
+        coordinator = None
+
     with scoped_spawn_device_env(stage_visible_devices, spawn_device_lock):
         engine_manager = StageEngineCoreProcManager(
-            local_engine_count=1,
+            local_engine_count=local_engine_count,
             start_index=0,
             local_start_index=0,
             vllm_config=vllm_config,
@@ -976,6 +994,7 @@ def launch_stage_replica(
     with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
         yield StageReplicaResources(
             manager=engine_manager,
+            coordinator=coordinator,
             addresses=addresses,
         )
         wait_for_engine_startup(
@@ -983,10 +1002,10 @@ def launch_stage_replica(
             addresses,
             engines_to_handshake,
             vllm_config.parallel_config,
-            False,  # coordinated_dp
+            parallel_config.data_parallel_size > 1 and vllm_config.model_config.is_moe,  # coordinated_dp
             vllm_config.cache_config,
             engine_manager,
-            None,  # coordinator_proc
+            coordinator.proc if coordinator else None,
         )
 
 
