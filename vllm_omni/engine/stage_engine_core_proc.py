@@ -43,7 +43,19 @@ def _signal_exit_code(signum: int) -> int:
     return _SIGNAL_EXIT_BASE + signum
 
 
-class StageEngineCoreProc(EngineCoreProc):
+class _StageEngineCoreMixin:
+    """Stage-specific ``EngineCoreProc`` behavior shared by the non-DP and DP
+    variants (:class:`StageEngineCoreProc` and :class:`StageDPEngineCoreProc`).
+
+    Empty today — ``StageEngineCoreProc`` overrides no engine behavior over
+    upstream ``EngineCoreProc``. Any future stage engine-behavior hook belongs
+    here so both variants pick it up and cannot silently diverge; the MoE
+    inner-DP path would otherwise bypass overrides defined only on
+    ``StageEngineCoreProc``.
+    """
+
+
+class StageEngineCoreProc(_StageEngineCoreMixin, EngineCoreProc):
     """Stage-specific engine core process for vLLM-Omni.
 
     Inherits from EngineCoreProc and provides its own ``run_stage_core``
@@ -93,7 +105,7 @@ class StageEngineCoreProc(EngineCoreProc):
                 "available."
             )
 
-        engine_core: StageEngineCoreProc | None = None
+        engine_core: EngineCoreProc | None = None
         coord_client = None
         try:
             # NOTE: previous revisions hardcoded data_parallel_size=1 here
@@ -142,7 +154,7 @@ class StageEngineCoreProc(EngineCoreProc):
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 parallel_config.data_parallel_rank = dp_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
+                engine_core = StageDPEngineCoreProc(*args, **kwargs)
             else:
                 if data_parallel:
                     parallel_config.data_parallel_size = 1
@@ -212,3 +224,14 @@ class StageEngineCoreProc(EngineCoreProc):
                     coord_client.close()
             if engine_core is not None:
                 engine_core.shutdown()
+
+
+class StageDPEngineCoreProc(_StageEngineCoreMixin, DPEngineCoreProc):
+    """MoE inner-DP variant of :class:`StageEngineCoreProc`.
+
+    Instantiated by :meth:`StageEngineCoreProc.run_stage_core` for MoE stages
+    running inner ``data_parallel_size > 1``. Inherits ``DPEngineCoreProc``'s
+    per-rank/wave DP coordination (so each engine owns a distinct DP rank and
+    binds its own rendezvous port) plus the shared
+    :class:`_StageEngineCoreMixin` stage behavior. Adds no overrides of its own.
+    """
