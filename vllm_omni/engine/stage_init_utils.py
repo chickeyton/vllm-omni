@@ -547,7 +547,7 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     count ``tp x pp x pcp x dp``: every inner vLLM-DP rank needs its own
     ``tp x pp`` GPUs, so a replica running ``data_parallel_size`` ranks
     consumes ``dp`` times the TP world (matches PR1 design 3.2 rule 9 and how
-    single-replica ``devices:`` are written -- e.g. ``\"0,1,2,3\"`` for
+    single-replica ``devices:`` are written -- e.g. ``"0,1,2,3"`` for
     ``tp=2, dp=2``). Returning ``tp`` alone under-provisioned every replica by
     ``dp`` and made ``num_replicas > 1`` with ``data_parallel_size > 1``
     unrunnable.
@@ -574,7 +574,6 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     pcp = _stage_engine_arg_int(stage_cfg, "prefill_context_parallel_size", 1)
     dp = _stage_engine_arg_int(stage_cfg, "data_parallel_size", 1)
     return max(1, tp * pp * pcp * dp)
-
 
 def compute_replica_layout(
     stage_configs: Sequence[Any],
