@@ -417,7 +417,9 @@ class StageRuntime:
                     replica_vllm_config = copy.deepcopy(stage_vllm_config)
                     replica_parallel_config = replica_vllm_config.parallel_config
                     replica_parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
-                    replica_parallel_config.data_parallel_master_port = replica_parallel_config._data_parallel_master_port_list[-1]
+                    replica_parallel_config.data_parallel_master_port = (
+                        replica_parallel_config._data_parallel_master_port_list[-1]
+                    )
 
                 replicas.append(
                     ReplicaInitPlan(

@@ -575,6 +575,7 @@ def get_stage_devices_per_replica(stage_cfg: Any) -> int:
     dp = _stage_engine_arg_int(stage_cfg, "data_parallel_size", 1)
     return max(1, tp * pp * pcp * dp)
 
+
 def compute_replica_layout(
     stage_configs: Sequence[Any],
     *,

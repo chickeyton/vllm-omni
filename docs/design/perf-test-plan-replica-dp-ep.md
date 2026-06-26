@@ -241,7 +241,7 @@ throughput is capped by DiT** regardless of AR DP. Therefore:
 Per (config × profile), at saturation concurrency. **AR-stage TTFT and AR-stage e2el are the
 headline LLM-stage metrics**; overall e2e is reported alongside.
 
-| Config | Profile | AR TTFT p50/p95 (ms) | AR e2el p50/p95 (s) | AR thr (req/s) | DiT thr (img/s) | E2E thr (img/s) | E2E p50/p95 (s) | KV xfer (ms) | VRAM peak (GB) / KV blocks |
+| Config | Profile | AR TTFT p50/p95 (ms) | AR e2el p50/p95 (s) | AR throughput (req/s) | DiT throughput (img/s) | E2E throughput (img/s) | E2E p50/p95 (s) | KV xfer (ms) | VRAM peak (GB) / KV blocks |
 |---|---|---|---|---|---|---|---|---|---|
 | C1 | 50-step | | | | | | | | |
 | C2 | 50-step | | | | | | | | |
@@ -252,7 +252,7 @@ headline LLM-stage metrics**; overall e2e is reported alongside.
 | C3 | 12-step | | | | | | | | |
 | C4 | 12-step | | | | | | | | |
 
-Derived: `C2/C1` (overhead) on AR TTFT + AR e2el + e2e thr; `C3/C2` AR-throughput ratio,
+Derived: `C2/C1` (overhead) on AR TTFT + AR e2el + e2e throughput; `C3/C2` AR-throughput ratio,
 `C3/C2` AR-TTFT/e2el reduction under load, `C3/C2` overall e2e ratio; `C4/C2` equal-budget
 axis ratio (DP+EP vs 2nd dense replica) on AR throughput + AR TTFT/e2el + KV-cache blocks.
 
