@@ -770,7 +770,7 @@ class DistStageRuntime(StageRuntime):
         single_stage_id_filter: int | None,
         omni_master_address: str,
         omni_master_port: int,
-        omni_dp_size_local: int = 1,
+        omni_num_replica: int = 1,
         omni_heartbeat_timeout: float = 30.0,
         omni_lb_policy: str = "random",
         request_queue: janus.Queue[EngineQueueMessage] | None = None,
@@ -793,7 +793,7 @@ class DistStageRuntime(StageRuntime):
 
         self._omni_master_server: OmniMasterServer | None = None
         self._coordinator_runtime: Any | None = None
-        self._omni_dp_size_local = omni_dp_size_local
+        self._omni_num_replica = omni_num_replica
         self._stage_remote_factory_contexts: dict[int, StageRemoteFactoryContext] = {}
 
     def create_membership_controller(self) -> Any | None:
@@ -814,7 +814,7 @@ class DistStageRuntime(StageRuntime):
         return super()._prepare_stage_plans()
 
     def _validate_single_stage_mode_replica_constraints(self) -> None:
-        """Apply --omni-dp-size-local to the local stage's runtime.num_replicas."""
+        """Apply omni_num_replica to the local stage's runtime.num_replicas."""
         target_stage_id = self._single_stage_id_filter
         if target_stage_id is None:
             return
@@ -826,14 +826,14 @@ class DistStageRuntime(StageRuntime):
                 continue
             if stage_id == target_stage_id:
                 try:
-                    runtime_cfg.num_replicas = self._omni_dp_size_local
+                    runtime_cfg.num_replicas = self._omni_num_replica
                 except (AttributeError, TypeError):
                     if hasattr(runtime_cfg, "__setitem__"):
-                        runtime_cfg["num_replicas"] = self._omni_dp_size_local
+                        runtime_cfg["num_replicas"] = self._omni_num_replica
                         continue
                     logger.warning(
-                        "[DistStageRuntime] Failed to apply omni_dp_size_local=%s to stage %s runtime config",
-                        self._omni_dp_size_local,
+                        "[DistStageRuntime] Failed to apply omni_num_replica=%s to stage %s runtime config",
+                        self._omni_num_replica,
                         stage_id,
                     )
 
@@ -1107,7 +1107,7 @@ def create_stage_runtime(
     single_stage_id_filter: int | None = None,
     omni_master_address: str | None = None,
     omni_master_port: int | None = None,
-    omni_dp_size_local: int = 1,
+    omni_num_replica: int = 1,
     omni_heartbeat_timeout: float = 30.0,
     omni_lb_policy: str = "random",
     request_queue: janus.Queue[EngineQueueMessage] | None = None,
@@ -1127,11 +1127,16 @@ def create_stage_runtime(
             single_stage_id_filter=single_stage_id_filter,
             omni_master_address=omni_master_address,
             omni_master_port=omni_master_port,
-            omni_dp_size_local=omni_dp_size_local,
+            omni_num_replica=omni_num_replica,
             omni_heartbeat_timeout=omni_heartbeat_timeout,
             omni_lb_policy=omni_lb_policy,
             request_queue=request_queue,
         )
+    # Single-process: --omni-num-replica fans the comprehension (AR) stage into
+    # that many replicas. The distributed path applies it to its --stage-id
+    # stage instead (see DistStageRuntime).
+    if omni_num_replica > 1:
+        _apply_num_replicas_to_comprehension_stage(stage_configs, omni_num_replica)
     return StageRuntime(
         stage_configs=stage_configs,
         model=model,
@@ -1141,3 +1146,22 @@ def create_stage_runtime(
         async_chunk=async_chunk,
         tokenizer=tokenizer,
     )
+
+
+def _apply_num_replicas_to_comprehension_stage(stage_configs: Sequence[Any], num_replicas: int) -> None:
+    """Set the comprehension (AR) stage's ``runtime.num_replicas`` for single-process
+    ``--omni-num-replica``. Targets the ``is_comprehension`` stage, falling back to the
+    first non-diffusion (LLM) stage."""
+    target = next((c for c in stage_configs if getattr(c, "is_comprehension", False)), None)
+    if target is None:
+        target = next((c for c in stage_configs if getattr(c, "stage_type", "llm") != "diffusion"), None)
+    if target is None:
+        return
+    runtime_cfg = getattr(target, "runtime", None)
+    if runtime_cfg is None:
+        return
+    try:
+        runtime_cfg.num_replicas = num_replicas
+    except (AttributeError, TypeError):
+        if hasattr(runtime_cfg, "__setitem__"):
+            runtime_cfg["num_replicas"] = num_replicas

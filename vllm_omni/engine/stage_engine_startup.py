@@ -1077,7 +1077,7 @@ def launch_headless_llm_replicas(
     omni_master_port: int,
     stage_id: int,
     stage_config: Any,
-    omni_dp_size_local: int,
+    omni_num_replica: int,
     per_replica_devices: list[str | None],
     replica_bind_address: str | None = None,
 ) -> None:
@@ -1103,7 +1103,7 @@ def launch_headless_llm_replicas(
     logger.info(
         "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) for stage %d "
         "via OmniMasterServer at %s:%d",
-        omni_dp_size_local,
+        omni_num_replica,
         local_engine_count,
         stage_id,
         omni_master_address,
@@ -1127,7 +1127,7 @@ def launch_headless_llm_replicas(
 
         launch_headless_replica_group(
             stage_id=stage_id,
-            omni_dp_size_local=omni_dp_size_local,
+            omni_num_replica=omni_num_replica,
             per_replica_devices=per_replica_devices,
             launch_one=_launch_one,
         )
@@ -1201,7 +1201,7 @@ def replica_device_env(stage_id: int, devices: str | None):
 def get_headless_replica_devices(
     stage_cfg: Any,
     stage_id: int,
-    omni_dp_size_local: int,
+    omni_num_replica: int,
 ) -> list[str | None]:
     """Return per-replica device slices for a headless stage."""
     runtime_cfg = getattr(stage_cfg, "runtime", None)
@@ -1211,16 +1211,16 @@ def get_headless_replica_devices(
             runtime_cfg.get("devices") if hasattr(runtime_cfg, "get") else getattr(runtime_cfg, "devices", None)
         )
     if not devices_str:
-        return [None] * omni_dp_size_local
+        return [None] * omni_num_replica
 
     devices_per_replica = stage_init_utils.get_stage_devices_per_replica(stage_cfg)
     per_replica_devices = stage_init_utils.split_devices_for_replicas(
-        devices_str, omni_dp_size_local, devices_per_replica, stage_id
+        devices_str, omni_num_replica, devices_per_replica, stage_id
     )
     logger.info(
         "[Headless] Stage %d: %d local replicas, devices_per_replica=%d, per-replica devices: %s",
         stage_id,
-        omni_dp_size_local,
+        omni_num_replica,
         devices_per_replica,
         per_replica_devices,
     )
@@ -1269,7 +1269,7 @@ def wait_for_diffusion_manager_liveness(managers: list[Any]) -> None:
 def launch_headless_replica_group(
     *,
     stage_id: int,
-    omni_dp_size_local: int,
+    omni_num_replica: int,
     per_replica_devices: list[str | None],
     launch_one: Callable[[int], Any],
     wait_for_replicas: Callable[[list[Any]], None] = wait_for_manager_liveness,
@@ -1277,7 +1277,7 @@ def launch_headless_replica_group(
     """Launch, monitor, and clean up a group of local headless replicas."""
     managers: list[Any] = []
     try:
-        for rep_idx in range(omni_dp_size_local):
+        for rep_idx in range(omni_num_replica):
             with replica_device_env(stage_id, per_replica_devices[rep_idx]):
                 managers.append(launch_one(rep_idx))
         wait_for_replicas(managers)
@@ -1298,7 +1298,7 @@ def launch_headless_diffusion_replicas(
     stage_id: int,
     omni_master_address: str,
     omni_master_port: int,
-    omni_dp_size_local: int,
+    omni_num_replica: int,
     per_replica_devices: list[str | None],
     config_path: str,
     replica_bind_address: str | None = None,
@@ -1321,7 +1321,7 @@ def launch_headless_diffusion_replicas(
 
     logger.info(
         "[Headless] Launching %d diffusion replica(s) for stage %d via OmniMasterServer at %s:%d",
-        omni_dp_size_local,
+        omni_num_replica,
         stage_id,
         omni_master_address,
         omni_master_port,
@@ -1330,7 +1330,7 @@ def launch_headless_diffusion_replicas(
     def _launch_one(rep_idx: int) -> Any:
         # Keep torch.distributed ports away from the ZMQ ephemeral range that
         # OmniMasterServer pre-allocates for sibling headless replicas.
-        if omni_dp_size_local > 1:
+        if omni_num_replica > 1:
             od_config.master_port = od_config.settle_port(
                 61000 + rep_idx * 100,
                 port_inc=37,
@@ -1347,7 +1347,7 @@ def launch_headless_diffusion_replicas(
 
     launch_headless_replica_group(
         stage_id=stage_id,
-        omni_dp_size_local=omni_dp_size_local,
+        omni_num_replica=omni_num_replica,
         per_replica_devices=per_replica_devices,
         launch_one=_launch_one,
         wait_for_replicas=wait_for_diffusion_manager_liveness,
