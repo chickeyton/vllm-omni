@@ -378,6 +378,7 @@ class StageDeployConfig:
     ring_degree: int | None = None
     cfg_parallel_size: int | None = None
     vae_patch_parallel_size: int | None = None
+    vae_parallel_mode: str | None = None
     use_hsdp: bool | None = None
     hsdp_shard_size: int | None = None
     hsdp_replicate_size: int | None = None
@@ -718,6 +719,7 @@ _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
     "active_stream_window",
     "custom_voice_dir",
 )
+PIPELINE_WIDE_ENGINE_FIELDS = _PIPELINE_WIDE_ENGINE_FIELDS
 
 
 def _build_engine_args(
