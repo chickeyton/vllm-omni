@@ -1287,8 +1287,25 @@ class Orchestrator:
                             [req_id, *self._cfg_tracker.cleanup_parent(req_id)],
                         )
                         return
-                    if already_submitted and len(diffusion_prompt) == 1:
+                    # The AR→DiT input processor wraps a single diffusion prompt
+                    # in a list. Unwrap a length-1 list for BOTH the initial and the
+                    # streaming-update submit: upstream #4079 removed diffusion
+                    # list-prompt batch support (``stage_pool.submit_initial`` /
+                    # ``submit_update`` now reject lists), so each diffusion request
+                    # must be submitted independently.
+                    if len(diffusion_prompt) == 1:
                         diffusion_prompt = diffusion_prompt[0]
+                    elif not already_submitted:
+                        # A genuine multi-prompt diffusion batch previously rode the
+                        # list-prompt path that #4079 removed. Fanning it into N
+                        # independent diffusion requests under one orchestrator
+                        # req_id needs sub-request tracking that is not wired up yet,
+                        # so fail loudly instead of handing a list to submit_initial.
+                        raise ValueError(
+                            f"req={req_id}: AR→DiT produced {len(diffusion_prompt)} diffusion "
+                            "prompts; multi-prompt batches are no longer supported as a single "
+                            "submit (upstream #4079). Emit independent diffusion requests instead."
+                        )
             else:
                 diffusion_prompt = req_state.prompt
 
