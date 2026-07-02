@@ -157,9 +157,9 @@ class StageEngineCoreProc(_StageEngineCoreMixin, EngineCoreProc):
                 engine_core = StageDPEngineCoreProc(*args, **kwargs)
             else:
                 # Non-MoE DP ranks are completely independent, so treat like DP=1
-                # (mirrors vLLM's ``run_engine_core``). For a non-DP stage these
+                # (mirrors vLLM's run_engine_core). For a non-DP stage these
                 # are already the effective values, so the assignment is a no-op;
-                # ``data_parallel_index`` above still reflects the original rank.
+                # data_parallel_index above still reflects the original rank.
                 parallel_config.data_parallel_size = 1
                 parallel_config.data_parallel_size_local = 1
                 parallel_config.data_parallel_rank = 0
