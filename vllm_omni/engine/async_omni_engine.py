@@ -52,7 +52,7 @@ from vllm_omni.engine.serialization import (
 )
 from vllm_omni.engine.stage_client import StageClient
 from vllm_omni.engine.stage_init_utils import build_stage0_input_processor
-from vllm_omni.engine.stage_pool import StagePool
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_runtime import (
     StageRuntimeInfo,
     create_stage_runtime,
