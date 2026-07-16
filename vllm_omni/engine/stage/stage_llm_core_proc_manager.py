@@ -90,7 +90,7 @@ class StageLLMCoreProcManager(CoreEngineProcManager):
             "log_stats": log_stats,
             "tensor_queue": tensor_queue,
             "omni_stage_id": int(omni_stage_id),
-            "omni_coordinator_address": omni_coordinator_address,
+            "omni_coord_address": omni_coordinator_address,
         }
 
         if client_handshake_address:
