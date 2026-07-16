@@ -856,7 +856,7 @@ def _launch_omni_core_engines(
     """Launch local engine cores using the omni registration flow.
 
     When ``omni_coordinator_address`` is provided, the spawned engine
-    subprocesses use :class:`StageEngineCoreProcManager` and each
+    subprocesses use :class:`StageLLMCoreProcManager` and each
     instantiates an :class:`OmniCoordClientForStage` after the handshake
     completes so the head's :class:`OmniCoordinator` knows about them.
     """
@@ -922,10 +922,10 @@ def _launch_omni_core_engines(
         if omni_coordinator_address is not None:
             # Use the omni subclass so each spawned subprocess instantiates
             # an OmniCoordClientForStage and heartbeats to the coordinator.
-            from vllm_omni.engine.stage_engine_core_proc_manager import StageEngineCoreProcManager
+            from vllm_omni.engine.stage.stage_llm_core_proc_manager import StageLLMCoreProcManager
 
             with scoped_spawn_device_env(stage_visible_devices, spawn_device_lock):
-                local_engine_manager: CoreEngineProcManager = StageEngineCoreProcManager(
+                local_engine_manager: CoreEngineProcManager = StageLLMCoreProcManager(
                     local_engine_count=local_engine_count,
                     start_index=start_index,
                     local_start_index=local_start_index,
@@ -1009,13 +1009,13 @@ def launch_stage_replica(
 
     from vllm.utils.network_utils import get_open_zmq_ipc_path
 
-    from vllm_omni.engine.stage_engine_core_proc_manager import StageEngineCoreProcManager
+    from vllm_omni.engine.stage.stage_llm_core_proc_manager import StageLLMCoreProcManager
 
     addresses = get_engine_zmq_addresses(vllm_config)
     handshake_address = get_open_zmq_ipc_path()
     engines_to_handshake = [CoreEngine(index=0, local=True)]
     with scoped_spawn_device_env(stage_visible_devices, spawn_device_lock):
-        engine_manager = StageEngineCoreProcManager(
+        engine_manager = StageLLMCoreProcManager(
             local_engine_count=1,
             start_index=0,
             local_start_index=0,
@@ -1065,7 +1065,7 @@ def launch_headless_llm_replica(
     ``OmniMasterServer``. Keep that registration/manager wiring in the startup
     layer so the CLI only handles argument/config normalization.
     """
-    from vllm_omni.engine.stage_engine_core_proc_manager import StageEngineCoreProcManager
+    from vllm_omni.engine.stage.stage_llm_core_proc_manager import StageLLMCoreProcManager
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -1083,7 +1083,7 @@ def launch_headless_llm_replica(
         replica_bind_address=replica_bind_address,
     )
 
-    manager = StageEngineCoreProcManager(
+    manager = StageLLMCoreProcManager(
         local_engine_count=local_engine_count,
         start_index=dp_rank,
         local_start_index=0,
@@ -1196,9 +1196,11 @@ def launch_headless_diffusion_replica(
         replica_id=None,
         replica_bind_address=replica_bind_address,
     )
-    from vllm_omni.diffusion import stage_diffusion_proc
+    from vllm_omni.engine.stage.stage_diffusion_core_proc_manager import (
+        StageDiffusionCoreProcManager,
+    )
 
-    manager = stage_diffusion_proc.StageDiffusionProcManager.launch_headless(
+    manager = StageDiffusionCoreProcManager.launch_headless(
         model=model,
         od_config=od_config,
         handshake_address=response.handshake_address,
@@ -1421,8 +1423,10 @@ def launch_diffusion_stage_replica(
         )
         return client, StageReplicaResources()
 
-    from vllm_omni.diffusion import stage_diffusion_proc
-    from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+    from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+    from vllm_omni.engine.stage.stage_diffusion_core_proc_manager import (
+        StageDiffusionCoreProcManager,
+    )
 
     od_config = build_diffusion_config(model, stage_config, metadata)
     parallel_config = getattr(od_config, "parallel_config", None)
@@ -1445,7 +1449,7 @@ def launch_diffusion_stage_replica(
             omni_stage_config=stage_config,
             replica_id=replica_id,
         )
-        proc_manager = stage_diffusion_proc.StageDiffusionProcManager(
+        proc_manager = StageDiffusionCoreProcManager(
             model=model,
             od_config=od_config,
             stage_init_timeout=stage_init_timeout,
@@ -1458,7 +1462,7 @@ def launch_diffusion_stage_replica(
             omni_stage_id=metadata.stage_id,
             omni_replica_id=replica_id,
         )
-        client = StageDiffusionClient.from_addresses(
+        client = StageDiffusionCoreClient.from_addresses(
             metadata,
             request_address=proc_manager.addresses.inputs[0],
             response_address=proc_manager.addresses.outputs[0],

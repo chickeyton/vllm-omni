@@ -33,7 +33,7 @@ from vllm_omni.engine.messages import (
     RegisterRemoteReplicaMessage,
 )
 from vllm_omni.engine.stage_client import StageClient, StagePoolClient
-from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClientBase
+from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
 from vllm_omni.engine.stage_engine_startup import (
     OmniMasterServer,
     StageReplicaResources,
@@ -59,7 +59,7 @@ from vllm_omni.engine.stage_init_utils import (
     prepare_engine_environment,
     release_device_locks,
 )
-from vllm_omni.engine.stage_pool import StagePool
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.entrypoints.stage_utils import resolve_stage_physical_devices
 from vllm_omni.entrypoints.utils import inject_omni_kv_config
 from vllm_omni.outputs.output_metadata import FinalOutputModalityType
@@ -535,7 +535,7 @@ class StageRuntime:
         self,
         plan: ReplicaInitPlan,
         stage_init_timeout: int,
-    ) -> StageEngineCoreClientBase:
+    ) -> StageLLMCoreClientBase:
         """Initialize one local LLM replica using vLLM's launch/attach pattern."""
         resources: StageReplicaResources | None = None
         stage_client = None
@@ -587,14 +587,17 @@ class StageRuntime:
                 raise RuntimeError(f"LLM stage {plan.metadata.stage_id} launcher returned no resources")
             if resources.addresses is None:
                 raise RuntimeError(f"LLM stage {plan.metadata.stage_id} launcher returned no addresses")
-            stage_client = StageEngineCoreClientBase.make_async_mp_client(
+            stage_client = StageLLMCoreClientBase.make_async_mp_client(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 metadata=plan.metadata,
                 client_addresses=self._client_addresses_from_zmq(resources.addresses),
-                engine_manager=resources.manager,
+                proc_manager=resources.manager,
                 coordinator=resources.coordinator,
             )
+            # replica_id is late-bound on the new client; deliver the metadata's
+            # assignment so KV-sender endpoint keying matches the spawned procs.
+            stage_client.bind_replica_id(plan.metadata.replica_id)
 
             logger.info("[StageRuntime] Stage %s initialized", plan.metadata.stage_id)
             return stage_client
@@ -979,7 +982,9 @@ class DistStageRuntime(StageRuntime):
         metadata.replica_id = replica_id
 
         if ctx.stage_type == "diffusion":
-            from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+            from vllm_omni.engine.stage.stage_diffusion_core_client import (
+                StageDiffusionCoreClient as StageDiffusionClient,
+            )
 
             resources = None
             try:
@@ -1042,14 +1047,16 @@ class DistStageRuntime(StageRuntime):
             replica_host = self._omni_master_server.get_replica_host(stage_id, replica_id)
             if replica_host:
                 client_addresses["replica_host"] = replica_host
-            client = StageEngineCoreClientBase.make_async_mp_client(
+            client = StageLLMCoreClientBase.make_async_mp_client(
                 vllm_config=vllm_config,
                 executor_class=ctx.executor_class,
                 metadata=metadata,
                 client_addresses=client_addresses,
-                engine_manager=resources.manager,
+                proc_manager=resources.manager,
                 coordinator=resources.coordinator,
             )
+            # replica_id is late-bound on the new client; deliver the assignment.
+            client.bind_replica_id(replica_id)
             logger.info("[DistStageRuntime] Remote LLM replica attached stage=%d replica=%d", stage_id, replica_id)
             return client
         except Exception:

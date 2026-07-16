@@ -50,7 +50,7 @@ from vllm_omni.engine.messages import (
 )
 from vllm_omni.engine.orchestrator_monitor import create_orch_monitor, replica_key
 from vllm_omni.engine.serialization import serialize_additional_information
-from vllm_omni.engine.stage_pool import StagePool
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.metrics.prometheus import OmniRequestCounter
 from vllm_omni.metrics.stat_logger import OmniPrometheusStatLogger
 from vllm_omni.outputs import OmniRequestOutput
@@ -1899,14 +1899,14 @@ class Orchestrator:
             req_state.streaming.source_token_decoder = decode
 
         try:
-            next_inputs = next_client.process_engine_inputs(
+            next_inputs = next_client.process_core_inputs(
                 source_outputs,
                 req_state.prompt,
                 streaming_context=req_state.streaming,
             )
         except Exception:
             logger.exception(
-                "[Orchestrator] req=%s process_engine_inputs FAILED for stage-%s",
+                "[Orchestrator] req=%s process_core_inputs FAILED for stage-%s",
                 req_id,
                 next_logical,
             )
