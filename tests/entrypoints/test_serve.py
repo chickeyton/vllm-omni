@@ -284,7 +284,7 @@ def test_run_headless_llm_registers_with_auto_assigned_replica_id(mocker: Mocker
     assert mgr_kwargs["local_client"] is False
     assert mgr_kwargs["handshake_address"] == "tcp://127.0.0.1:26001"
     assert mgr_kwargs["omni_stage_id"] == 0
-    assert mgr_kwargs["omni_coordinator_address"] == "tcp://127.0.0.1:26100"
+    assert mgr_kwargs["omni_coord_address"] == "tcp://127.0.0.1:26100"
     assert mgr_kwargs["omni_replica_base_id"] == 0
 
     engine_manager.monitor_engine_liveness.assert_called_once_with()
@@ -431,7 +431,7 @@ def test_run_headless_diffusion_registers_and_spawns_proc(mocker: MockerFixture)
     assert manager_kwargs["handshake_address"] == "tcp://127.0.0.1:26001"
     assert manager_kwargs["addresses"].inputs == ["tcp://127.0.0.1:26002"]
     assert manager_kwargs["addresses"].outputs == ["tcp://127.0.0.1:26003"]
-    assert manager_kwargs["omni_coordinator_address"] == "tcp://127.0.0.1:26100"
+    assert manager_kwargs["omni_coord_address"] == "tcp://127.0.0.1:26100"
     assert manager_kwargs["omni_stage_id"] == 1
     assert manager_kwargs["omni_replica_id"] == 0
 

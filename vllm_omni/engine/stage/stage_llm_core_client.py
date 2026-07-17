@@ -54,10 +54,11 @@ class StageLLMCoreClientBase(StageCoreClientBase):
     client (plain or DP load-balancing) that supplies ZMQ transport, the output
     queue, and the vLLM-named methods.
 
-    ``replica_id`` is **late-bound** (the base owns its unassigned ``None``
-    default): it is unknown at construction — the master assigns it during the
-    proc's registration handshake — and must be delivered via
-    :meth:`bind_replica_id` before any KV-transfer sender info is requested.
+    ``replica_id`` is set from ``metadata`` by ``StageCoreClientBase.__init__``:
+    the master assigns it during the proc's registration handshake, which always
+    precedes client construction, so it is already concrete here. The KV-transfer
+    sender endpoint (keyed on ``replica_id`` + ``stage_id``) is built in
+    ``__init__`` right after ``super().__init__()`` populates both.
     """
 
     @staticmethod
@@ -111,8 +112,6 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         only asserts the precondition (read-only) before the decoder is created.
         """
         # Stage metadata is populated by StageCoreClientBase.__init__ (below).
-        # replica_id keeps the base default (``None`` = unassigned) until
-        # bind_replica_id() delivers the master's registration assignment.
         self.client_addresses = dict(client_addresses or {})
         self._omni_kv_config = getattr(getattr(vllm_config, "model_config", None), "omni_kv_config", None)
         self._core_host = self._resolve_core_host()
@@ -166,9 +165,10 @@ class StageLLMCoreClientBase(StageCoreClientBase):
                 )
             raise
 
-        # NOTE: the KV-transfer sender endpoint is NOT initialized here — it needs
-        # the master-assigned replica_id, which is not known yet. It is built the
-        # first time bind_replica_id() delivers the assignment.
+        # stage_id and replica_id are now set by StageCoreClientBase.__init__
+        # (via super() above), so the KV-transfer sender endpoint — keyed on
+        # both — can be built here.
+        self._initialize_kv_sender_endpoint()
 
         logger.info(
             "[%s] stage-%s [rep-%s] EngineCore running",
@@ -176,35 +176,6 @@ class StageLLMCoreClientBase(StageCoreClientBase):
             self.stage_id,
             self.replica_id,
         )
-
-    def bind_replica_id(self, replica_id: int) -> None:
-        """Bind the master-assigned ``replica_id`` (late-binding seam).
-
-        In the self-registration model the cluster-unique ``replica_id`` is
-        assigned by the ``OmniMasterServer`` during the proc's registration
-        handshake, so it is unknown when this client is constructed. The head
-        must call this once it learns the assignment; it also (re)builds the
-        KV-transfer sender endpoint, which is keyed on ``replica_id``.
-        """
-        super().bind_replica_id(replica_id)
-        # Allow (re)initialization now that the id is known.
-        self._kv_sender_initialized = False
-        self._kv_sender_info = None
-        self._initialize_kv_sender_endpoint()
-        logger.info(
-            "[%s] stage-%s bound replica_id=%s",
-            self.__class__.__name__,
-            self.stage_id,
-            self.replica_id,
-        )
-
-    # ==================== StageCoreClientBase contract ====================
-
-    def _engine_dead_reason(self) -> str | None:
-        """Report engine-core death (drives the base ``check_health``)."""
-        if self.resources.engine_dead:
-            return f"Stage-{self.stage_id} engine core is dead"
-        return None
 
     async def get_outputs_async(self) -> StageLLMCoreOutputs:
         """Await the next batch of stage outputs.
@@ -302,6 +273,41 @@ class StageLLMCoreClientBase(StageCoreClientBase):
             raise ValueError(f"engine_input_source empty for stage {self.stage_id}")
         return self._default_process_core_inputs(source_outputs, prompt, self.requires_multimodal_data)
 
+    def get_kv_sender_info(
+        self,
+        *,
+        base_port: int = 50051,
+        kv_transfer_port_offset: int = KV_TRANSFER_PORT_OFFSET,
+    ) -> dict[str, Any] | None:
+        """Build sender bootstrap info for diffusion KV transfer receivers."""
+        if self.replica_id is None:
+            raise RuntimeError(
+                f"Stage-{self.stage_id} KV sender info requested but replica_id is unset; "
+                "the client must be constructed with metadata carrying a concrete replica_id."
+            )
+        if self._kv_sender_info is not None:
+            return dict(self._kv_sender_info)
+
+        if self._core_host is None:
+            self._core_host = self._resolve_core_host()
+        if self._core_host is None:
+            return None
+        return {
+            "host": self._core_host,
+            "zmq_port": kv_zmq_port(
+                base_port - KV_TRANSFER_PORT_OFFSET + kv_transfer_port_offset,
+                int(self.stage_id),
+                local_rank=0,
+                replica_id=self.replica_id,
+            ),
+        }
+
+    def _engine_dead_reason(self) -> str | None:
+        """Report engine-core death (drives the base ``check_health``)."""
+        if self.resources.engine_dead:
+            return f"Stage-{self.stage_id} engine core is dead"
+        return None
+
     @staticmethod
     def _default_process_core_inputs(
         source_outputs: list[Any],
@@ -377,7 +383,7 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         if self._kv_sender_initialized:
             return
         if self.replica_id is None:
-            # Late-bound id not delivered yet — defer until bind_replica_id().
+            # No replica_id (metadata-less construction) — nothing to key on.
             return
         self._kv_sender_initialized = True
         connector_config = self._get_kv_connector_config()
@@ -425,35 +431,6 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         self._kv_sender_info = {
             "host": str(self._core_host),
             "zmq_port": int(sender_port),
-        }
-
-    def get_kv_sender_info(
-        self,
-        *,
-        base_port: int = 50051,
-        kv_transfer_port_offset: int = KV_TRANSFER_PORT_OFFSET,
-    ) -> dict[str, Any] | None:
-        """Build sender bootstrap info for diffusion KV transfer receivers."""
-        if self.replica_id is None:
-            raise RuntimeError(
-                f"Stage-{self.stage_id} KV sender info requested before replica_id was "
-                "assigned; call bind_replica_id() once the proc's master registration completes."
-            )
-        if self._kv_sender_info is not None:
-            return dict(self._kv_sender_info)
-
-        if self._core_host is None:
-            self._core_host = self._resolve_core_host()
-        if self._core_host is None:
-            return None
-        return {
-            "host": self._core_host,
-            "zmq_port": kv_zmq_port(
-                base_port - KV_TRANSFER_PORT_OFFSET + kv_transfer_port_offset,
-                int(self.stage_id),
-                local_rank=0,
-                replica_id=self.replica_id,
-            ),
         }
 
 

@@ -849,13 +849,13 @@ def _launch_omni_core_engines(
     stage_config: Any = None,
     replica_id: int = 0,
     *,
-    omni_coordinator_address: str | None = None,
+    omni_coord_address: str | None = None,
     stage_visible_devices: str | None = None,
     spawn_device_lock: threading.Lock | None = None,
 ) -> Iterator[tuple[CoreEngineProcManager, DPCoordinator | None, EngineZmqAddresses]]:
     """Launch local engine cores using the omni registration flow.
 
-    When ``omni_coordinator_address`` is provided, the spawned engine
+    When ``omni_coord_address`` is provided, the spawned engine
     subprocesses use :class:`StageLLMCoreProcManager` and each
     instantiates an :class:`OmniCoordClientForStage` after the handshake
     completes so the head's :class:`OmniCoordinator` knows about them.
@@ -919,7 +919,7 @@ def _launch_omni_core_engines(
     handshake_bind_address = omni_master_server.get_allocation(stage_id, replica_id=replica_id).handshake_bind_address
 
     with zmq_socket_ctx(handshake_bind_address, zmq.ROUTER, bind=True) as handshake_socket:
-        if omni_coordinator_address is not None:
+        if omni_coord_address is not None:
             # Use the omni subclass so each spawned subprocess instantiates
             # an OmniCoordClientForStage and heartbeats to the coordinator.
             from vllm_omni.engine.stage.stage_llm_core_proc_manager import StageLLMCoreProcManager
@@ -935,7 +935,7 @@ def _launch_omni_core_engines(
                     executor_class=executor_class,
                     log_stats=log_stats,
                     omni_stage_id=stage_id,
-                    omni_coordinator_address=omni_coordinator_address,
+                    omni_coord_address=omni_coord_address,
                     omni_replica_base_id=replica_id,
                 )
         else:
@@ -974,7 +974,7 @@ def launch_stage_replica(
     replica_id: int = 0,
     stage_config: Any = None,
     omni_master_server: OmniMasterServer | None = None,
-    omni_coordinator_address: str | None = None,
+    omni_coord_address: str | None = None,
     stage_visible_devices: str | None = None,
     spawn_device_lock: threading.Lock | None = None,
 ) -> Iterator[StageReplicaResources]:
@@ -995,7 +995,7 @@ def launch_stage_replica(
             stage_id=stage_id,
             stage_config=stage_config,
             replica_id=replica_id,
-            omni_coordinator_address=omni_coordinator_address,
+            omni_coord_address=omni_coord_address,
             stage_visible_devices=stage_visible_devices,
             spawn_device_lock=spawn_device_lock,
         ) as resources:
@@ -1025,7 +1025,7 @@ def launch_stage_replica(
             executor_class=executor_class,
             log_stats=log_stats,
             omni_stage_id=stage_id,
-            omni_coordinator_address=omni_coordinator_address,
+            omni_coord_address=omni_coord_address,
             omni_replica_base_id=replica_id,
         )
 
@@ -1093,7 +1093,7 @@ def launch_headless_llm_replica(
         executor_class=executor_class,
         log_stats=log_stats,
         omni_stage_id=stage_id,
-        omni_coordinator_address=response.coordinator_router_address,
+        omni_coord_address=response.coordinator_router_address,
         omni_replica_base_id=response.replica_id,
     )
     logger.info(
@@ -1208,7 +1208,7 @@ def launch_headless_diffusion_replica(
             inputs=[response.input_address],
             outputs=[response.output_address],
         ),
-        omni_coordinator_address=response.coordinator_router_address,
+        omni_coord_address=response.coordinator_router_address,
         omni_stage_id=stage_id,
         omni_replica_id=response.replica_id,
     )
@@ -1403,7 +1403,7 @@ def launch_diffusion_stage_replica(
     use_inline: bool,
     replica_id: int = 0,
     omni_master_server: OmniMasterServer | None = None,
-    omni_coordinator_address: str | None = None,
+    omni_coord_address: str | None = None,
 ) -> tuple[Any, StageReplicaResources]:
     """Launch a local diffusion stage replica.
 
@@ -1458,7 +1458,7 @@ def launch_diffusion_stage_replica(
                 inputs=[registration.input_address],
                 outputs=[registration.output_address],
             ),
-            omni_coordinator_address=omni_coordinator_address,
+            omni_coord_address=omni_coord_address,
             omni_stage_id=metadata.stage_id,
             omni_replica_id=replica_id,
         )

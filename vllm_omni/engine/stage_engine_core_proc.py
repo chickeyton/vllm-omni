@@ -56,7 +56,7 @@ class StageEngineCoreProc(EngineCoreProc):
         *args: Any,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_stage_id: int | None = None,
         omni_replica_id: int = 0,
         **kwargs: Any,
@@ -64,14 +64,14 @@ class StageEngineCoreProc(EngineCoreProc):
         """Launch StageEngineCoreProc busy loop in background process.
 
         Omni-specific kwargs:
-          - ``omni_coordinator_address``: ROUTER address of the head-side
+          - ``omni_coord_address``: ROUTER address of the head-side
             :class:`OmniCoordinator`. When provided, this subprocess
             instantiates an :class:`OmniCoordClientForStage` after the
             HELLO/INIT/READY handshake completes and reports its status +
             queue length via heartbeats. The hook is wired so each
             heartbeat refreshes ``queue_length`` from the live scheduler.
           - ``omni_stage_id``: logical stage id this replica belongs to.
-            Required when ``omni_coordinator_address`` is provided.
+            Required when ``omni_coord_address`` is provided.
           - ``omni_replica_id``: cluster-unique replica id within the
             stage (assigned by :class:`OmniMasterServer`). Used for
             logging / metrics only.
@@ -133,9 +133,9 @@ class StageEngineCoreProc(EngineCoreProc):
             # Each subprocess corresponds to exactly one omni replica with
             # its own OmniMasterServer allocation, so the heartbeat client
             # runs unconditionally — there is no dp_rank-based gating.
-            if omni_coordinator_address is not None:
+            if omni_coord_address is not None:
                 if omni_stage_id is None:
-                    raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
+                    raise ValueError("omni_stage_id must be provided when omni_coord_address is set")
                 addresses: EngineZmqAddresses = engine_core.addresses
                 if not addresses.inputs or not addresses.outputs:
                     raise RuntimeError(
@@ -146,7 +146,7 @@ class StageEngineCoreProc(EngineCoreProc):
                 if scheduler is None:
                     raise RuntimeError("EngineCore scheduler is not initialized")
                 coord_client = create_stage_coord_client(
-                    coord_zmq_addr=omni_coordinator_address,
+                    coord_zmq_addr=omni_coord_address,
                     input_addr=addresses.inputs[0],
                     output_addr=addresses.outputs[0],
                     stage_id=int(omni_stage_id),
