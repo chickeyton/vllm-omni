@@ -29,7 +29,7 @@ from vllm.v1.engine.utils import (
 )
 
 from vllm_omni.distributed.omni_coordinator import create_stage_coord_client
-from vllm_omni.engine import OmniEngineCoreRequest
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
 from vllm_omni.engine.stage_init_utils import set_death_signal
 
 logger = init_logger(__name__)
@@ -120,14 +120,14 @@ class StageEngineCoreProc(EngineCoreProc):
             os.environ["VLLM_OMNI_REPLICA_ID"] = str(max(int(omni_replica_id), 0))
 
             # Patch the decoder type so process_input_sockets (started
-            # during __init__) decodes OmniEngineCoreRequest (which
+            # during __init__) decodes StageLLMCoreRequest (which
             # carries additional_information) instead of the base
             # EngineCoreRequest.  Must happen BEFORE __init__ because
             # the IO thread creates MsgpackDecoder(EngineCoreRequest)
             # during __init__.
-            _vllm_engine_core_module.EngineCoreRequest = OmniEngineCoreRequest
+            _vllm_engine_core_module.EngineCoreRequest = StageLLMCoreRequest
             logger.debug(
-                "[StageEngineCoreProc] Patched EngineCoreRequest -> OmniEngineCoreRequest: %s",
+                "[StageEngineCoreProc] Patched EngineCoreRequest -> StageLLMCoreRequest: %s",
                 _vllm_engine_core_module.EngineCoreRequest,
             )
 

@@ -33,7 +33,7 @@ from vllm_omni.core.sched.utils import omni_routed_experts_for_request
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
     OmniChunkTransferAdapter,
 )
-from vllm_omni.engine import OmniEngineCoreOutput
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreOutput
 from vllm_omni.outputs import OmniConnectorOutput, OmniModelRunnerOutput
 
 logger = init_logger(__name__)
@@ -543,7 +543,7 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
             if new_token_ids or mm_output is not None or pooler_output is not None or kv_transfer_params or stopped:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
-                    OmniEngineCoreOutput(
+                    StageLLMCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
@@ -583,7 +583,7 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
                         getattr(request, "external_req_id", None),
                     )
             outputs[request.client_index].append(
-                OmniEngineCoreOutput(
+                StageLLMCoreOutput(
                     request_id=request.request_id,
                     new_token_ids=[],
                     finish_reason=finish_reason,
@@ -611,7 +611,7 @@ class OmniGenerationScheduler(OmniSchedulerMixin, VLLMScheduler):
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
                 outputs[request.client_index].append(
-                    OmniEngineCoreOutput(
+                    StageLLMCoreOutput(
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),

@@ -26,7 +26,7 @@ from vllm_omni.distributed.omni_connectors.utils.initialization import (
     KV_TRANSFER_PORT_OFFSET,
 )
 from vllm_omni.distributed.omni_connectors.utils.kv_utils import kv_zmq_port
-from vllm_omni.engine import OmniEngineCoreOutput, OmniEngineCoreOutputs
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreOutput, StageLLMCoreOutputs
 from vllm_omni.engine.stage_client import StageClientBase
 from vllm_omni.engine.stage_init_utils import StageMetadata
 
@@ -162,14 +162,14 @@ class StageEngineCoreClientBase(StageClientBase):
         )
 
         # Patch the output decoder type so the client decodes
-        # OmniEngineCoreOutputs (which carries multimodal_output per
+        # StageLLMCoreOutputs (which carries multimodal_output per
         # EngineCoreOutput) instead of the base EngineCoreOutputs.
         # Must happen BEFORE super().__init__() which creates the decoder.
         # TODO: Add a defensive assertion after super().__init__() to verify
-        # the decoder uses OmniEngineCoreOutputs, catching import-order regressions.
-        _vllm_engine_module.EngineCoreOutput = OmniEngineCoreOutput
-        _vllm_engine_module.EngineCoreOutputs = OmniEngineCoreOutputs
-        _vllm_core_client_module.EngineCoreOutputs = OmniEngineCoreOutputs
+        # the decoder uses StageLLMCoreOutputs, catching import-order regressions.
+        _vllm_engine_module.EngineCoreOutput = StageLLMCoreOutput
+        _vllm_engine_module.EngineCoreOutputs = StageLLMCoreOutputs
+        _vllm_core_client_module.EngineCoreOutputs = StageLLMCoreOutputs
         logger.debug(
             "[StageEngineCoreClient] Patched EngineCoreOutputs -> %s",
             _vllm_core_client_module.EngineCoreOutputs,

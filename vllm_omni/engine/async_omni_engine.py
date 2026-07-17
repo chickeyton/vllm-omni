@@ -60,9 +60,9 @@ from vllm_omni.engine.messages import (
 )
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_client import StageClient
 from vllm_omni.engine.stage_init_utils import build_stage0_input_processor
-from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_runtime import (
     StageRuntimeInfo,
     create_stage_runtime,
@@ -1295,7 +1295,7 @@ class AsyncOmniEngine:
         Input processing and output
         processor registration happen here in the caller's thread, avoiding
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
-        ready-to-submit OmniEngineCoreRequest.
+        ready-to-submit StageLLMCoreRequest.
         """
         msg = self._build_add_request_message(
             request_id=request_id,

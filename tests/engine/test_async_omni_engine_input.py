@@ -5,8 +5,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 
 from vllm_omni.distributed.omni_coordinator import ReplicaInfo, ReplicaStatus
-from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine, StageRuntimeInfo
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
 from vllm_omni.engine.stage_pool import StagePool
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -57,7 +57,7 @@ def test_build_add_request_message_preserves_additional_information(mocker: Mock
     )
 
     request = msg.prompt
-    assert isinstance(request, OmniEngineCoreRequest)
+    assert isinstance(request, StageLLMCoreRequest)
     assert request.external_req_id == "req-1"
     assert request.additional_information is not None
     assert request.additional_information.entries["text"].list_data == ["hello world"]
