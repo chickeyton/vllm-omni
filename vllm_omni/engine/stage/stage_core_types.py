@@ -6,12 +6,15 @@ types for the stage process/client model.
 LLM concrete types
 ------------------
 ``StageLLMCore{Request,Output,Outputs}`` subclass both the shared stage marker and
-the canonical omni engine-core type (``OmniEngineCore*`` from ``vllm_omni.engine``),
-so they carry the omni fields (e.g. ``additional_information``) while also being
-recognizable as stage-core types. ``vllm_omni.patch`` rebinds vLLM's ``EngineCore*``
-module globals to **these** ``StageLLMCore*`` types, so the stage LLM client/proc
-decode/encode exactly them (their read-only assertions therefore hold:
-``EngineCoreOutputs is StageLLMCoreOutputs``).
+vLLM's canonical engine-core type (``EngineCore*`` from ``vllm.v1.engine``), adding
+the omni-specific fields (e.g. ``additional_information``, ``multimodal_output``)
+while also being recognizable as stage-core types. ``vllm_omni.patch`` rebinds
+vLLM's ``EngineCore*`` module globals to **these** ``StageLLMCore*`` types, so the
+stage LLM client/proc decode/encode exactly them (their read-only assertions
+therefore hold: ``EngineCoreOutputs is StageLLMCoreOutputs``).
+
+These are the single source of truth for the omni LLM wire types; they supersede
+the former ``OmniEngineCore*`` structs that used to live in ``vllm_omni.engine``.
 
 Diffusion concrete types
 ------------------------
@@ -32,15 +35,18 @@ from __future__ import annotations
 from typing import Any
 
 import msgspec
+import torch
+from vllm.v1.engine import (
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    EngineCoreRequest,
+)
 
-# Reuse the canonical omni engine-core types + serialized payloads (single source
-# of truth; patch.py rebinds vLLM's EngineCore* globals to the OmniEngineCore*).
+# Serialized payload structs, re-exported here so the stage wire types and their
+# payloads are importable from one place.
 from vllm_omni.engine import (
     AdditionalInformationEntry as AdditionalInformationEntry,
     AdditionalInformationPayload as AdditionalInformationPayload,
-    OmniEngineCoreOutput,
-    OmniEngineCoreOutputs,
-    OmniEngineCoreRequest,
     PromptEmbedsPayload as PromptEmbedsPayload,
 )
 
@@ -62,22 +68,79 @@ class StageCoreOutputs(msgspec.Struct):
 
 
 # =============================================================================
-# Concrete LLM stage core types == canonical omni engine-core types (reused)
+# Concrete LLM stage core types
 # =============================================================================
-# Aliased rather than redefined so there is a single wire type: patch.py rebinds
-# vLLM's EngineCore* globals to these, which is what the stage LLM client/proc
-# assert against.
-
-class StageLLMCoreRequest(StageCoreRequest, OmniEngineCoreRequest):
-    """LLM stage request."""
+# vLLM's EngineCore* extended with the omni fields. These are the single wire
+# type: patch.py rebinds vLLM's EngineCore* globals to these, which is what the
+# stage LLM client/proc assert against.
 
 
-class StageLLMCoreOutput(StageCoreOutput, OmniEngineCoreOutput):
+class StageLLMCoreRequest(StageCoreRequest, EngineCoreRequest):
+    """LLM stage request.
+
+    Note: prompt_embeds is inherited from EngineCoreRequest
+    (torch.Tensor | None). PromptEmbedsPayload should be decoded to
+    torch.Tensor before constructing this request.
+    """
+
+    # Optional additional information dictionary (serialized)
+    additional_information: AdditionalInformationPayload | None = None
+
+    @classmethod
+    def from_vllm_request(
+        cls,
+        request: EngineCoreRequest,
+        *,
+        prompt_embeds: torch.Tensor | None = None,
+        additional_information: AdditionalInformationPayload | None = None,
+    ) -> StageLLMCoreRequest:
+        """Clone an EngineCoreRequest into a StageLLMCoreRequest with optional payload overrides."""
+
+        if prompt_embeds is None:
+            prompt_embeds = request.prompt_embeds
+        if additional_information is None:
+            additional_information = getattr(request, "additional_information", None)
+
+        return cls(
+            request_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            prompt_is_token_ids=request.prompt_is_token_ids,
+            mm_features=request.mm_features,
+            sampling_params=request.sampling_params,
+            pooling_params=request.pooling_params,
+            arrival_time=request.arrival_time,
+            lora_request=request.lora_request,
+            cache_salt=request.cache_salt,
+            data_parallel_rank=request.data_parallel_rank,
+            prompt_embeds=prompt_embeds,
+            client_index=request.client_index,
+            current_wave=request.current_wave,
+            priority=request.priority,
+            trace_headers=request.trace_headers,
+            resumable=request.resumable,
+            external_req_id=request.external_req_id,
+            reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            abort_immediately=request.abort_immediately,
+            additional_information=additional_information,
+        )
+
+
+class StageLLMCoreOutput(StageCoreOutput, EngineCoreOutput):
     """LLM stage output."""
+    # Dedicated channel for multimodal outputs (image/audio/latent).
+    # pooling_output is inherited from EngineCoreOutput as torch.Tensor | None
+    # and retains its original vLLM semantics for pooling/embedding tasks.
+    multimodal_output: dict[str, torch.Tensor] | None = None
+    # Finished flag for streaming input segment
+    is_segment_finished: bool | None = False
+    # Streaming update prompt length
+    new_prompt_len_snapshot: int | None = None
 
 
-class StageLLMCoreOutputs(StageCoreOutputs, OmniEngineCoreOutputs):
+class StageLLMCoreOutputs(StageCoreOutputs, EngineCoreOutputs):
     """LLM stage outputs."""
+    outputs: list[StageLLMCoreOutput] = []
 
 
 # =============================================================================

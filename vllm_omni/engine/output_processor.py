@@ -465,7 +465,7 @@ class OmniRequestState(RequestState):
 class MultimodalOutputProcessor(VLLMOutputProcessor):
     """Handles multimodal output processing.
 
-    Captures multimodal outputs from OmniEngineCoreOutput and accumulates
+    Captures multimodal outputs from StageLLMCoreOutput and accumulates
     them as MultimodalPayload in OmniRequestState, before delegating to
     the base vLLM OutputProcessor for text handling.
 

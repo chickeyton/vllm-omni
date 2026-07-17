@@ -34,7 +34,6 @@ from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig, parse_attention_config
 from vllm_omni.diffusion.diffusion_engine import supports_audio_output
-from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.messages import (
     AbortRequestMessage,
     AddCompanionRequestMessage,
@@ -50,9 +49,10 @@ from vllm_omni.engine.serialization import (
     deserialize_additional_information,
     serialize_additional_information,
 )
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_client import StageClient
 from vllm_omni.engine.stage_init_utils import build_stage0_input_processor
-from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_runtime import (
     StageRuntimeInfo,
     create_stage_runtime,
@@ -138,7 +138,7 @@ def _upgrade_to_omni_request(
     if prompt_embeds is None and additional_information is None:
         return request
 
-    return OmniEngineCoreRequest.from_request(
+    return StageLLMCoreRequest.from_vllm_request(
         request,
         prompt_embeds=prompt_embeds,
         additional_information=additional_information,
@@ -151,11 +151,11 @@ def _apply_omni_final_stage_metadata(
 ) -> EngineCoreRequest:
     """Tag EngineCoreRequest so OmniARScheduler can skip DiT KV when final_stage_id is 0."""
     merged: dict[str, Any] = {}
-    if isinstance(request, OmniEngineCoreRequest) and request.additional_information is not None:
+    if isinstance(request, StageLLMCoreRequest) and request.additional_information is not None:
         merged = deserialize_additional_information(request.additional_information)
     merged["omni_final_stage_id"] = final_stage_id
     payload = serialize_additional_information(merged)
-    return OmniEngineCoreRequest.from_request(
+    return StageLLMCoreRequest.from_vllm_request(
         request,
         additional_information=payload,
     )
@@ -1307,7 +1307,7 @@ class AsyncOmniEngine:
         Input processing and output
         processor registration happen here in the caller's thread, avoiding
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
-        ready-to-submit OmniEngineCoreRequest.
+        ready-to-submit StageLLMCoreRequest.
         """
         msg = self._build_add_request_message(
             request_id=request_id,
