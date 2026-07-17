@@ -1040,7 +1040,7 @@ class TestSingleStageReplicaInitialization:
             stage_init_timeout=60,
             handshake_address="tcp://127.0.0.1:26001",
             addresses=mocker.ANY,
-            omni_coordinator_address=None,
+            omni_coord_address=None,
             omni_stage_id=0,
             omni_replica_id=0,
         )

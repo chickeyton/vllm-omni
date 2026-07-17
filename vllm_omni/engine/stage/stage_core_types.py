@@ -94,7 +94,7 @@ class StageDiffusionCoreRequest(StageCoreRequest):
     """Wire payload for a diffusion stage add-request.
 
     ``sampling_params`` is the plain-dict form produced by
-    ``StageDiffusionCoreClient._sampling_params_to_dict`` (non-serializable fields
+    ``StageDiffusionCoreClient.sampling_params_to_dict`` (non-serializable fields
     already stripped).
     """
 
@@ -107,13 +107,19 @@ class StageDiffusionCoreRequest(StageCoreRequest):
 class StageDiffusionCoreOutput(StageCoreOutput):
     """One diffusion result produced by ``StageDiffusionCoreProc``.
 
-    ``output`` carries the full ``OmniRequestOutput`` opaquely (reconstructed by
-    the client's decoder post-processing).
+    ``output`` carries the full ``OmniRequestOutput`` opaquely for a successful
+    result. For a failed request the proc sends a control ``error`` frame; the
+    client materializes it into this struct with ``error`` set (and ``output``
+    left ``None``) so the consumer can build an error ``OmniRequestOutput``
+    without the client itself depending on that type.
     """
 
     request_id: str
     finished: bool = True
     output: Any = None
+    error: str | None = None
+    status_code: int | None = None
+    error_type: str | None = None
 
 
 class StageDiffusionCoreOutputs(StageCoreOutputs):

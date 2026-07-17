@@ -1,12 +1,12 @@
 """Contract layer for the vLLM-Omni stage process/client model.
 
 ``StageCoreClientBase`` (``abc.ABC``) is the runtime base shared by every backend
-(LLM, diffusion). It declares **only** the surface common to both backends;
-LLM-specific methods (``get_outputs_async`` / ``get_outputs_nowait`` /
-``process_core_inputs`` / ``get_kv_sender_info``) live on
-``StageLLMCoreClientBase``, and diffusion-specific methods
-(``get_diffusion_output_nowait``) live on ``StageDiffusionCoreClient``, so a
-backend only implements what it actually supports.
+(LLM, diffusion). It declares the surface common to both backends — including the
+request/output exchange (``add_request_async`` / ``get_outputs_async`` /
+``get_outputs_nowait``), each typed to the field-free marker types so a concrete
+backend narrows them to its own wire types. Backend-only methods
+(``process_core_inputs`` / ``get_kv_sender_info`` for LLM) live on the respective
+subclasses, so a backend only implements what it actually supports.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vllm_omni.engine.stage.stage_core_types import StageCoreRequest
+    from vllm_omni.engine.stage.stage_core_types import StageCoreOutputs, StageCoreRequest
     from vllm_omni.engine.stage_init_utils import StageMetadata
 
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -36,9 +36,12 @@ class StageCoreClientBase(ABC):
 
     # ---- shared metadata (populated by __init__ from ``metadata``) ----
     stage_id: int
-    # replica_id is late-bound: it stays unassigned (``None``) until
-    # bind_replica_id() delivers the master's assignment. The base owns this
-    # default so concrete clients never initialize it themselves.
+    # replica_id is assigned in __init__ from ``metadata.replica_id`` and is
+    # required to be present, integral, and non-negative when ``metadata`` is
+    # given (validated by ``_validate_replica_id``) — the master allocates it
+    # during the proc's registration handshake, which always precedes client
+    # construction, so there is no late-binding seam. The ``None`` default only
+    # covers the metadata-less construction path.
     replica_id: int | None = None
     stage_type: str
     model_stage: str | None
@@ -54,15 +57,15 @@ class StageCoreClientBase(ABC):
     def __init__(self, *args: Any, metadata: StageMetadata | None = None, **kwargs: Any) -> None:
         """Populate the shared stage metadata, then continue cooperative init.
 
-        ``metadata`` is consumed here to set the backend-common metadata fields;
-        any remaining positional/keyword arguments are forwarded via
+        ``metadata`` is consumed here to set the backend-common metadata fields
+        (including ``replica_id``, which is always concrete by construction
+        time); any remaining positional/keyword arguments are forwarded via
         ``super().__init__`` so a concrete LLM client can initialize its mixed-in
-        transport base (``AsyncMPClient``) through the MRO. ``replica_id`` is
-        deliberately not read from metadata — it is late-bound via
-        :meth:`bind_replica_id`.
+        transport base (``AsyncMPClient``) through the MRO.
         """
         if metadata is not None:
             self.stage_id = metadata.stage_id
+            self.replica_id = self._validate_replica_id(metadata)
             self.stage_type = metadata.stage_type
             self.model_stage = metadata.model_stage
             self.final_output = metadata.final_output
@@ -87,14 +90,6 @@ class StageCoreClientBase(ABC):
             raise EngineDeadError(reason)
 
     @abstractmethod
-    def _engine_dead_reason(self) -> str | None:
-        """Return an error message if the backing engine/subprocess is dead.
-
-        Returns ``None`` when healthy. Implementations may update internal
-        dead-state (e.g. cache a detected death) as a side effect.
-        """
-
-    @abstractmethod
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown."""
 
@@ -112,10 +107,57 @@ class StageCoreClientBase(ABC):
     ) -> Any:
         """RPC"""
 
-    def bind_replica_id(self, replica_id: int) -> None:
-        """Bind replica id"""
-        self.replica_id = int(replica_id)
-
     @abstractmethod
     async def add_request_async(self, request: StageCoreRequest) -> None:
         """Add request. Backends accept their own concrete request type."""
+
+    @abstractmethod
+    async def get_outputs_async(self) -> StageCoreOutputs:
+        """Await and return the next batch of stage outputs.
+
+        Backends narrow the return to their own concrete outputs type.
+        """
+
+    @abstractmethod
+    def get_outputs_nowait(self) -> StageCoreOutputs | None:
+        """Return the next batch of stage outputs, or ``None`` if none are ready.
+
+        Backends narrow the return to their own concrete outputs type.
+        """
+
+    @staticmethod
+    def _validate_replica_id(metadata: StageMetadata) -> int:
+        """Return the concrete ``replica_id`` from ``metadata`` or raise.
+
+        The master assigns ``replica_id`` during the proc's registration
+        handshake, which always precedes client construction, so a valid
+        (present, integral, non-negative) id must be available here. A missing
+        or negative value (e.g. the auto-assign sentinel leaking through) is a
+        wiring bug, not a state to tolerate.
+        """
+        replica_id = metadata.replica_id
+        if replica_id is None:
+            raise ValueError(
+                f"metadata.replica_id must be provided for stage {metadata.stage_id}; "
+                "it is assigned by the master before the stage client is constructed."
+            )
+        try:
+            replica_id = int(replica_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"metadata.replica_id must be an integer for stage {metadata.stage_id}, "
+                f"got {metadata.replica_id!r}."
+            ) from exc
+        if replica_id < 0:
+            raise ValueError(
+                f"metadata.replica_id must be >= 0 for stage {metadata.stage_id}, got {replica_id}."
+            )
+        return replica_id
+
+    @abstractmethod
+    def _engine_dead_reason(self) -> str | None:
+        """Return an error message if the backing engine/subprocess is dead.
+
+        Returns ``None`` when healthy. Implementations may update internal
+        dead-state (e.g. cache a detected death) as a side effect.
+        """

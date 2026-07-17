@@ -595,9 +595,6 @@ class StageRuntime:
                 proc_manager=resources.manager,
                 coordinator=resources.coordinator,
             )
-            # replica_id is late-bound on the new client; deliver the metadata's
-            # assignment so KV-sender endpoint keying matches the spawned procs.
-            stage_client.bind_replica_id(plan.metadata.replica_id)
 
             logger.info("[StageRuntime] Stage %s initialized", plan.metadata.stage_id)
             return stage_client
@@ -1055,8 +1052,6 @@ class DistStageRuntime(StageRuntime):
                 proc_manager=resources.manager,
                 coordinator=resources.coordinator,
             )
-            # replica_id is late-bound on the new client; deliver the assignment.
-            client.bind_replica_id(replica_id)
             logger.info("[DistStageRuntime] Remote LLM replica attached stage=%d replica=%d", stage_id, replica_id)
             return client
         except Exception:

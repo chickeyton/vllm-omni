@@ -893,12 +893,12 @@ class Orchestrator:
                         return
 
                     if pool.stage_type == "diffusion":
-                        output = pool.poll_diffusion_output(replica_id)
-                        if output is None:
+                        outputs = pool.poll_diffusion_output(replica_id)
+                        if not outputs:
                             continue
 
-                        pool.record_output_timestamps([output])
-                        await self._handle_processed_outputs(stage_id, replica_id, [output])
+                        pool.record_output_timestamps(outputs)
+                        await self._handle_processed_outputs(stage_id, replica_id, outputs)
                         idle = False
                     else:
                         try:

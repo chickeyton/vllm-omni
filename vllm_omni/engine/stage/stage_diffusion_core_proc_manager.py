@@ -49,7 +49,7 @@ class StageDiffusionCoreProcManager:
         stage_init_timeout: int,
         handshake_address: str | None = None,
         addresses: EngineZmqAddresses | None = None,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_stage_id: int | None = None,
         omni_replica_id: int = 0,
     ) -> None:
@@ -69,7 +69,7 @@ class StageDiffusionCoreProcManager:
                 "handshake_address": handshake_address,
                 "local_client": True,
                 "headless": False,
-                "omni_coordinator_address": omni_coordinator_address,
+                "omni_coord_address": omni_coord_address,
                 "omni_stage_id": omni_stage_id,
                 "omni_replica_id": omni_replica_id,
             },
@@ -90,7 +90,7 @@ class StageDiffusionCoreProcManager:
         od_config: OmniDiffusionConfig,
         handshake_address: str,
         addresses: EngineZmqAddresses,
-        omni_coordinator_address: str | None,
+        omni_coord_address: str | None,
         omni_stage_id: int,
         omni_replica_id: int,
     ) -> StageDiffusionCoreProcManager:
@@ -106,7 +106,7 @@ class StageDiffusionCoreProcManager:
                 "handshake_address": handshake_address,
                 "local_client": False,
                 "headless": True,
-                "omni_coordinator_address": omni_coordinator_address,
+                "omni_coord_address": omni_coord_address,
                 "omni_stage_id": omni_stage_id,
                 "omni_replica_id": omni_replica_id,
             },
@@ -117,27 +117,6 @@ class StageDiffusionCoreProcManager:
         self.manager_stopped = False
         self.failed_proc_name = None
         return self
-
-    def _wait_until_started(self, handshake_address: str, stage_init_timeout: int) -> None:
-        try:
-            with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
-                wait_for_engine_startup(
-                    handshake_socket,
-                    self.addresses,
-                    [CoreEngine(index=0, local=True)],
-                    SimpleNamespace(
-                        data_parallel_size_local=1,
-                        data_parallel_hybrid_lb=False,
-                        data_parallel_external_lb=False,
-                    ),
-                    False,
-                    None,
-                    self,
-                    None,
-                )
-        except Exception:
-            shutdown([self.proc])
-            raise
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.manager_stopped = True
@@ -159,3 +138,24 @@ class StageDiffusionCoreProcManager:
         if self.proc.exitcode not in (None, 0) and not self.manager_stopped:
             self.failed_proc_name = self.proc.name
         self.shutdown()
+
+    def _wait_until_started(self, handshake_address: str, stage_init_timeout: int) -> None:
+        try:
+            with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
+                wait_for_engine_startup(
+                    handshake_socket,
+                    self.addresses,
+                    [CoreEngine(index=0, local=True)],
+                    SimpleNamespace(
+                        data_parallel_size_local=1,
+                        data_parallel_hybrid_lb=False,
+                        data_parallel_external_lb=False,
+                    ),
+                    False,
+                    None,
+                    self,
+                    None,
+                )
+        except Exception:
+            shutdown([self.proc])
+            raise

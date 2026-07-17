@@ -95,35 +95,6 @@ class StageDiffusionCoreProc:
         tasks = self._active_tasks
         return 0 if tasks is None else len(tasks)
 
-    def _is_executor_dead(self) -> bool:
-        """True iff the multiproc executor has been closed or marked failed.
-
-        Detects the "workers died but the diffusion proc is still pulling
-        requests" case: ``MultiprocDiffusionExecutor`` sets ``_closed = True``
-        and ``is_failed = True`` from its worker-monitor thread the moment any
-        worker process exits; every subsequent ``execute_request`` /
-        ``collective_rpc`` then raises ``RuntimeError("DiffusionExecutor is
-        closed.")`` inside the engine. Callers in ``run_loop`` use this to
-        decide whether a per-request failure is recoverable or fatal.
-        """
-        if self._engine is None:
-            return False
-        executor = getattr(self._engine, "executor", None)
-        if executor is None:
-            return False
-        return bool(getattr(executor, "_closed", False) or getattr(executor, "is_failed", False))
-
-    def _signal_fatal_engine_failure(self, reason: str) -> None:
-        """Idempotently signal ``run_loop`` to tear down on a fatal engine error."""
-        if self._fatal_event is None or self._fatal_event.is_set():
-            return
-        logger.error(
-            "[StageDiffusionCoreProc] fatal engine failure detected (%s); "
-            "signaling run_loop to send DIFFUSION_PROC_DEAD and exit.",
-            reason,
-        )
-        self._fatal_event.set()
-
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -134,172 +105,6 @@ class StageDiffusionCoreProc:
         self._engine = DiffusionEngine.make_engine(self._od_config)
         self._executor = ThreadPoolExecutor(max_workers=1)
         logger.info("StageDiffusionCoreProc initialized with model: %s", self._model)
-
-    def _enrich_config(self) -> None:
-        """Load model metadata from HuggingFace and populate od_config fields."""
-        self._od_config.enrich_config()
-
-    # ------------------------------------------------------------------
-    # Request processing
-    # ------------------------------------------------------------------
-
-    def _reconstruct_sampling_params(self, sampling_params_dict: dict) -> OmniDiffusionSamplingParams:
-        """Reconstruct OmniDiffusionSamplingParams from a dict, handling LoRA."""
-        lora_req = sampling_params_dict.get("lora_request")
-        if lora_req is not None:
-            from vllm.lora.request import LoRARequest
-
-            if not isinstance(lora_req, LoRARequest):
-                sampling_params_dict["lora_request"] = msgspec.convert(lora_req, LoRARequest)
-
-        return OmniDiffusionSamplingParams(**sampling_params_dict)
-
-    async def _process_request(
-        self,
-        request_id: str,
-        prompt: OmniPromptType,
-        sampling_params_dict: dict,
-        kv_sender_info: dict[str, Any] | None = None,
-    ) -> OmniRequestOutput:
-        """Build a diffusion request and run DiffusionEngine.step()."""
-        sampling_params = self._reconstruct_sampling_params(sampling_params_dict)
-
-        request = OmniDiffusionRequest(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            kv_sender_info=kv_sender_info,
-        )
-
-        results = await self._engine.step(request)
-        result = results[0]
-        if not result.request_id:
-            result.request_id = request_id
-        return result
-
-    async def _process_streaming_request(
-        self,
-        request_id: str,
-        prompt: OmniPromptType,
-        sampling_params_dict: dict,
-        kv_sender_info: dict[str, Any] | None = None,
-    ) -> AsyncGenerator[OmniRequestOutput, None]:
-        """Process a streaming diffusion request and yield the results from DiffusionEngine.step_streaming()."""
-        sampling_params = self._reconstruct_sampling_params(sampling_params_dict)
-
-        request = OmniDiffusionRequest(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            kv_sender_info=kv_sender_info,
-        )
-
-        async for results in self._engine.step_streaming(request):  # pyright: ignore[reportOptionalMemberAccess]
-            result = results[0]
-            if not result.request_id:
-                result.request_id = request_id
-            yield result
-
-    # ------------------------------------------------------------------
-    # Collective RPC dispatch
-    # ------------------------------------------------------------------
-
-    async def _handle_collective_rpc(
-        self,
-        method: str,
-        timeout: float | None,
-        args: tuple,
-        kwargs: dict,
-    ) -> Any:
-        """Dispatch collective RPC calls to DiffusionEngine.
-
-        LoRA methods remap arguments and post-process results to match
-        the contract that ``AsyncOmni`` provides.
-        """
-        loop = asyncio.get_running_loop()
-
-        if method == "profile":
-            is_start = args[0] if args else True
-            profile_prefix = args[1] if len(args) > 1 else None
-            return await loop.run_in_executor(
-                self._executor,
-                self._engine.profile,
-                is_start,
-                profile_prefix,
-            )
-
-        if method == "add_lora":
-            # Reconstruct LoRARequest after IPC if needed.
-            lora_request = args[0] if args else kwargs.get("lora_request")
-            if lora_request is not None:
-                from vllm.lora.request import LoRARequest
-
-                if not isinstance(lora_request, LoRARequest):
-                    lora_request = msgspec.convert(lora_request, LoRARequest)
-            results = await loop.run_in_executor(
-                self._executor,
-                self._engine.collective_rpc,
-                "add_lora",
-                timeout,
-                (),
-                {"lora_request": lora_request},
-                None,
-            )
-            return all(results) if isinstance(results, list) else results
-
-        if method == "remove_lora":
-            results = await loop.run_in_executor(
-                self._executor,
-                self._engine.collective_rpc,
-                "remove_lora",
-                timeout,
-                args,
-                kwargs or {},
-                None,
-            )
-            return all(results) if isinstance(results, list) else results
-
-        if method == "list_loras":
-            results = await loop.run_in_executor(
-                self._executor,
-                self._engine.collective_rpc,
-                "list_loras",
-                timeout,
-                (),
-                {},
-                None,
-            )
-            if not isinstance(results, list):
-                return results or []
-            merged: set[int] = set()
-            for part in results:
-                merged.update(part or [])
-            return sorted(merged)
-
-        if method == "pin_lora":
-            lora_id = args[0] if args else kwargs.get("adapter_id")
-            results = await loop.run_in_executor(
-                self._executor,
-                self._engine.collective_rpc,
-                "pin_lora",
-                timeout,
-                (),
-                {"adapter_id": lora_id},
-                None,
-            )
-            return all(results) if isinstance(results, list) else results
-
-        # Fall back to DiffusionEngine.collective_rpc for all other methods
-        # (e.g. worker extension RPCs like "test_extension_name").
-        return await loop.run_in_executor(
-            self._executor,
-            self._engine.collective_rpc,
-            method,
-            timeout,
-            args,
-            kwargs or {},
-            None,
-        )
 
     # ------------------------------------------------------------------
     # ZMQ event loop
@@ -535,46 +340,6 @@ class StageDiffusionCoreProc:
             except Exception as e:
                 logger.warning("Error shutting down executor: %s", e)
 
-    # ------------------------------------------------------------------
-    # Subprocess entry point
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _open_startup_handshake(
-        handshake_address: str,
-        *,
-        local_client: bool,
-        headless: bool,
-    ) -> tuple[zmq.Context, zmq.Socket, EngineZmqAddresses]:
-        ctx = zmq.Context()
-        socket = ctx.socket(zmq.DEALER)
-        socket.setsockopt(zmq.IDENTITY, (0).to_bytes(2, "little"))
-        socket.connect(handshake_address)
-        addresses = EngineCoreProc.startup_handshake(
-            socket,
-            local_client=local_client,
-            headless=headless,
-            parallel_config=None,
-        )
-        return ctx, socket, addresses
-
-    @staticmethod
-    def _send_startup_ready(
-        handshake_socket: zmq.Socket,
-        *,
-        local_client: bool,
-        headless: bool,
-    ) -> None:
-        handshake_socket.send(
-            msgspec.msgpack.encode(
-                {
-                    "status": "READY",
-                    "local": local_client,
-                    "headless": headless,
-                }
-            )
-        )
-
     @classmethod
     def run_diffusion_proc(
         cls,
@@ -584,18 +349,18 @@ class StageDiffusionCoreProc:
         *,
         local_client: bool,
         headless: bool,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_stage_id: int | None = None,
         omni_replica_id: int = 0,
     ) -> None:
         """Entry point for the diffusion subprocess.
 
         Omni-specific kwargs (mirroring :meth:`StageEngineCoreProc.run_stage_core`):
-          - ``omni_coordinator_address``: ROUTER address of the head-side
+          - ``omni_coord_address``: ROUTER address of the head-side
             OmniCoordinator. When set, a :class:`OmniCoordClientForStage`
             reports the diffusion replica's status + queue length.
           - ``omni_stage_id``: logical stage id; required when
-            ``omni_coordinator_address`` is set.
+            ``omni_coord_address`` is set.
           - ``omni_replica_id``: cluster-unique replica id within the
             stage (logging / metrics only).
         """
@@ -640,11 +405,11 @@ class StageDiffusionCoreProc:
             # Wire OmniCoordClientForStage *after* READY. The address pair is
             # owned by the frontend client; this proc connects to it as the
             # backend runtime.
-            if omni_coordinator_address is not None:
+            if omni_coord_address is not None:
                 if omni_stage_id is None:
-                    raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
+                    raise ValueError("omni_stage_id must be provided when omni_coord_address is set")
                 coord_client = OmniCoordClientForStage(
-                    coord_zmq_addr=omni_coordinator_address,
+                    coord_zmq_addr=omni_coord_address,
                     input_addr=request_address,
                     output_addr=response_address,
                     stage_id=int(omni_stage_id),
@@ -659,7 +424,7 @@ class StageDiffusionCoreProc:
                     "StageDiffusionCoreProc registered with OmniCoordinator (stage_id=%d replica_id=%d coord=%s)",
                     omni_stage_id,
                     omni_replica_id,
-                    omni_coordinator_address,
+                    omni_coord_address,
                 )
 
             asyncio.run(proc.run_loop(request_address, response_address))
@@ -679,3 +444,238 @@ class StageDiffusionCoreProc:
                 with contextlib.suppress(RuntimeError):
                     coord_client.close()
             proc.close()
+
+    def _is_executor_dead(self) -> bool:
+        """True iff the multiproc executor has been closed or marked failed.
+
+        Detects the "workers died but the diffusion proc is still pulling
+        requests" case: ``MultiprocDiffusionExecutor`` sets ``_closed = True``
+        and ``is_failed = True`` from its worker-monitor thread the moment any
+        worker process exits; every subsequent ``execute_request`` /
+        ``collective_rpc`` then raises ``RuntimeError("DiffusionExecutor is
+        closed.")`` inside the engine. Callers in ``run_loop`` use this to
+        decide whether a per-request failure is recoverable or fatal.
+        """
+        if self._engine is None:
+            return False
+        executor = getattr(self._engine, "executor", None)
+        if executor is None:
+            return False
+        return bool(getattr(executor, "_closed", False) or getattr(executor, "is_failed", False))
+
+    def _signal_fatal_engine_failure(self, reason: str) -> None:
+        """Idempotently signal ``run_loop`` to tear down on a fatal engine error."""
+        if self._fatal_event is None or self._fatal_event.is_set():
+            return
+        logger.error(
+            "[StageDiffusionCoreProc] fatal engine failure detected (%s); "
+            "signaling run_loop to send DIFFUSION_PROC_DEAD and exit.",
+            reason,
+        )
+        self._fatal_event.set()
+
+    def _enrich_config(self) -> None:
+        """Load model metadata from HuggingFace and populate od_config fields."""
+        self._od_config.enrich_config()
+
+    # ------------------------------------------------------------------
+    # Request processing
+    # ------------------------------------------------------------------
+
+    def _reconstruct_sampling_params(self, sampling_params_dict: dict) -> OmniDiffusionSamplingParams:
+        """Reconstruct OmniDiffusionSamplingParams from a dict, handling LoRA."""
+        lora_req = sampling_params_dict.get("lora_request")
+        if lora_req is not None:
+            from vllm.lora.request import LoRARequest
+
+            if not isinstance(lora_req, LoRARequest):
+                sampling_params_dict["lora_request"] = msgspec.convert(lora_req, LoRARequest)
+
+        return OmniDiffusionSamplingParams(**sampling_params_dict)
+
+    async def _process_request(
+        self,
+        request_id: str,
+        prompt: OmniPromptType,
+        sampling_params_dict: dict,
+        kv_sender_info: dict[str, Any] | None = None,
+    ) -> OmniRequestOutput:
+        """Build a diffusion request and run DiffusionEngine.step()."""
+        sampling_params = self._reconstruct_sampling_params(sampling_params_dict)
+
+        request = OmniDiffusionRequest(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            kv_sender_info=kv_sender_info,
+        )
+
+        results = await self._engine.step(request)
+        result = results[0]
+        if not result.request_id:
+            result.request_id = request_id
+        return result
+
+    async def _process_streaming_request(
+        self,
+        request_id: str,
+        prompt: OmniPromptType,
+        sampling_params_dict: dict,
+        kv_sender_info: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[OmniRequestOutput, None]:
+        """Process a streaming diffusion request and yield the results from DiffusionEngine.step_streaming()."""
+        sampling_params = self._reconstruct_sampling_params(sampling_params_dict)
+
+        request = OmniDiffusionRequest(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            kv_sender_info=kv_sender_info,
+        )
+
+        async for results in self._engine.step_streaming(request):  # pyright: ignore[reportOptionalMemberAccess]
+            result = results[0]
+            if not result.request_id:
+                result.request_id = request_id
+            yield result
+
+    # ------------------------------------------------------------------
+    # Collective RPC dispatch
+    # ------------------------------------------------------------------
+
+    async def _handle_collective_rpc(
+        self,
+        method: str,
+        timeout: float | None,
+        args: tuple,
+        kwargs: dict,
+    ) -> Any:
+        """Dispatch collective RPC calls to DiffusionEngine.
+
+        LoRA methods remap arguments and post-process results to match
+        the contract that ``AsyncOmni`` provides.
+        """
+        loop = asyncio.get_running_loop()
+
+        if method == "profile":
+            is_start = args[0] if args else True
+            profile_prefix = args[1] if len(args) > 1 else None
+            return await loop.run_in_executor(
+                self._executor,
+                self._engine.profile,
+                is_start,
+                profile_prefix,
+            )
+
+        if method == "add_lora":
+            # Reconstruct LoRARequest after IPC if needed.
+            lora_request = args[0] if args else kwargs.get("lora_request")
+            if lora_request is not None:
+                from vllm.lora.request import LoRARequest
+
+                if not isinstance(lora_request, LoRARequest):
+                    lora_request = msgspec.convert(lora_request, LoRARequest)
+            results = await loop.run_in_executor(
+                self._executor,
+                self._engine.collective_rpc,
+                "add_lora",
+                timeout,
+                (),
+                {"lora_request": lora_request},
+                None,
+            )
+            return all(results) if isinstance(results, list) else results
+
+        if method == "remove_lora":
+            results = await loop.run_in_executor(
+                self._executor,
+                self._engine.collective_rpc,
+                "remove_lora",
+                timeout,
+                args,
+                kwargs or {},
+                None,
+            )
+            return all(results) if isinstance(results, list) else results
+
+        if method == "list_loras":
+            results = await loop.run_in_executor(
+                self._executor,
+                self._engine.collective_rpc,
+                "list_loras",
+                timeout,
+                (),
+                {},
+                None,
+            )
+            if not isinstance(results, list):
+                return results or []
+            merged: set[int] = set()
+            for part in results:
+                merged.update(part or [])
+            return sorted(merged)
+
+        if method == "pin_lora":
+            lora_id = args[0] if args else kwargs.get("adapter_id")
+            results = await loop.run_in_executor(
+                self._executor,
+                self._engine.collective_rpc,
+                "pin_lora",
+                timeout,
+                (),
+                {"adapter_id": lora_id},
+                None,
+            )
+            return all(results) if isinstance(results, list) else results
+
+        # Fall back to DiffusionEngine.collective_rpc for all other methods
+        # (e.g. worker extension RPCs like "test_extension_name").
+        return await loop.run_in_executor(
+            self._executor,
+            self._engine.collective_rpc,
+            method,
+            timeout,
+            args,
+            kwargs or {},
+            None,
+        )
+
+    # ------------------------------------------------------------------
+    # Subprocess entry point
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _open_startup_handshake(
+        handshake_address: str,
+        *,
+        local_client: bool,
+        headless: bool,
+    ) -> tuple[zmq.Context, zmq.Socket, EngineZmqAddresses]:
+        ctx = zmq.Context()
+        socket = ctx.socket(zmq.DEALER)
+        socket.setsockopt(zmq.IDENTITY, (0).to_bytes(2, "little"))
+        socket.connect(handshake_address)
+        addresses = EngineCoreProc.startup_handshake(
+            socket,
+            local_client=local_client,
+            headless=headless,
+            parallel_config=None,
+        )
+        return ctx, socket, addresses
+
+    @staticmethod
+    def _send_startup_ready(
+        handshake_socket: zmq.Socket,
+        *,
+        local_client: bool,
+        headless: bool,
+    ) -> None:
+        handshake_socket.send(
+            msgspec.msgpack.encode(
+                {
+                    "status": "READY",
+                    "local": local_client,
+                    "headless": headless,
+                }
+            )
+        )

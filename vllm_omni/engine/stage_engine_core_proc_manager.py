@@ -10,7 +10,7 @@ spawns :meth:`StageEngineCoreProc.run_stage_core` instead of the upstream
 
 Each spawned subprocess corresponds to exactly one omni *replica*: it has its
 own ZMQ allocation from :class:`OmniMasterServer` and (when an
-``omni_coordinator_address`` is provided) its own
+``omni_coord_address`` is provided) its own
 :class:`OmniCoordClientForStage` reporting heartbeat / status.
 
 Liveness monitoring and shutdown are inherited from
@@ -55,7 +55,7 @@ class StageEngineCoreProcManager(CoreEngineProcManager):
     * ``target`` is :meth:`StageEngineCoreProc.run_stage_core`.
     * Per-rank ``omni_replica_id`` is computed as
       ``base_replica_id + rank_idx`` and added to each subprocess's kwargs.
-    * ``omni_coordinator_address`` (if provided) and ``omni_stage_id`` are
+    * ``omni_coord_address`` (if provided) and ``omni_stage_id`` are
       added to every subprocess's kwargs.
     """
 
@@ -71,7 +71,7 @@ class StageEngineCoreProcManager(CoreEngineProcManager):
         log_stats: bool,
         *,
         omni_stage_id: int,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_replica_base_id: int = 0,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
@@ -91,7 +91,7 @@ class StageEngineCoreProcManager(CoreEngineProcManager):
             "log_stats": log_stats,
             "tensor_queue": tensor_queue,
             "omni_stage_id": int(omni_stage_id),
-            "omni_coordinator_address": omni_coordinator_address,
+            "omni_coord_address": omni_coord_address,
         }
 
         if client_handshake_address:

@@ -564,18 +564,18 @@ class StageDiffusionProc:
         *,
         local_client: bool,
         headless: bool,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_stage_id: int | None = None,
         omni_replica_id: int = 0,
     ) -> None:
         """Entry point for the diffusion subprocess.
 
         Omni-specific kwargs (mirroring :meth:`StageEngineCoreProc.run_stage_core`):
-          - ``omni_coordinator_address``: ROUTER address of the head-side
+          - ``omni_coord_address``: ROUTER address of the head-side
             OmniCoordinator. When set, a :class:`OmniCoordClientForStage`
             reports the diffusion replica's status + queue length.
           - ``omni_stage_id``: logical stage id; required when
-            ``omni_coordinator_address`` is set.
+            ``omni_coord_address`` is set.
           - ``omni_replica_id``: cluster-unique replica id within the
             stage (logging / metrics only).
         """
@@ -620,11 +620,11 @@ class StageDiffusionProc:
             # Wire OmniCoordClientForStage *after* READY. The address pair is
             # owned by the frontend client; this proc connects to it as the
             # backend runtime.
-            if omni_coordinator_address is not None:
+            if omni_coord_address is not None:
                 if omni_stage_id is None:
-                    raise ValueError("omni_stage_id must be provided when omni_coordinator_address is set")
+                    raise ValueError("omni_stage_id must be provided when omni_coord_address is set")
                 coord_client = OmniCoordClientForStage(
-                    coord_zmq_addr=omni_coordinator_address,
+                    coord_zmq_addr=omni_coord_address,
                     input_addr=request_address,
                     output_addr=response_address,
                     stage_id=int(omni_stage_id),
@@ -639,7 +639,7 @@ class StageDiffusionProc:
                     "StageDiffusionProc registered with OmniCoordinator (stage_id=%d replica_id=%d coord=%s)",
                     omni_stage_id,
                     omni_replica_id,
-                    omni_coordinator_address,
+                    omni_coord_address,
                 )
 
             asyncio.run(proc.run_loop(request_address, response_address))
@@ -676,7 +676,7 @@ class StageDiffusionProcManager:
         stage_init_timeout: int,
         handshake_address: str | None = None,
         addresses: EngineZmqAddresses | None = None,
-        omni_coordinator_address: str | None = None,
+        omni_coord_address: str | None = None,
         omni_stage_id: int | None = None,
         omni_replica_id: int = 0,
     ) -> None:
@@ -696,7 +696,7 @@ class StageDiffusionProcManager:
                 "handshake_address": handshake_address,
                 "local_client": True,
                 "headless": False,
-                "omni_coordinator_address": omni_coordinator_address,
+                "omni_coord_address": omni_coord_address,
                 "omni_stage_id": omni_stage_id,
                 "omni_replica_id": omni_replica_id,
             },
@@ -717,7 +717,7 @@ class StageDiffusionProcManager:
         od_config: OmniDiffusionConfig,
         handshake_address: str,
         addresses: EngineZmqAddresses,
-        omni_coordinator_address: str | None,
+        omni_coord_address: str | None,
         omni_stage_id: int,
         omni_replica_id: int,
     ) -> StageDiffusionProcManager:
@@ -733,7 +733,7 @@ class StageDiffusionProcManager:
                 "handshake_address": handshake_address,
                 "local_client": False,
                 "headless": True,
-                "omni_coordinator_address": omni_coordinator_address,
+                "omni_coord_address": omni_coord_address,
                 "omni_stage_id": omni_stage_id,
                 "omni_replica_id": omni_replica_id,
             },
