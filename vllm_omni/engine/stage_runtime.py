@@ -576,7 +576,7 @@ class StageRuntime:
                     replica_id=plan.replica_id,
                     stage_config=plan.stage_cfg,
                     omni_master_server=self._get_omni_master_server(),
-                    omni_coordinator_address=self._get_coordinator_address(),
+                    omni_coord_address=self._get_coordinator_address(),
                     stage_visible_devices=physical_devices,
                     spawn_device_lock=self._spawn_device_lock,
                 ) as resources:
@@ -649,7 +649,7 @@ class StageRuntime:
                     use_inline=self._num_stages == 1 and plan.num_replicas == 1,
                     replica_id=plan.replica_id,
                     omni_master_server=self._get_omni_master_server(),
-                    omni_coordinator_address=self._get_coordinator_address(),
+                    omni_coord_address=self._get_coordinator_address(),
                 )
 
             logger.info(
