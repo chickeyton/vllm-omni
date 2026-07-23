@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from vllm_omni.engine.output_modality import FinalOutputModalityType
+from vllm_omni.outputs.output_metadata import FinalOutputModalityType
 from vllm_omni.inputs.data import OmniSamplingParams
 
 
