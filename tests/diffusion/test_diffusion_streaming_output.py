@@ -28,7 +28,7 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path
 import vllm_omni.diffusion.worker.diffusion_model_runner as model_runner_module
 from tests.engine.test_orchestrator import OrchestratorFixture, _build_harness, _wait_for
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
 from vllm_omni.diffusion.worker.diffusion_model_runner import DiffusionModelRunner
 from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackDecoder,
@@ -38,8 +38,8 @@ from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutput,
     StageDiffusionCoreRequest,
 )
-from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
-from vllm_omni.engine.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.engine.async_omni_engine import StageRuntimeInfo
 from vllm_omni.engine.messages import ShutdownRequestMessage, StageSubmissionMessage
 from vllm_omni.engine.stage_init_utils import StageMetadata
@@ -433,7 +433,7 @@ class TestPipelineStreamingOutputToEntrypoint:
         pipeline_engine = _PipelineBackedEngine(pipeline)
         with patch.object(InlineStageDiffusionClient, "_enrich_config"):
             with patch(
-                "vllm_omni.diffusion.inline_stage_diffusion_client.DiffusionEngine.make_engine",
+                "vllm_omni.diffusion.stage.inline_stage_diffusion_client.DiffusionEngine.make_engine",
                 return_value=pipeline_engine,
             ):
                 od_config = MagicMock(spec=OmniDiffusionConfig)

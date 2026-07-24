@@ -31,7 +31,7 @@ from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutput,
     StageDiffusionCoreRequest,
 )
-from vllm_omni.engine.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.core_model, pytest.mark.cpu]
@@ -739,7 +739,7 @@ class TestStageDiffusionCoreClientErrorPropagation:
     """
 
     def _make_client(self, *, engine_dead=False, proc_alive=True):
-        from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+        from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
 
         client = object.__new__(StageDiffusionCoreClient)
         client.stage_id = 0
@@ -842,7 +842,7 @@ class TestStageDiffusionCoreClientErrorPropagation:
         assert client._engine_dead is True
 
     def test_initialize_client_requires_replica_id(self):
-        from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+        from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
 
         # Metadata is now consumed by ``StageCoreClientBase.__init__`` (invoked
         # from the constructor) rather than ``_initialize_client``; a metadata
@@ -879,7 +879,7 @@ class TestStageDiffusionCoreClientErrorPropagation:
 
         rpc_id = "rpc-none"
         monkeypatch.setattr(
-            "vllm_omni.engine.stage.stage_diffusion_core_client.uuid.uuid4",
+            "vllm_omni.diffusion.stage.stage_diffusion_core_client.uuid.uuid4",
             lambda: SimpleNamespace(hex=rpc_id),
         )
 
@@ -998,7 +998,7 @@ class TestStageDiffusionCoreClientProcMonitor:
     def test_proc_monitor_sets_engine_dead_on_process_death(self):
         """When the subprocess dies, the monitor thread must set
         ``_engine_dead = True``."""
-        from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+        from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
 
         client = object.__new__(StageDiffusionCoreClient)
         client.stage_id = 0
@@ -1021,7 +1021,7 @@ class TestDrainResponsesDeathSentinel:
     """
 
     def _make_client(self):
-        from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+        from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
 
         client = object.__new__(StageDiffusionCoreClient)
         client.stage_id = 0

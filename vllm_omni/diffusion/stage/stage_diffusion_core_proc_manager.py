@@ -26,7 +26,7 @@ from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.utils import CoreEngine, EngineZmqAddresses, wait_for_engine_startup
 from vllm.v1.utils import shutdown
 
-from vllm_omni.engine.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 
 if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig

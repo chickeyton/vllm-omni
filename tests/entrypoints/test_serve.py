@@ -401,7 +401,7 @@ def test_run_headless_diffusion_registers_and_spawns_proc(mocker: MockerFixture)
         shutdown=mocker.Mock(),
     )
     mock_manager = mocker.patch(
-        "vllm_omni.engine.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager.launch_headless",
+        "vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager.launch_headless",
         return_value=fake_manager,
     )
     # Replace the blocking wait with one that returns the only proc's sentinel
@@ -473,7 +473,7 @@ def test_run_headless_diffusion_raises_on_nonzero_proc_exit(mocker: MockerFixtur
         ),
     )
     mocker.patch(
-        "vllm_omni.engine.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager.launch_headless",
+        "vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager.launch_headless",
         return_value=SimpleNamespace(proc=proc, shutdown=mocker.Mock()),
     )
     mocker.patch(

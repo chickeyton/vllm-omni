@@ -979,7 +979,7 @@ class DistStageRuntime(StageRuntime):
         metadata.replica_id = replica_id
 
         if ctx.stage_type == "diffusion":
-            from vllm_omni.engine.stage.stage_diffusion_core_client import (
+            from vllm_omni.diffusion.stage.stage_diffusion_core_client import (
                 StageDiffusionCoreClient as StageDiffusionClient,
             )
 

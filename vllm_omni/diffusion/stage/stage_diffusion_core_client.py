@@ -31,15 +31,15 @@ from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutputs,
     StageDiffusionCoreRequest,
 )
-from vllm_omni.engine.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
-from vllm_omni.engine.stage.stage_diffusion_core_proc_manager import (
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager import (
     StageDiffusionCoreProcManager,
 )
 from vllm_omni.engine.stage_init_utils import StageMetadata
 
 if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig
-    from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+    from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 logger = init_logger(__name__)
@@ -56,7 +56,7 @@ def create_diffusion_client(
 ) -> StageDiffusionCoreClient | InlineStageDiffusionClient:
     """Factory to create either an inline or out-of-process diffusion client."""
     if use_inline:
-        from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+        from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
 
         return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
     proc_manager = StageDiffusionCoreProcManager(

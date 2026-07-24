@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from vllm_omni.engine.orchestrator import OrchestratorRequestState
     from vllm_omni.outputs.output_processor import MultimodalOutputProcessor
     from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
-    from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+    from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
     from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
     from vllm_omni.outputs import OmniRequestOutput
 
@@ -1311,7 +1311,7 @@ class StageReplicaPool:
         ``StageDiffusionCoreRequest``, so a single path serves both.
         """
         from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
-        from vllm_omni.engine.stage.stage_diffusion_core_client import (
+        from vllm_omni.diffusion.stage.stage_diffusion_core_client import (
             StageDiffusionCoreClient,
         )
 

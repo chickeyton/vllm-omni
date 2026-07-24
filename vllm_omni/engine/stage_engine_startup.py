@@ -1196,7 +1196,7 @@ def launch_headless_diffusion_replica(
         replica_id=None,
         replica_bind_address=replica_bind_address,
     )
-    from vllm_omni.engine.stage.stage_diffusion_core_proc_manager import (
+    from vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager import (
         StageDiffusionCoreProcManager,
     )
 
@@ -1423,8 +1423,8 @@ def launch_diffusion_stage_replica(
         )
         return client, StageReplicaResources()
 
-    from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
-    from vllm_omni.engine.stage.stage_diffusion_core_proc_manager import (
+    from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+    from vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager import (
         StageDiffusionCoreProcManager,
     )
 

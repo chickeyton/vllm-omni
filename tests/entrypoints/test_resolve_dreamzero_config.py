@@ -1,7 +1,7 @@
 import pytest
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.engine.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.entrypoints.utils import load_stage_configs_from_model, resolve_model_config_path
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]

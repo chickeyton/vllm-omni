@@ -8,7 +8,7 @@ import pytest
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
 from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreRequest
 from vllm_omni.engine.stage_init_utils import StageMetadata
 from vllm_omni.outputs import OmniRequestOutput
@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 @pytest.fixture
 def mock_engine():
-    with patch("vllm_omni.diffusion.inline_stage_diffusion_client.DiffusionEngine") as mock:
+    with patch("vllm_omni.diffusion.stage.inline_stage_diffusion_client.DiffusionEngine") as mock:
         engine_instance = MagicMock()
         engine_instance.executor = SimpleNamespace(
             register_failure_callback=MagicMock(),
