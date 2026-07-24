@@ -31,7 +31,7 @@ from vllm_omni.engine.orchestrator import (
     OrchestratorRequestState,
     _build_terminal_empty_output,
 )
-from vllm_omni.engine.stage_pool import StagePool
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.experimental.fullduplex.engine.duplex_control_plane import DuplexControlPlane
 from vllm_omni.experimental.fullduplex.engine.duplex_runtime import (
     DuplexInputMode,
@@ -141,11 +141,17 @@ class FakeStageClient:
     async def add_request_async(self, *args, **kwargs) -> None:
         self.add_request_calls.append(args)
 
-    async def get_output_async(self):
+    async def get_outputs_async(self):
         try:
             return self._engine_core_outputs.get_nowait()
         except queue.Empty:
             return SimpleNamespace(outputs=[])
+
+    def get_outputs_nowait(self):
+        try:
+            return self._engine_core_outputs.get_nowait()
+        except queue.Empty:
+            return None
 
     def get_diffusion_output_nowait(self):
         try:
@@ -156,7 +162,7 @@ class FakeStageClient:
     def set_engine_outputs(self, outputs) -> None:
         return None
 
-    def process_engine_inputs(self, source_outputs, prompt=None, streaming_context=None):
+    def process_core_inputs(self, source_outputs, prompt=None, streaming_context=None):
         return list(self.next_inputs)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
