@@ -11,7 +11,7 @@ import contextlib
 import os
 import signal
 from types import FrameType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
@@ -31,6 +31,9 @@ from vllm.v1.engine.utils import (
 from vllm_omni.distributed.omni_coordinator import create_stage_coord_client
 from vllm_omni.engine.stage_init_utils import set_death_signal
 
+if TYPE_CHECKING:
+    from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
+
 logger = init_logger(__name__)
 
 
@@ -49,6 +52,13 @@ class StageLLMCoreProc(EngineCoreProc):
     entry point for launching in a subprocess. Does **not** delegate to
     ``EngineCoreProc.run_engine_core()``.
     """
+
+    def preprocess_add_request(self, request: StageLLMCoreRequest) -> tuple[Any, int]:
+        """Preserve omni payloads when vLLM builds its scheduler request."""
+        scheduler_request, current_wave = super().preprocess_add_request(request)
+        scheduler_request.additional_information = request.additional_information
+        scheduler_request.external_req_id = getattr(request, "external_req_id", request.request_id)
+        return scheduler_request, current_wave
 
     @staticmethod
     def run_stage_core(
