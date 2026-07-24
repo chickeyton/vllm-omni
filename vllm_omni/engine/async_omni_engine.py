@@ -61,7 +61,6 @@ from vllm_omni.engine.messages import (
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
 from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
-from vllm_omni.engine.stage_client import StageClient
 from vllm_omni.engine.stage_init_utils import build_stage0_input_processor
 from vllm_omni.engine.stage_runtime import (
     StageRuntimeInfo,
@@ -241,7 +240,7 @@ class AsyncOmniEngine:
         stage0_args = getattr(self.stage_configs[0], "engine_args", None) if self.num_stages > 0 else None
         self.async_chunk = bool(getattr(stage0_args, "async_chunk", False))
         self.stage_pools: list[StagePool] = []
-        self.stage_clients: list[StageClient] = []  # logical-stage view for external readers
+        self.stage_clients: list[Any] = []  # logical-stage view for external readers
         self.input_processor: InputProcessor | None = None
         self.prompt_expand_func: Any | None = None
         self.supported_tasks: tuple[str, ...] = ("generate",)
@@ -333,7 +332,7 @@ class AsyncOmniEngine:
         self.num_stages = len(self.stage_configs)
         self.stage_pools = self._runtime.stage_pools
         self.stage_clients = [
-            cast(StageClient, pool.stage_client) for pool in self.stage_pools if pool.stage_client is not None
+            pool.stage_client for pool in self.stage_pools if pool.stage_client is not None
         ]
         self.stage_vllm_configs = [pool.stage_vllm_config for pool in self.stage_pools]
         self.output_processors = [pool.output_processor for pool in self.stage_pools]
