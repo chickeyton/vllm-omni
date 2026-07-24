@@ -97,7 +97,7 @@ def test_build_add_request_message_preserves_model_intermediate_buffer(mocker: M
     )
 
     request = msg.prompt
-    assert isinstance(request, OmniEngineCoreRequest)
+    assert isinstance(request, StageLLMCoreRequest)
     assert request.additional_information is not None
     assert request.additional_information.entries["global_request_id"].list_data == ["req-1"]
     assert request.additional_information.entries["omni_final_stage_id"].scalar_data == 0
