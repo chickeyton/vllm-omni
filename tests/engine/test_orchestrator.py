@@ -683,7 +683,13 @@ async def test_run_llm_to_diffusion(orchestrator_factory) -> None:
         stage0.push_engine_core_outputs(_engine_core_outputs("stage0-raw", 1.0))
 
         await _wait_for(lambda: len(stage1.add_request_calls) == 1)
-        assert stage1.add_request_calls[0] == ("req-img", original_prompt, params)
+        # The diffusion stage now receives a single typed StageDiffusionCoreRequest
+        # (sampling params in plain-dict form), not unpacked positional args.
+        (diffusion_request,) = stage1.add_request_calls[0]
+        assert diffusion_request.request_id == "req-img"
+        assert diffusion_request.prompt == original_prompt
+        assert isinstance(diffusion_request.sampling_params, dict)
+        assert diffusion_request.kv_sender_info is None
 
         stage1.push_diffusion_output(
             OmniRequestOutput.from_diffusion(
