@@ -31,6 +31,7 @@ from vllm_omni.engine.orchestrator import (
     OrchestratorRequestState,
     _build_terminal_empty_output,
 )
+from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
 from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.experimental.fullduplex.engine.duplex_control_plane import DuplexControlPlane
 from vllm_omni.experimental.fullduplex.engine.duplex_runtime import (
@@ -148,14 +149,16 @@ class FakeStageClient:
             return SimpleNamespace(outputs=[])
 
     def get_outputs_nowait(self):
+        if self.stage_type == "diffusion":
+            collected: list[StageDiffusionCoreOutput] = []
+            while True:
+                try:
+                    collected.append(self._diffusion_outputs.get_nowait())
+                except queue.Empty:
+                    break
+            return StageDiffusionCoreOutputs(outputs=collected) if collected else None
         try:
             return self._engine_core_outputs.get_nowait()
-        except queue.Empty:
-            return None
-
-    def get_diffusion_output_nowait(self):
-        try:
-            return self._diffusion_outputs.get_nowait()
         except queue.Empty:
             return None
 
@@ -200,7 +203,13 @@ class FakeStageClient:
         self._engine_core_outputs.put_nowait(outputs)
 
     def push_diffusion_output(self, output) -> None:
-        self._diffusion_outputs.put_nowait(output)
+        self._diffusion_outputs.put_nowait(
+            StageDiffusionCoreOutput(
+                request_id=getattr(output, "request_id", ""),
+                finished=bool(getattr(output, "finished", True)),
+                output=output,
+            )
+        )
 
 
 def test_terminal_empty_audio_output_uses_stage_sample_rate() -> None:

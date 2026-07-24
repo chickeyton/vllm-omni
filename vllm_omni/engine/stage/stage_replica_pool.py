@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from vllm_omni.engine.orchestrator import OrchestratorRequestState
     from vllm_omni.outputs.output_processor import MultimodalOutputProcessor
-    from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput
+    from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
     from vllm_omni.engine.stage.stage_diffusion_core_client import StageDiffusionCoreClient
     from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
     from vllm_omni.outputs import OmniRequestOutput
@@ -852,27 +852,20 @@ class StageReplicaPool:
     def poll_diffusion_output(self, replica_id: int) -> list[OmniRequestOutput]:
         """Drain ready diffusion outputs from the given replica.
 
-        The out-of-process ``StageDiffusionCoreClient`` returns a typed
-        ``StageDiffusionCoreOutputs`` batch, unwrapped here into
-        ``OmniRequestOutput`` results (an error item becomes an error output);
-        the untouched inline client still returns a single ``OmniRequestOutput``.
+        Both the out-of-process ``StageDiffusionCoreClient`` and the in-process
+        ``InlineStageDiffusionClient`` return a typed ``StageDiffusionCoreOutputs``
+        batch, unwrapped here into ``OmniRequestOutput`` results (an error item
+        becomes an error output).
         """
         if not self.is_replica_available(replica_id):
             return []
         raw_client = self.clients[replica_id]
         if raw_client is None:
             return []
-        from vllm_omni.engine.stage.stage_diffusion_core_client import (
-            StageDiffusionCoreClient,
-        )
-
-        if isinstance(raw_client, StageDiffusionCoreClient):
-            batch = raw_client.get_outputs_nowait()
-            if batch is None:
-                return []
-            return [self._diffusion_core_output_to_omni(o) for o in batch.outputs]
-        output = raw_client.get_diffusion_output_nowait()
-        return [output] if output is not None else []
+        batch = cast("StageDiffusionCoreOutputs | None", raw_client.get_outputs_nowait())
+        if batch is None:
+            return []
+        return [self._diffusion_core_output_to_omni(o) for o in batch.outputs]
 
     # ---- Stage-local control plane ----
 
@@ -1310,37 +1303,33 @@ class StageReplicaPool:
         params: Any,
         submit_kwargs: dict[str, Any] | None,
     ) -> None:
-        """Dispatch a diffusion add-request across the two client shapes.
+        """Dispatch a diffusion add-request.
 
-        The out-of-process ``StageDiffusionCoreClient`` takes a typed
-        ``StageDiffusionCoreRequest``; the inline client keeps the legacy
-        unpacked signature.
+        Both diffusion client shapes — the out-of-process
+        ``StageDiffusionCoreClient`` and the in-process
+        ``InlineStageDiffusionClient`` — accept the typed
+        ``StageDiffusionCoreRequest``, so a single path serves both.
         """
+        from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
         from vllm_omni.engine.stage.stage_diffusion_core_client import (
             StageDiffusionCoreClient,
         )
 
         kwargs = dict(submit_kwargs or {})
-        if isinstance(client, StageDiffusionCoreClient):
-            from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
-
-            await client.add_request_async(
-                StageDiffusionCoreRequest(
-                    request_id=request_id,
-                    prompt=prompt,
-                    sampling_params=StageDiffusionCoreClient.sampling_params_to_dict(params),
-                    kv_sender_info=kwargs.pop("kv_sender_info", None),
-                )
+        await client.add_request_async(
+            StageDiffusionCoreRequest(
+                request_id=request_id,
+                prompt=prompt,
+                sampling_params=StageDiffusionCoreClient.sampling_params_to_dict(params),
+                kv_sender_info=kwargs.pop("kv_sender_info", None),
             )
-            if kwargs:
-                logger.warning(
-                    "[StageReplicaPool] stage-%s ignoring unsupported diffusion submit kwargs: %s",
-                    self.stage_id,
-                    sorted(kwargs),
-                )
-            return
-        # Inline client (untouched): legacy unpacked signature.
-        await client.add_request_async(request_id, prompt, params, **kwargs)
+        )
+        if kwargs:
+            logger.warning(
+                "[StageReplicaPool] stage-%s ignoring unsupported diffusion submit kwargs: %s",
+                self.stage_id,
+                sorted(kwargs),
+            )
 
     async def _pick_or_select(
         self,

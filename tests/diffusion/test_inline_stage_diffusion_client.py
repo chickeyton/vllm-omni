@@ -9,8 +9,8 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreRequest
 from vllm_omni.engine.stage_init_utils import StageMetadata
-from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -61,18 +61,23 @@ async def test_inline_dispatch_request_success(client, mock_engine):
 
     mock_engine.step_streaming = _step_streaming
 
-    sampling_params = OmniDiffusionSamplingParams()
-    await client.add_request_async("req-1", "A test prompt", sampling_params)
+    await client.add_request_async(
+        StageDiffusionCoreRequest(request_id="req-1", prompt="A test prompt", sampling_params={})
+    )
 
     # Wait for the task to be processed
+    batch = None
     for _ in range(10):
-        output = client.get_diffusion_output_nowait()
-        if output is not None:
+        batch = client.get_outputs_nowait()
+        if batch is not None:
             break
         await asyncio.sleep(0.01)
 
-    assert output is not None
-    assert output.request_id == "req-1"
+    assert batch is not None
+    assert len(batch.outputs) == 1
+    core_output = batch.outputs[0]
+    assert core_output.request_id == "req-1"
+    assert core_output.output is mock_result
 
 
 @pytest.mark.asyncio
@@ -90,18 +95,20 @@ async def test_inline_dispatch_request_streaming_success(client, mock_engine):
     client.od_config.streaming_output = True
     mock_engine.step_streaming = _step_streaming
 
-    await client.add_request_async("req-stream", "A test prompt", OmniDiffusionSamplingParams())
+    await client.add_request_async(
+        StageDiffusionCoreRequest(request_id="req-stream", prompt="A test prompt", sampling_params={})
+    )
 
-    outputs = []
+    collected: list[StageDiffusionCoreOutput] = []
     for _ in range(20):
-        output = client.get_diffusion_output_nowait()
-        if output is not None:
-            outputs.append(output)
-            if output.finished:
+        batch = client.get_outputs_nowait()
+        if batch is not None:
+            collected.extend(batch.outputs)
+            if any(o.finished for o in batch.outputs):
                 break
         await asyncio.sleep(0.01)
 
-    assert outputs == chunks
+    assert [o.output for o in collected] == chunks
 
 
 @pytest.mark.asyncio
@@ -112,19 +119,22 @@ async def test_inline_dispatch_request_error(client, mock_engine):
 
     mock_engine.step_streaming = _step_streaming
 
-    sampling_params = OmniDiffusionSamplingParams()
-    await client.add_request_async("req-err", "A test prompt", sampling_params)
+    await client.add_request_async(
+        StageDiffusionCoreRequest(request_id="req-err", prompt="A test prompt", sampling_params={})
+    )
 
+    batch = None
     for _ in range(10):
-        output = client.get_diffusion_output_nowait()
-        if output is not None:
+        batch = client.get_outputs_nowait()
+        if batch is not None:
             break
         await asyncio.sleep(0.01)
 
-    assert output is not None
-    assert output.request_id == "req-err"
-    assert output.error == "Engine failure"
-    assert not output.images
+    assert batch is not None
+    core_output = batch.outputs[0]
+    assert core_output.request_id == "req-err"
+    assert core_output.error == "Engine failure"
+    assert core_output.output is None
 
 
 def test_inline_shutdown(client, mock_engine):
@@ -148,19 +158,25 @@ def test_inline_executor_failure_marks_engine_dead(client, mock_engine):
 
     assert client._engine_dead is True
     with pytest.raises(EngineDeadError, match="inline diffusion engine is dead"):
-        client.get_diffusion_output_nowait()
+        client.get_outputs_nowait()
 
 
 def test_inline_returns_queued_output_before_engine_dead(client, mock_engine):
     callback = mock_engine.executor.register_failure_callback.call_args.args[0]
-    output = OmniRequestOutput.from_diffusion(request_id="req-queued", images=[])
-    client._output_queue.put_nowait(output)
+    core_output = StageDiffusionCoreOutput(
+        request_id="req-queued",
+        finished=True,
+        output=OmniRequestOutput.from_diffusion(request_id="req-queued", images=[]),
+    )
+    client._output_queue.put_nowait(core_output)
 
     callback()
 
-    assert client.get_diffusion_output_nowait() is output
+    batch = client.get_outputs_nowait()
+    assert batch is not None
+    assert batch.outputs == [core_output]
     with pytest.raises(EngineDeadError, match="inline diffusion engine is dead"):
-        client.get_diffusion_output_nowait()
+        client.get_outputs_nowait()
 
 
 def test_inline_check_health_marks_engine_dead(client, mock_engine):
