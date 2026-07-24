@@ -12,7 +12,7 @@ from pytest_mock import MockerFixture
 from vllm.v1.engine.utils import EngineZmqAddresses
 
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
-from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClientBase
+from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
 from vllm_omni.engine.stage_engine_startup import (
     OmniMasterServer,
     StageAllocation,
@@ -758,7 +758,7 @@ class TestSingleStageReplicaInitialization:
 
         mock_connect = mocker.patch.object(runtime_mod, "connect_remote_engine_cores", side_effect=_fake_connect)
         mocker.patch.object(
-            StageEngineCoreClientBase,
+            StageLLMCoreClientBase,
             "make_async_mp_client",
             side_effect=lambda **_: (events.append("attach"), sentinel_client)[1],
         )
@@ -832,7 +832,7 @@ class TestSingleStageReplicaInitialization:
         ).replicas[0]
         mocker.patch.object(runtime_mod, "connect_remote_engine_cores", side_effect=_fake_connect)
         mocker.patch.object(
-            StageEngineCoreClientBase,
+            StageLLMCoreClientBase,
             "make_async_mp_client",
             side_effect=RuntimeError("attach failed"),
         )
@@ -892,7 +892,7 @@ class TestSingleStageReplicaInitialization:
         mocker.patch.object(runtime_mod, "release_device_locks")
         mock_launch = mocker.patch.object(runtime_mod, "launch_stage_replica", side_effect=_fake_launch)
         mocker.patch.object(
-            StageEngineCoreClientBase,
+            StageLLMCoreClientBase,
             "make_async_mp_client",
             side_effect=lambda **_: sentinel_client,
         )
@@ -946,7 +946,7 @@ class TestSingleStageReplicaInitialization:
         mocker.patch.object(runtime_mod, "extract_stage_metadata", return_value=remote_metadata)
         mock_connect = mocker.patch.object(runtime_mod, "connect_remote_diffusion_proc", side_effect=_fake_connect)
         mock_from_addresses = mocker.patch(
-            "vllm_omni.diffusion.stage_diffusion_client.StageDiffusionClient.from_addresses",
+            "vllm_omni.engine.stage.stage_diffusion_core_client.StageDiffusionCoreClient.from_addresses",
             return_value=sentinel_client,
         )
 
@@ -1010,11 +1010,11 @@ class TestSingleStageReplicaInitialization:
             ),
         )
         mock_manager = mocker.patch(
-            "vllm_omni.diffusion.stage_diffusion_proc.StageDiffusionProcManager",
+            "vllm_omni.engine.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager",
             return_value=fake_manager,
         )
         mock_from_addresses = mocker.patch(
-            "vllm_omni.diffusion.stage_diffusion_client.StageDiffusionClient.from_addresses",
+            "vllm_omni.engine.stage.stage_diffusion_core_client.StageDiffusionCoreClient.from_addresses",
             return_value=sentinel_client,
         )
 
@@ -1095,7 +1095,7 @@ class TestSingleStageReplicaInitialization:
             ),
         )
         mocker.patch(
-            "vllm_omni.diffusion.stage_diffusion_proc.StageDiffusionProcManager",
+            "vllm_omni.engine.stage.stage_diffusion_core_proc_manager.StageDiffusionCoreProcManager",
             side_effect=RuntimeError("handshake failed"),
         )
 

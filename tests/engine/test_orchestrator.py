@@ -1976,7 +1976,7 @@ async def test_stage_pool_abort_requests_logs_when_binding_is_missing(caplog) ->
         stage_vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=64)),
     )
 
-    target_logger = logging.getLogger("vllm_omni.engine.stage_pool")
+    target_logger = logging.getLogger("vllm_omni.engine.stage.stage_replica_pool")
     target_logger.addHandler(caplog.handler)
     prev_level = target_logger.level
     target_logger.setLevel(logging.DEBUG)

@@ -15,7 +15,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
 from vllm_omni.engine.orchestrator import Orchestrator, OrchestratorRequestState
-from vllm_omni.engine.stage_pool import StagePool
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -147,13 +147,13 @@ async def test_forward_text_prompt_uses_target_stage_input_processor() -> None:
         next_inputs=[{"prompt": "hello", "multi_modal_data": {"video": ["frame"]}}],
     )
     stage_pools = [
-        StagePool(
+        StageReplicaPool(
             0,
             [stage0],
             output_processor=FakeOutputProcessor(tokenizer=SourceTokenizer()),
             stage_vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=64)),
         ),
-        StagePool(
+        StageReplicaPool(
             1,
             [stage1],
             output_processor=FakeOutputProcessor(),
