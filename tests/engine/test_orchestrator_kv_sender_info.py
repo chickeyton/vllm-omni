@@ -34,13 +34,13 @@ class _DummyDiffusionStage:
         self.engine_input_source = engine_input_source or [0]
         self.calls = []
 
-    async def add_request_async(self, request_id, prompt, sampling_params, kv_sender_info=None):
+    async def add_request_async(self, request):
         self.calls.append(
             {
-                "request_id": request_id,
-                "prompt": prompt,
-                "sampling_params": sampling_params,
-                "kv_sender_info": kv_sender_info,
+                "request_id": request.request_id,
+                "prompt": request.prompt,
+                "sampling_params": request.sampling_params,
+                "kv_sender_info": request.kv_sender_info,
             }
         )
 

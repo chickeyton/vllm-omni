@@ -156,7 +156,7 @@ class _FakeStage:
     def set_engine_outputs(self, outputs):
         self.engine_outputs = outputs
 
-    def process_engine_inputs(self, stage_list, prompts):
+    def process_core_inputs(self, stage_list, prompts):
         return self._processed_input
 
 

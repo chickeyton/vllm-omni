@@ -1110,11 +1110,12 @@ class StageReplicaPool:
         except TypeError:
             return 1
 
-    def _infer_audio_sample_rate(self, mm_output: dict[str, Any]) -> int:
-        for key in ("audio_sample_rate", "sample_rate", "sampling_rate", "sr"):
-            rate = self._coerce_int_scalar(mm_output.get(key))
-            if rate > 0:
-                return rate
+    def _infer_audio_sample_rate(self, mm_output: dict[str, Any] | None = None) -> int:
+        if mm_output is not None:
+            for key in ("audio_sample_rate", "sample_rate", "sampling_rate", "sr"):
+                rate = self._coerce_int_scalar(mm_output.get(key))
+                if rate > 0:
+                    return rate
         for attr in ("audio_sample_rate", "sample_rate", "sampling_rate", "output_sample_rate"):
             rate = self._coerce_int_scalar(getattr(self.stage_client, attr, None))
             if rate > 0:

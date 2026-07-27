@@ -52,7 +52,7 @@ class FakeStageClient:
         except queue.Empty:
             return SimpleNamespace(outputs=[])
 
-    def process_engine_inputs(self, _source_outputs, prompt=None, streaming_context=None):
+    def process_core_inputs(self, _source_outputs, prompt=None, streaming_context=None):
         decoder = getattr(streaming_context, "source_token_decoder", None)
         if callable(decoder):
             self.decoded_source_tokens = decoder([11, 12], skip_special_tokens=True)
