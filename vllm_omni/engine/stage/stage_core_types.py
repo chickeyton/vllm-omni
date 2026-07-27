@@ -176,6 +176,10 @@ class StageDiffusionCoreRequest(StageCoreRequest):
     """
 
     request_id: str
+    # ``Any`` is deliberate: this is a msgspec wire field and the diffusion prompt
+    # is model-dependent (a text ``str`` or a structured ``dict`` whose nested
+    # tensors/images are handled by the Omni msgpack enc/dec hooks). A narrower
+    # annotation would make ``msgspec.convert`` reject valid model-specific shapes.
     prompt: Any
     sampling_params: dict[str, Any]
     kv_sender_info: dict[int, dict[str, Any]] | None = None
@@ -193,6 +197,9 @@ class StageDiffusionCoreOutput(StageCoreOutput):
 
     request_id: str
     finished: bool = True
+    # ``Any`` is deliberate (see docstring): a msgspec wire field carrying the full
+    # ``OmniRequestOutput`` opaquely via the Omni msgpack hooks, so the client need
+    # not depend on that type. A concrete annotation would couple this struct to it.
     output: Any = None
     error: str | None = None
     status_code: int | None = None
