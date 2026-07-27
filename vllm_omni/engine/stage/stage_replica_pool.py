@@ -20,7 +20,7 @@ from vllm_omni.distributed.omni_coordinator import (
 )
 from vllm_omni.distributed.omni_coordinator.load_balancer import Task
 from vllm_omni.engine.stage.stage_core_client import StageCoreClientBase
-from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniInteractionPrompt
 from vllm_omni.metrics import (
     count_audio_frames,
     count_image_pixels,
@@ -1266,6 +1266,24 @@ class StageReplicaPool:
                 self.stage_id,
                 sorted(kwargs),
             )
+
+    async def submit_interaction(
+        self,
+        request_id: str,
+        interaction: OmniInteractionPrompt,
+    ) -> int:
+        """Submit a midway interaction to an active diffusion (typically video generation) request."""
+        replica_id = self.get_bound_replica_id(request_id)
+        if replica_id is None or self.clients[replica_id] is None:
+            replica_id = await self._pick_or_select(request_id)
+
+        client = self._diffusion_client(replica_id)
+        result = await client.submit_interaction_async(request_id, interaction)
+        # Interaction may raise error if underlying check against ODConfig fails.
+        if isinstance(result, dict) and result.get("error"):
+            reason = result.get("reason") or "Unknown interaction RPC error"
+            raise ValueError(str(reason))
+        return replica_id
 
     async def _pick_or_select(
         self,
