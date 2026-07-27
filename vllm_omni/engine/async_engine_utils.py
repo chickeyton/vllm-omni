@@ -10,13 +10,13 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
 
-from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
 from vllm_omni.engine.messages import EngineQueueMessage, ShutdownRequestMessage
 from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
 from vllm_omni.engine.serialization import (
     deserialize_additional_information,
     serialize_additional_information,
 )
+from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
 from vllm_omni.engine.stage_runtime import StageRuntime
 
 logger = init_logger(__name__)

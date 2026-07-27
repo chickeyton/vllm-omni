@@ -29,19 +29,19 @@ import vllm_omni.diffusion.worker.diffusion_model_runner as model_runner_module
 from tests.engine.test_orchestrator import OrchestratorFixture, _build_harness, _wait_for
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.diffusion.worker.diffusion_model_runner import DiffusionModelRunner
 from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackDecoder,
     OmniMsgpackEncoder,
 )
+from vllm_omni.engine.async_omni_engine import StageRuntimeInfo
+from vllm_omni.engine.messages import ShutdownRequestMessage, StageSubmissionMessage
 from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutput,
     StageDiffusionCoreRequest,
 )
-from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
-from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
-from vllm_omni.engine.async_omni_engine import StageRuntimeInfo
-from vllm_omni.engine.messages import ShutdownRequestMessage, StageSubmissionMessage
 from vllm_omni.engine.stage_init_utils import StageMetadata
 from vllm_omni.entrypoints.async_omni import AsyncEventResolver, AsyncOmni
 from vllm_omni.entrypoints.openai.serving_video_output_stream import OmniStreamingVideoOutputHandler

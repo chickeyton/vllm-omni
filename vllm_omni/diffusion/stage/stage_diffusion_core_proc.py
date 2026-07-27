@@ -227,7 +227,8 @@ class StageDiffusionCoreProc:
                                 await waiter
                 if fatal_event.is_set():
                     raise RuntimeError(
-                        "StageDiffusionCoreProc executor reported permanent failure; tearing down the diffusion subprocess."
+                        "StageDiffusionCoreProc executor reported permanent failure; "
+                        "tearing down the diffusion subprocess."
                     )
                 raw = recv_task.result()
                 msg = decoder.decode(raw)

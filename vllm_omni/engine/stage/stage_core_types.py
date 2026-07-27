@@ -46,7 +46,11 @@ from vllm.v1.engine import (
 # payloads are importable from one place.
 from vllm_omni.engine import (
     AdditionalInformationEntry as AdditionalInformationEntry,
+)
+from vllm_omni.engine import (
     AdditionalInformationPayload as AdditionalInformationPayload,
+)
+from vllm_omni.engine import (
     PromptEmbedsPayload as PromptEmbedsPayload,
 )
 
@@ -136,6 +140,7 @@ class StageLLMCoreRequest(StageCoreRequest, EngineCoreRequest):
 
 class StageLLMCoreOutput(StageCoreOutput, EngineCoreOutput):
     """LLM stage output."""
+
     # Dedicated channel for multimodal outputs (image/audio/latent).
     # pooling_output is inherited from EngineCoreOutput as torch.Tensor | None
     # and retains its original vLLM semantics for pooling/embedding tasks.
@@ -148,6 +153,7 @@ class StageLLMCoreOutput(StageCoreOutput, EngineCoreOutput):
 
 class StageLLMCoreOutputs(StageCoreOutputs, EngineCoreOutputs):
     """LLM stage outputs."""
+
     outputs: list[StageLLMCoreOutput] = []
 
 

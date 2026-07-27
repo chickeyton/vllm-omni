@@ -25,13 +25,13 @@ from vllm_omni.diffusion.sched.interface import (
     DiffusionSchedulerOutput,
     NewRequestData,
 )
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.diffusion.worker.diffusion_worker import WorkerProc
 from vllm_omni.diffusion.worker.utils import BatchRunnerOutput, RunnerOutput
 from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutput,
     StageDiffusionCoreRequest,
 )
-from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.core_model, pytest.mark.cpu]

@@ -21,6 +21,10 @@ import zmq.asyncio
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
+from vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager import (
+    StageDiffusionCoreProcManager,
+)
 from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackDecoder,
     OmniMsgpackEncoder,
@@ -30,10 +34,6 @@ from vllm_omni.engine.stage.stage_core_types import (
     StageDiffusionCoreOutput,
     StageDiffusionCoreOutputs,
     StageDiffusionCoreRequest,
-)
-from vllm_omni.diffusion.stage.stage_diffusion_core_proc import StageDiffusionCoreProc
-from vllm_omni.diffusion.stage.stage_diffusion_core_proc_manager import (
-    StageDiffusionCoreProcManager,
 )
 from vllm_omni.engine.stage_init_utils import StageMetadata
 
@@ -438,7 +438,8 @@ class StageDiffusionCoreClient(StageCoreClientBase):
             if raw == StageDiffusionCoreProc.DIFFUSION_PROC_DEAD:
                 self._engine_dead = True
                 logger.error(
-                    "[StageDiffusionCoreClient] stage-%s [rep-%s] received DIFFUSION_PROC_DEAD sentinel from subprocess.",
+                    "[StageDiffusionCoreClient] stage-%s [rep-%s] received "
+                    "DIFFUSION_PROC_DEAD sentinel from subprocess.",
                     self.stage_id,
                     self.replica_id,
                 )

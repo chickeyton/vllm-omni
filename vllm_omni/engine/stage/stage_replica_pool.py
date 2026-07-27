@@ -30,12 +30,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.outputs import RequestOutput
 
-    from vllm_omni.engine.orchestrator import OrchestratorRequestState
-    from vllm_omni.outputs.output_processor import MultimodalOutputProcessor
-    from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
     from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
+    from vllm_omni.engine.orchestrator import OrchestratorRequestState
+    from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
     from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
     from vllm_omni.outputs import OmniRequestOutput
+    from vllm_omni.outputs.output_processor import MultimodalOutputProcessor
 
 logger = init_logger(__name__)
 
@@ -166,7 +166,7 @@ class StageReplicaPool:
         return None
 
     @property
-    def llm_stage_client(self) -> "StageLLMCoreClientBase":
+    def llm_stage_client(self) -> StageLLMCoreClientBase:
         return cast("StageLLMCoreClientBase", self.stage_client)
 
     @property
@@ -403,7 +403,7 @@ class StageReplicaPool:
             return None
         return self.clients[replica_id]
 
-    def get_bound_llm_client(self, request_id: str) -> "StageLLMCoreClientBase | None":
+    def get_bound_llm_client(self, request_id: str) -> StageLLMCoreClientBase | None:
         """Return the currently bound LLM client for *request_id* if present."""
         client = self.get_bound_client(request_id)
         if client is None:
@@ -757,9 +757,7 @@ class StageReplicaPool:
                     "Diffusion list-prompt batch requests are no longer supported. "
                     "Submit multiple independent requests to use scheduler batching."
                 )
-            await self._diffusion_add_request(
-                self._diffusion_client(replica_id), request_id, request, params, None
-            )
+            await self._diffusion_add_request(self._diffusion_client(replica_id), request_id, request, params, None)
         else:
             # Refresh the shared output-processor state before yielding to the
             # stage client so streaming segments are merged against the latest
@@ -882,7 +880,9 @@ class StageReplicaPool:
         for request_id in request_ids:
             replica_id = self.get_bound_replica_id(request_id)
             if replica_id is None or self.clients[replica_id] is None:
-                logger.debug("[StageReplicaPool] abort: no live binding for req=%s in stage-%s", request_id, self.stage_id)
+                logger.debug(
+                    "[StageReplicaPool] abort: no live binding for req=%s in stage-%s", request_id, self.stage_id
+                )
                 continue
             request_ids_by_replica.setdefault(replica_id, []).append(request_id)
 
@@ -1006,13 +1006,13 @@ class StageReplicaPool:
                 return replica_id
         return None
 
-    def _llm_client(self, replica_id: int) -> "StageLLMCoreClientBase":
+    def _llm_client(self, replica_id: int) -> StageLLMCoreClientBase:
         client = self.clients[replica_id]
         if client is None:
             raise RuntimeError(f"stage {self.stage_id} replica {replica_id} is not attached")
         return cast("StageLLMCoreClientBase", client)
 
-    def _diffusion_client(self, replica_id: int) -> "StageDiffusionCoreClient":
+    def _diffusion_client(self, replica_id: int) -> StageDiffusionCoreClient:
         client = self.clients[replica_id]
         if client is None:
             raise RuntimeError(f"stage {self.stage_id} replica {replica_id} is not attached")
@@ -1311,10 +1311,10 @@ class StageReplicaPool:
         ``InlineStageDiffusionClient`` — accept the typed
         ``StageDiffusionCoreRequest``, so a single path serves both.
         """
-        from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
         from vllm_omni.diffusion.stage.stage_diffusion_core_client import (
             StageDiffusionCoreClient,
         )
+        from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
 
         kwargs = dict(submit_kwargs or {})
         await client.add_request_async(
@@ -1345,7 +1345,7 @@ class StageReplicaPool:
 
     # ---- Stage-local polling ----
 
-    async def _poll_stage_raw(self, client: "StageLLMCoreClientBase") -> EngineCoreOutputs | None:
+    async def _poll_stage_raw(self, client: StageLLMCoreClientBase) -> EngineCoreOutputs | None:
         """Pull raw EngineCoreOutputs from a stage replica without processing."""
         # ``StageLLMCoreClientBase.get_outputs_async`` is typed to the field-free marker
         # ``StageCoreOutputs``; the concrete LLM client returns a

@@ -96,8 +96,8 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         client_addresses: dict[str, str] | None = None,
         *,
         metadata: StageMetadata | None = None,
-        proc_manager: "StageLLMCoreProcManager | None" = None,
-        coordinator: "DPCoordinator | None" = None,
+        proc_manager: StageLLMCoreProcManager | None = None,
+        coordinator: DPCoordinator | None = None,
     ):
         """Create an async EngineCore client for a single stage.
 
@@ -239,9 +239,7 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
         """Forward a control RPC to the underlying stage engine core."""
-        return await super(StageCoreClientBase, self).collective_rpc_async(
-            method, timeout, args, kwargs
-        )
+        return await super(StageCoreClientBase, self).collective_rpc_async(method, timeout, args, kwargs)
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shut down the stage engine core and its transport."""

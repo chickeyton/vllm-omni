@@ -332,9 +332,7 @@ class AsyncOmniEngine:
 
         self.num_stages = len(self.stage_configs)
         self.stage_pools = self._runtime.stage_pools
-        self.stage_clients = [
-            pool.stage_client for pool in self.stage_pools if pool.stage_client is not None
-        ]
+        self.stage_clients = [pool.stage_client for pool in self.stage_pools if pool.stage_client is not None]
         self.stage_vllm_configs = [pool.stage_vllm_config for pool in self.stage_pools]
         self.output_processors = [pool.output_processor for pool in self.stage_pools]
         self.input_processor = (

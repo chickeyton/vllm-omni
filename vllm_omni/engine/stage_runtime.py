@@ -34,6 +34,7 @@ from vllm_omni.engine.messages import (
 )
 from vllm_omni.engine.stage.stage_core_client import StageCoreClientBase
 from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_engine_startup import (
     OmniMasterServer,
     StageReplicaResources,
@@ -59,7 +60,6 @@ from vllm_omni.engine.stage_init_utils import (
     prepare_engine_environment,
     release_device_locks,
 )
-from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.entrypoints.stage_utils import resolve_stage_physical_devices
 from vllm_omni.entrypoints.utils import inject_omni_kv_config
 from vllm_omni.outputs.output_metadata import FinalOutputModalityType

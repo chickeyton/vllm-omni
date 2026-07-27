@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from vllm_omni.outputs.output_metadata import FinalOutputModalityType
 from vllm_omni.inputs.data import OmniSamplingParams
+from vllm_omni.outputs.output_metadata import FinalOutputModalityType
 
 
 class StageCoreClientBase(ABC):
@@ -145,13 +145,10 @@ class StageCoreClientBase(ABC):
             replica_id = int(replica_id)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"metadata.replica_id must be an integer for stage {metadata.stage_id}, "
-                f"got {metadata.replica_id!r}."
+                f"metadata.replica_id must be an integer for stage {metadata.stage_id}, got {metadata.replica_id!r}."
             ) from exc
         if replica_id < 0:
-            raise ValueError(
-                f"metadata.replica_id must be >= 0 for stage {metadata.stage_id}, got {replica_id}."
-            )
+            raise ValueError(f"metadata.replica_id must be >= 0 for stage {metadata.stage_id}, got {replica_id}.")
         return replica_id
 
     @abstractmethod
