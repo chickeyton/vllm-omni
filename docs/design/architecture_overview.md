@@ -72,7 +72,7 @@ According to analysis for current popular open-source models, most of them have 
 | **Diffusion**     | natively implemented and optimized using acceleration components                                                                         |
 | **OmniConnector** | supports fully disaggregation based on E/P/D/G (Encoding/Processing/Decoding/Generation) disaggregation across stages                    |
 
-Disaggregated stages are managed through stage configuration. In Qwen3-Omni, Thinker/Talker/Code2wav are declared as separate configured stages, and runtime routing is handled by `Orchestrator` over `StageEngineCoreClient` / `StageDiffusionClient`.
+Disaggregated stages are managed through stage configuration. In Qwen3-Omni, Thinker/Talker/Code2wav are declared as separate configured stages, and runtime routing is handled by `Orchestrator` over `StageLLMCoreClient` / `StageDiffusionCoreClient`.
 
 ## Main features
 

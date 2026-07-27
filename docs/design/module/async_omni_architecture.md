@@ -3,47 +3,47 @@
 ## 1. System Architecture
 
 ```text
-• ┌─────────────────────────────────────────────────────────────────────────────────┐
-  │                                    API Layer                                    │
-  │  ┌─────────────────────────────────────┐  ┌──────────────────────────────────┐  │
-  │  │ AsyncOmni (EngineClient)            │  │ Omni                             │  │
-  │  │ • generate() / abort() / shutdown() │  │ • generate()                     │  │
-  │  │ • _final_output_handler()           │  │                                  |  │
-  │  └─────────────────────────────────────┘  └──────────────────────────────────┘  │
-  ├─────────────────────────────────────────────────────────────────────────────────┤
-  │                              Engine Layer (Proxy)                               │
-  │  ┌───────────────────────────────────────────────────────────────────────────┐  │
-  │  │ AsyncOmniEngine                                                           │  │
-  │  │ • _bootstrap_orchestrator() & _initialize_stages()                        │  │
-  │  │ • add_request() / add_request_async() -> input_processor.process_inputs() │  │
-  │  │ • try_get_output() / try_get_output_async()                               │  │
-  │  └───────────────────┬─────────────────────────────────▲─────────────────────┘  │
-  │         request_queue (janus.Queue)        output_queue (janus.Queue)           │
-  ├──────────────────────┼─────────────────────────────────┼────────────────────────┤
-  │                      ▼        Orchestration Layer      │                        │
-  │  ┌───────────────────────────────────────────────────────────────────────────┐  │
-  │  │ Orchestrator [background thread]                                          │  │
-  │  │ • _request_handler()                                                      │  │
-  │  │     -  stage_client.add_request_async() & _prewarm_async_chunk_stages()   │  │
-  │  │ • _orchestration_output_handler()                                         │  │
-  │  │     -  _process_stage_outputs() -> output_processors[i].process_outputs() │  │
-  │  │     -  _route_output() & _forward_to_next_stage()                         │  │
-  │  └──────────┬─────────────────────────┬────────────────────────┬─────────────┘  │
-  ├─────────────┼─────────────────────────┼────────────────────────┼────────────────┤
-  │             │                 Communication Layer              │                │
-  │  ┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐  │
-  │  │ StageEngineCoreClient │ │ StageEngineCoreClient │ │ StageDiffusionClient  │  │
-  │  │ • ZMQ ROUTER / PULL   │ │ • ZMQ ROUTER / PULL   │ │ • ZMQ ROUTER / PULL   │  │
-  │  │ • Msgpack codec       │ │ • Msgpack codec       │ │ • Msgpack codec       │  │
-  │  └──────────┬────────────┘ └──────────┬────────────┘ └──────────┬────────────┘  │
-  │             ▼ ZMQ IPC                 ▼ ZMQ IPC                 ▼ ZMQ IPC       │
-  ├─────────────────────────────────────────────────────────────────────────────────┤
-  │                                 Execution Layer                                 │
-  │  ┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐  │
-  │  │ StageCoreProc         │ │ StageCoreProc         │ │ DiffusionEngine       │  │
-  │  │ [background process]  │ │ [background process]  │ │ [background process]  │  │
-  │  └───────────────────────┘ └───────────────────────┘ └───────────────────────┘  │
-  └─────────────────────────────────────────────────────────────────────────────────┘
+• ┌───────────────────────────────────────────────────────────────────────────────────────┐
+  │                                       API Layer                                       │
+  │  ┌────────────────────────────────────────┐  ┌─────────────────────────────────────┐  │
+  │  │ AsyncOmni (EngineClient)               │  │ Omni                                │  │
+  │  │ • generate() / abort() / shutdown()    │  │ • generate()                        │  │
+  │  │ • _final_output_handler()              │  │                                     │  │
+  │  └────────────────────────────────────────┘  └─────────────────────────────────────┘  │
+  ├───────────────────────────────────────────────────────────────────────────────────────┤
+  │                                  Engine Layer (Proxy)                                 │
+  │  ┌─────────────────────────────────────────────────────────────────────────────────┐  │
+  │  │ AsyncOmniEngine                                                                 │  │
+  │  │ • _bootstrap_orchestrator() & _initialize_stages()                              │  │
+  │  │ • add_request() / add_request_async() -> input_processor.process_inputs()       │  │
+  │  │ • try_get_output() / try_get_output_async()                                     │  │
+  │  └─────────────────────────────────────────────────────────────────────────────────┘  │
+  │              request_queue (janus.Queue)      output_queue (janus.Queue)              │
+  ├───────────────────────┼───────────────────────────────────┼───────────────────────────┤
+  │                                  Orchestration Layer                                  │
+  │  ┌─────────────────────────────────────────────────────────────────────────────────┐  │
+  │  │ Orchestrator [background thread]                                                │  │
+  │  │ • _request_handler()                                                            │  │
+  │  │     -  stage_client.add_request_async() & _prewarm_async_chunk_stages()         │  │
+  │  │ • _orchestration_output_handler()                                               │  │
+  │  │     -  _process_stage_outputs() -> output_processors[i].process_outputs()       │  │
+  │  │     -  _route_output() & _forward_to_next_stage()                               │  │
+  │  └─────────────────────────────────────────────────────────────────────────────────┘  │
+  ├────────────────┼───────────────────────────┼───────────────────────────┼──────────────┤
+  │                                  Communication Layer                                  │
+  │  ┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────────┐  │
+  │  │ StageLLMCoreClient      │ │ StageLLMCoreClient      │ │ StageDiffusionCoreClient│  │
+  │  │ • ZMQ ROUTER / PULL     │ │ • ZMQ ROUTER / PULL     │ │ • ZMQ ROUTER / PULL     │  │
+  │  │ • Msgpack codec         │ │ • Msgpack codec         │ │ • Msgpack codec         │  │
+  │  └───────────┬─────────────┘ └───────────┬─────────────┘ └───────────┬─────────────┘  │
+  │               ▼ ZMQ IPC               ▼ ZMQ IPC               ▼ ZMQ IPC               │
+  ├───────────────────────────────────────────────────────────────────────────────────────┤
+  │                                    Execution Layer                                    │
+  │  ┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────────┐  │
+  │  │ StageLLMCoreProc        │ │ StageLLMCoreProc        │ │ StageDiffusionCoreProc  │  │
+  │  │ [background process]    │ │ [background process]    │ │ [background process]    │  │
+  │  └─────────────────────────┘ └─────────────────────────┘ └─────────────────────────┘  │
+  └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 2. Execution Flow (Arrow Steps, one generate request)
