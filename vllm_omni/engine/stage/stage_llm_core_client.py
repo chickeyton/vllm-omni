@@ -68,9 +68,9 @@ class StageLLMCoreClientBase(StageCoreClientBase):
         log_stats: bool = False,
         metadata: StageMetadata | None = None,
         client_addresses: dict[str, str] | None = None,
-        proc_manager: "StageLLMCoreProcManager | None" = None,
-        coordinator: "DPCoordinator | None" = None,
-    ) -> "StageLLMCoreClient | DPLBStageLLMCoreClient":
+        proc_manager: StageLLMCoreProcManager | None = None,
+        coordinator: DPCoordinator | None = None,
+    ) -> StageLLMCoreClient | DPLBStageLLMCoreClient:
         """Create the appropriate stage async client for the DP mode."""
         parallel_config = vllm_config.parallel_config
         client_args = dict(
