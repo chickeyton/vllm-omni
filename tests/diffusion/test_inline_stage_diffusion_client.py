@@ -5,12 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.stage.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
 from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreRequest
 from vllm_omni.engine.stage_init_utils import StageMetadata
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -78,6 +81,121 @@ async def test_inline_dispatch_request_success(client, mock_engine):
     core_output = batch.outputs[0]
     assert core_output.request_id == "req-1"
     assert core_output.output is mock_result
+
+
+@pytest.mark.asyncio
+async def test_inline_preserves_advanced_generators(client, mock_engine):
+    """Regression: inline single-stage requests must keep the original
+    ``OmniDiffusionSamplingParams`` (per-output generator list + advanced
+    generator state + ``modules``), not the lossy dict the wire path uses.
+
+    The pool routes the dataclass straight through for inline clients, so
+    ``add_request_async`` receives it in ``StageDiffusionCoreRequest`` and hands
+    it to the engine unchanged.
+    """
+    # Two distinct per-output generators; advance the first so it carries state
+    # beyond its initial seed (what a single-seed collapse would discard).
+    gen0 = torch.Generator().manual_seed(111)
+    gen1 = torch.Generator().manual_seed(222)
+    torch.randn(4, generator=gen0)  # advance gen0 past its initial seed
+    modules = {"vae": object()}
+    params = OmniDiffusionSamplingParams(
+        seed=None,
+        generator=[gen0, gen1],
+        modules=modules,
+    )
+
+    # Sanity-check the wire conversion IS lossy (why inline must bypass it):
+    # the generator list collapses to a single seed and ``modules`` is dropped.
+    wire = StageDiffusionCoreClient.sampling_params_to_dict(params)
+    assert "generator" not in wire
+    assert "modules" not in wire
+    assert wire["seed"] == 111  # first generator's initial seed only
+
+    captured: dict[str, object] = {}
+
+    async def _step_streaming(request):
+        captured["request"] = request
+        yield [OmniRequestOutput.from_diffusion(request_id="req-gen", images=[MagicMock()])]
+
+    mock_engine.step_streaming = _step_streaming
+
+    # Inline path: the pool passes the dataclass object (not a dict) through.
+    await client.add_request_async(
+        StageDiffusionCoreRequest(request_id="req-gen", prompt="A test prompt", sampling_params=params)
+    )
+
+    for _ in range(10):
+        if client.get_outputs_nowait() is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    engine_params = captured["request"].sampling_params
+    # The full per-output generator list survived, in order, with state intact.
+    assert engine_params.generator == [gen0, gen1]
+    assert engine_params.generator[0] is gen0
+    assert engine_params.generator[1] is gen1
+    # And the subprocess-local ``modules`` were preserved, not stripped.
+    assert engine_params.modules is modules
+
+
+@pytest.mark.asyncio
+async def test_pool_routes_object_to_inline_and_dict_to_wire(client):
+    """The fix point: ``StageReplicaPool._diffusion_add_request`` must pass the
+    original sampling-params object to inline clients and the serialized dict to
+    the out-of-process client."""
+    from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool
+
+    params = OmniDiffusionSamplingParams(seed=None, generator=[torch.Generator().manual_seed(5)])
+    fake_pool = SimpleNamespace(stage_id=0)
+
+    # Inline branch (real InlineStageDiffusionClient): dataclass passes straight through.
+    captured_inline: dict[str, object] = {}
+
+    async def _inline_add(request):
+        captured_inline["sp"] = request.sampling_params
+
+    client.add_request_async = _inline_add
+    await StageReplicaPool._diffusion_add_request(fake_pool, client, "r1", "p", params, None)
+    assert captured_inline["sp"] is params
+
+    # Out-of-process branch: serialized to a plain dict (generator stripped).
+    wire_client = MagicMock(spec=StageDiffusionCoreClient)
+    captured_wire: dict[str, object] = {}
+
+    async def _wire_add(request):
+        captured_wire["sp"] = request.sampling_params
+
+    wire_client.add_request_async = _wire_add
+    await StageReplicaPool._diffusion_add_request(fake_pool, wire_client, "r2", "p", params, None)
+    assert isinstance(captured_wire["sp"], dict)
+    assert "generator" not in captured_wire["sp"]
+
+
+@pytest.mark.asyncio
+async def test_inline_accepts_plain_dict_sampling_params(client, mock_engine):
+    """Robustness: the inline client still accepts the plain-dict wire form and
+    reconstructs the dataclass in-process (out-of-process path compatibility)."""
+    captured: dict[str, object] = {}
+
+    async def _step_streaming(request):
+        captured["request"] = request
+        yield [OmniRequestOutput.from_diffusion(request_id="req-dict", images=[MagicMock()])]
+
+    mock_engine.step_streaming = _step_streaming
+
+    await client.add_request_async(
+        StageDiffusionCoreRequest(request_id="req-dict", prompt="A test prompt", sampling_params={"seed": 7})
+    )
+
+    for _ in range(10):
+        if client.get_outputs_nowait() is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    engine_params = captured["request"].sampling_params
+    assert isinstance(engine_params, OmniDiffusionSamplingParams)
+    assert engine_params.seed == 7
 
 
 @pytest.mark.asyncio

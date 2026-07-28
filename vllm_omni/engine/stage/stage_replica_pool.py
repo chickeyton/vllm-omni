@@ -1245,18 +1245,38 @@ class StageReplicaPool:
         ``StageDiffusionCoreClient`` and the in-process
         ``InlineStageDiffusionClient`` — accept the typed
         ``StageDiffusionCoreRequest``, so a single path serves both.
+
+        Only the out-of-process client crosses a ZMQ boundary, so only it
+        needs its sampling params flattened to a plain dict via
+        ``sampling_params_to_dict`` — a lossy step that drops the
+        non-serializable ``generator``/``modules`` fields and collapses a
+        per-output generator *list* to a single initial seed. The inline
+        client runs in-process, so it receives the original
+        ``OmniDiffusionSamplingParams`` untouched, preserving per-output
+        generators and other advanced generator state.
         """
+        from vllm_omni.diffusion.stage.inline_stage_diffusion_client import (
+            InlineStageDiffusionClient,
+        )
         from vllm_omni.diffusion.stage.stage_diffusion_core_client import (
             StageDiffusionCoreClient,
         )
         from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
+
+        # ``Any`` so the inline branch (original dataclass) and the wire branch
+        # (plain dict) share one field without a mypy complaint on the struct.
+        sampling_params: Any
+        if isinstance(client, InlineStageDiffusionClient):
+            sampling_params = params
+        else:
+            sampling_params = StageDiffusionCoreClient.sampling_params_to_dict(params)
 
         kwargs = dict(submit_kwargs or {})
         await client.add_request_async(
             StageDiffusionCoreRequest(
                 request_id=request_id,
                 prompt=prompt,
-                sampling_params=StageDiffusionCoreClient.sampling_params_to_dict(params),
+                sampling_params=sampling_params,
                 kv_sender_info=kwargs.pop("kv_sender_info", None),
             )
         )

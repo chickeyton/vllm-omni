@@ -410,12 +410,12 @@ The stage transition process follows these steps:
 Understanding the data structures is crucial for implementing stage transitions:
 
 **Input to your function:**
-- `stage_list[source_stage_id].engine_outputs`: List of `EngineCoreOutput` objects
--   -  Each contains `outputs`: List of `RequestOutput` objects
-    - Each `RequestOutput` has:
--   -  - `token_ids`: Generated token IDs
-       - `multimodal_output`: Dict with keys like `"code_predictor_codes"`, etc.These are the hidden states or intermediate outputs from the model's forward pass
-       - `prompt_token_ids`: Original prompt token IDs
+- `source_outputs`: the upstream stage's output objects, already extracted for you (one entry per request in the batch, plus any CFG companion outputs). You iterate this list directly — there is no `stage_list`/`engine_outputs` lookup anymore. Each entry has:
+    - `request_id`: The request this output belongs to
+    - `outputs`: List of per-sequence outputs (typically `source_output.outputs[0]`). Each has:
+        - `token_ids` / `cumulative_token_ids`: Generated token IDs
+        - `multimodal_output`: Dict with keys like `"code_predictor_codes"`, etc. — the hidden states or intermediate outputs from the model's forward pass
+        - `prompt_token_ids`: Original prompt token IDs
 
 **Output from your function:**
 - Must return `list[OmniTokensPrompt]` where each `OmniTokensPrompt` contains:
@@ -460,7 +460,7 @@ thinker_hidden_states = output.multimodal_output["24"]
 
 ### Key Points
 
-1. **Accessing Upstream Outputs**: Use `stage_list[source_stage_id].engine_outputs` to get outputs from the source stage
+1. **Accessing Upstream Outputs**: Iterate `source_outputs` directly — it already holds the source stage's outputs (the runtime extracts them for you; no `stage_list[source_stage_id].engine_outputs` lookup needed)
 2. **Extracting Data**: Access `output.multimodal_output[key]` to get specific hidden states or intermediate results
    - Keys are defined by your model's `forward()` method when it creates `multimodal_outputs`
 3. **Device Management**: Move tensors to appropriate devices (CPU for serialization, GPU for processing)

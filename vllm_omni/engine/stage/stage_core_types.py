@@ -137,6 +137,34 @@ class StageLLMCoreRequest(StageCoreRequest, EngineCoreRequest):
             model_intermediate_buffer=model_intermediate_buffer,
         )
 
+    @classmethod
+    def from_request(
+        cls,
+        request: EngineCoreRequest,
+        *,
+        prompt_embeds: torch.Tensor | None = None,
+        additional_information: AdditionalInformationPayload | None = None,
+    ) -> StageLLMCoreRequest:
+        """Deprecated alias for :meth:`from_vllm_request`.
+
+        ``OmniEngineCoreRequest.from_request`` was the former constructor name.
+        Kept for one release for backward compatibility; prefer
+        ``from_vllm_request``.
+        """
+        import warnings
+
+        warnings.warn(
+            "StageLLMCoreRequest.from_request is deprecated; use "
+            "StageLLMCoreRequest.from_vllm_request instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return cls.from_vllm_request(
+            request,
+            prompt_embeds=prompt_embeds,
+            additional_information=additional_information,
+        )
+
 
 class StageLLMCoreOutput(StageCoreOutput, EngineCoreOutput):
     """LLM stage output."""
@@ -172,7 +200,11 @@ class StageDiffusionCoreRequest(StageCoreRequest):
 
     ``sampling_params`` is the plain-dict form produced by
     ``StageDiffusionCoreClient.sampling_params_to_dict`` (non-serializable fields
-    already stripped).
+    already stripped) for the out-of-process client. The in-process
+    ``InlineStageDiffusionClient`` never serializes this struct, so the pool
+    hands it the original ``OmniDiffusionSamplingParams`` dataclass instead
+    (preserving per-output generators / ``modules``); the field is annotated
+    ``dict`` for the wire contract but the inline object rides through untouched.
     """
 
     request_id: str

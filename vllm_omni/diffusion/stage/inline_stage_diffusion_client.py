@@ -106,12 +106,18 @@ class InlineStageDiffusionClient(StageCoreClientBase):
     # ------------------------------------------------------------------
 
     async def add_request_async(self, request: StageDiffusionCoreRequest) -> None:
-        # ``sampling_params`` arrives as the plain-dict form the pool produces via
-        # ``StageDiffusionCoreClient.sampling_params_to_dict``; reconstruct the
-        # dataclass in-process (no msgspec round-trip needed since values were
-        # never serialized). The stripped ``generator`` field is recreated from
-        # ``seed`` by the engine, matching the out-of-process path.
-        sampling_params = OmniDiffusionSamplingParams(**request.sampling_params)
+        # The pool hands the inline client the original
+        # ``OmniDiffusionSamplingParams`` unmodified (no process boundary), so
+        # per-output ``generator`` state and ``modules`` are preserved. Use it
+        # as-is. For robustness we still accept the plain-dict wire form (used by
+        # the out-of-process client) and reconstruct the dataclass in-process;
+        # in that case a stripped ``generator`` is recreated from ``seed`` by the
+        # engine, matching the out-of-process path.
+        sp = request.sampling_params
+        if isinstance(sp, OmniDiffusionSamplingParams):
+            sampling_params = sp
+        else:
+            sampling_params = OmniDiffusionSamplingParams(**sp)
         logger.debug(
             "[InlineStageDiffusionClient] stage-%s [rep-%s] add request: %s",
             self.stage_id,
