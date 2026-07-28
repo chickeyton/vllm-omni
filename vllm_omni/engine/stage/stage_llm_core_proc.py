@@ -29,7 +29,10 @@ from vllm.v1.engine.utils import (
 )
 
 from vllm_omni.distributed.omni_coordinator import create_stage_coord_client
-from vllm_omni.engine.stage_init_utils import set_death_signal
+from vllm_omni.engine.stage_init_utils import (
+    maybe_apply_audex_cfg_patches,
+    set_death_signal,
+)
 
 if TYPE_CHECKING:
     from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
@@ -109,6 +112,13 @@ class StageLLMCoreProc(EngineCoreProc):
             # Workaround for flashinfer/jit-cache version mismatch in CI.
             os.environ.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
             os.environ["VLLM_OMNI_REPLICA_ID"] = str(max(int(omni_replica_id), 0))
+
+            # Audex CFG scheduler patches must land before EngineCore builds
+            # its Scheduler; gated on the stage's logits_processors config.
+            # (The decoder-type rebinding OmniEngineCoreRequest formerly patched
+            # inline here is now handled globally by vllm_omni.patch, which binds
+            # vLLM's EngineCoreRequest to StageLLMCoreRequest.)
+            maybe_apply_audex_cfg_patches(kwargs.get("vllm_config"))
 
             engine_core = StageLLMCoreProc(
                 *args,
