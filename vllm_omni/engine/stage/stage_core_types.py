@@ -154,8 +154,7 @@ class StageLLMCoreRequest(StageCoreRequest, EngineCoreRequest):
         import warnings
 
         warnings.warn(
-            "StageLLMCoreRequest.from_request is deprecated; use "
-            "StageLLMCoreRequest.from_vllm_request instead.",
+            "StageLLMCoreRequest.from_request is deprecated; use StageLLMCoreRequest.from_vllm_request instead.",
             DeprecationWarning,
             stacklevel=2,
         )
