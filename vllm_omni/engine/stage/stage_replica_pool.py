@@ -35,13 +35,19 @@ from vllm_omni.metrics.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm import PoolingParams, SamplingParams
     from vllm.config import VllmConfig
     from vllm.outputs import RequestOutput
 
     from vllm_omni.diffusion.stage.stage_diffusion_core_client import StageDiffusionCoreClient
     from vllm_omni.engine.orchestrator import OrchestratorRequestState
-    from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreOutput, StageDiffusionCoreOutputs
+    from vllm_omni.engine.stage.stage_core_types import (
+        StageDiffusionCoreOutput,
+        StageDiffusionCoreOutputs,
+        StageLLMCoreRequest,
+    )
     from vllm_omni.engine.stage.stage_llm_core_client import StageLLMCoreClientBase
+    from vllm_omni.inputs.data import OmniPromptType
     from vllm_omni.outputs import OmniRequestOutput
     from vllm_omni.outputs.output_processor import MultimodalOutputProcessor
 
@@ -536,12 +542,12 @@ class StageReplicaPool:
 
     def build_stage_metrics(
         self,
-        request_outputs: list[Any],
+        request_outputs: list[RequestOutput | OmniRequestOutput],
         *,
         submit_ts: float,
         request_timestamp: float,
         replica_id: int,
-        sampling_params: Any | None = None,
+        sampling_params: SamplingParams | PoolingParams | OmniDiffusionSamplingParams | None = None,
     ) -> StageRequestMetrics:
         """Build stage metrics for outputs produced on one replica."""
         now = _time.time()
@@ -648,10 +654,15 @@ class StageReplicaPool:
             vllm_itls_ms=list(native_text_metrics.get("vllm_itls_ms") or []),
         )
 
-    def has_non_empty_output(self, request_output: Any) -> bool:
+    def has_non_empty_output(self, request_output: RequestOutput | OmniRequestOutput) -> bool:
         return self._has_non_empty_output(request_output)
 
-    def record_output_timestamps(self, request_outputs: list[Any], *, output_ts: float | None = None) -> None:
+    def record_output_timestamps(
+        self,
+        request_outputs: list[RequestOutput | OmniRequestOutput],
+        *,
+        output_ts: float | None = None,
+    ) -> None:
         """Record all output timestamps and the first non-empty output timestamp."""
         output_ts = _time.time() if output_ts is None else output_ts
         for request_output in request_outputs:
@@ -677,12 +688,12 @@ class StageReplicaPool:
         self,
         request_id: str,
         req_state: OrchestratorRequestState,
-        request: Any,
+        request: StageLLMCoreRequest | OmniPromptType,
         *,
-        prompt_text: Any = None,
+        prompt_text: str | None = None,
         affinity_request_id: str | None = None,
         submit_kwargs: dict[str, Any] | None = None,
-        params_override: Any = None,
+        params_override: SamplingParams | OmniDiffusionSamplingParams | None = None,
     ) -> int:
         """Submit a stage-entry request into this pool."""
         params = params_override if params_override is not None else req_state.sampling_params_list[self.stage_id]
@@ -745,9 +756,9 @@ class StageReplicaPool:
         self,
         request_id: str,
         req_state: OrchestratorRequestState,
-        request: Any,
+        request: StageLLMCoreRequest | OmniPromptType,
         *,
-        prompt_text: Any = None,
+        prompt_text: str | None = None,
     ) -> int:
         """Submit a streaming update to an already admitted request."""
         params = req_state.sampling_params_list[self.stage_id]
@@ -1028,7 +1039,12 @@ class StageReplicaPool:
             raise RuntimeError(f"stage {self.stage_id} replica {replica_id} is not attached")
         return cast("StageDiffusionCoreClient", client)
 
-    def _infer_output_unit_type(self, request_outputs: list[Any], *, token_count: int) -> str:
+    def _infer_output_unit_type(
+        self,
+        request_outputs: list[RequestOutput | OmniRequestOutput],
+        *,
+        token_count: int,
+    ) -> str:
         final_output_type = getattr(self.stage_client, "final_output_type", None)
 
         if self._has_image_output(request_outputs) or final_output_type in {"image", "images"}:
@@ -1053,7 +1069,7 @@ class StageReplicaPool:
 
     def _count_output_units(
         self,
-        request_outputs: list[Any],
+        request_outputs: list[RequestOutput | OmniRequestOutput],
         *,
         unit_type: str,
         fallback_token_count: int,
@@ -1080,7 +1096,7 @@ class StageReplicaPool:
                 return total_latents
         return int(fallback_token_count)
 
-    def _has_audio_output(self, request_outputs: list[Any]) -> bool:
+    def _has_audio_output(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> bool:
         for ro in request_outputs:
             for mm_output in iter_mm_outputs(ro):
                 if isinstance(mm_output, Mapping) and mm_output.get("audio") is not None:
@@ -1089,7 +1105,7 @@ class StageReplicaPool:
 
     def _collect_audio_metrics(
         self,
-        request_outputs: list[Any],
+        request_outputs: list[RequestOutput | OmniRequestOutput],
         *,
         use_default_sample_rate: bool = False,
     ) -> tuple[int, int, float]:
@@ -1117,25 +1133,25 @@ class StageReplicaPool:
             return defs.resolve_audio_sample_rate(sources)
         return defs.resolve_audio_sample_rate_or_none(sources) or 0
 
-    def _has_image_output(self, request_outputs: list[Any]) -> bool:
+    def _has_image_output(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> bool:
         for ro in request_outputs:
             if self._count_images(ro) > 0:
                 return True
         return False
 
-    def _has_video_output(self, request_outputs: list[Any]) -> bool:
+    def _has_video_output(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> bool:
         for ro in request_outputs:
             if self._count_videos(ro) > 0:
                 return True
         return False
 
-    def _has_trajectory_latent_output(self, request_outputs: list[Any]) -> bool:
+    def _has_trajectory_latent_output(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> bool:
         return any(self._is_non_empty_value(getattr(ro, "trajectory_latents", None)) for ro in request_outputs)
 
-    def _has_latent_output(self, request_outputs: list[Any]) -> bool:
+    def _has_latent_output(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> bool:
         return any(self._is_non_empty_value(getattr(ro, "latents", None)) for ro in request_outputs)
 
-    def _count_images(self, request_output: Any) -> int:
+    def _count_images(self, request_output: RequestOutput | OmniRequestOutput) -> int:
         total_images = self._count_value_units(getattr(request_output, "images", None))
         for mm_output in iter_mm_outputs(request_output):
             if isinstance(mm_output, Mapping):
@@ -1143,7 +1159,7 @@ class StageReplicaPool:
                 total_images += self._count_value_units(mm_output.get("images"))
         return total_images
 
-    def _count_image_pixels(self, request_outputs: list[Any]) -> int:
+    def _count_image_pixels(self, request_outputs: list[RequestOutput | OmniRequestOutput]) -> int:
         total_pixels = 0
         for ro in request_outputs:
             total_pixels += count_image_pixels(getattr(ro, "images", None))
@@ -1153,7 +1169,7 @@ class StageReplicaPool:
                     total_pixels += count_image_pixels(mm_output.get("images"))
         return total_pixels
 
-    def _count_videos(self, request_output: Any) -> int:
+    def _count_videos(self, request_output: RequestOutput | OmniRequestOutput) -> int:
         total_videos = self._count_video_units(getattr(request_output, "video", None))
         total_videos += self._count_video_units(getattr(request_output, "videos", None))
         for mm_output in iter_mm_outputs(request_output):
@@ -1162,7 +1178,7 @@ class StageReplicaPool:
                 total_videos += self._count_video_units(mm_output.get("videos"))
         return total_videos
 
-    def _has_non_empty_output(self, request_output: Any) -> bool:
+    def _has_non_empty_output(self, request_output: RequestOutput | OmniRequestOutput) -> bool:
         final_output_type = getattr(request_output, "final_output_type", None)
         if final_output_type is None:
             final_output_type = getattr(self.stage_client, "final_output_type", None)
@@ -1234,8 +1250,8 @@ class StageReplicaPool:
         self,
         client: StageCoreClientBase,
         request_id: str,
-        prompt: Any,
-        params: Any,
+        prompt: OmniPromptType,
+        params: OmniDiffusionSamplingParams,
         submit_kwargs: dict[str, Any] | None,
     ) -> None:
         """Dispatch a diffusion add-request.

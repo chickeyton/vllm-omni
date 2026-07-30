@@ -35,6 +35,8 @@ from vllm_omni.engine.stage_init_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.request import Request
+
     from vllm_omni.engine.stage.stage_core_types import StageLLMCoreRequest
 
 logger = init_logger(__name__)
@@ -56,7 +58,7 @@ class StageLLMCoreProc(EngineCoreProc):
     ``EngineCoreProc.run_engine_core()``.
     """
 
-    def preprocess_add_request(self, request: StageLLMCoreRequest) -> tuple[Any, int]:
+    def preprocess_add_request(self, request: StageLLMCoreRequest) -> tuple[Request, int]:
         """Preserve omni payloads when vLLM builds its scheduler request."""
         scheduler_request, current_wave = super().preprocess_add_request(request)
         scheduler_request.additional_information = request.additional_information

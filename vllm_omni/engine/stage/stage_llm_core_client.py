@@ -38,11 +38,13 @@ from vllm_omni.engine.stage_init_utils import StageMetadata
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.outputs import RequestOutput
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.executor import Executor
 
+    from vllm_omni.engine.orchestrator import StreamingInputState
     from vllm_omni.engine.stage.stage_llm_core_proc_manager import StageLLMCoreProcManager
-    from vllm_omni.inputs.data import OmniTokensPrompt
+    from vllm_omni.inputs.data import OmniPromptType, OmniTokensPrompt
 
 logger = init_logger(__name__)
 
@@ -247,9 +249,9 @@ class StageLLMCoreClientBase(StageCoreClientBase):
 
     def process_core_inputs(
         self,
-        source_outputs: list[Any],
-        prompt: Any = None,
-        streaming_context: Any | None = None,
+        source_outputs: list[RequestOutput],
+        prompt: OmniPromptType | list[OmniPromptType] | None = None,
+        streaming_context: StreamingInputState | None = None,
     ) -> list[OmniTokensPrompt]:
         """Transform upstream stage outputs into this stage's inputs."""
         if self.custom_process_input_func is not None:
@@ -308,8 +310,8 @@ class StageLLMCoreClientBase(StageCoreClientBase):
 
     @staticmethod
     def _default_process_core_inputs(
-        source_outputs: list[Any],
-        prompt: Any,
+        source_outputs: list[RequestOutput],
+        prompt: OmniPromptType | list[OmniPromptType] | None,
         requires_multimodal_data: bool,
     ) -> list[OmniTokensPrompt]:
         from vllm_omni.inputs.data import OmniTokensPrompt

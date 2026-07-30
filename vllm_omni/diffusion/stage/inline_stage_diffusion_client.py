@@ -31,6 +31,7 @@ from vllm_omni.outputs import OmniRequestOutput
 if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.engine.stage.stage_core_types import StageDiffusionCoreRequest
+    from vllm_omni.inputs.data import OmniPromptType
 
 logger = init_logger(__name__)
 
@@ -137,7 +138,7 @@ class InlineStageDiffusionClient(StageCoreClientBase):
     async def _dispatch_request(
         self,
         request_id: str,
-        prompt: Any,
+        prompt: OmniPromptType,
         sampling_params: OmniDiffusionSamplingParams,
         kv_sender_info: dict[str, Any] | None = None,
     ) -> None:
