@@ -12,25 +12,11 @@ import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.experimental.fullduplex.engine.duplex_control_client import DuplexControlRequestError
-from vllm_omni.experimental.fullduplex.engine.duplex_runtime import duplex_resource_request_id
-from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseActivity
-from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence, DuplexSessionLifecycleMessage
-from vllm_omni.experimental.fullduplex.minicpmo45 import (
-    MiniCPMO45NativeDuplexServingAdapter,
-    MiniCPMO45PcmAppendBuffer,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.data_plane import (
-    MiniCPMO45DataPlaneContext,
-    MiniCPMO45DataPlaneSession,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.runtime import (
-    MiniCPMO45DuplexRuntimeExtension,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.session import (
-    MiniCPMO45ServingSessionState,
-)
-from vllm_omni.experimental.fullduplex.openai.protocol import (
+from vllm_omni.engine.duplex.control_client import DuplexControlRequestError
+from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
+from vllm_omni.engine.duplex.messages import DuplexFence, DuplexSessionLifecycleMessage
+from vllm_omni.engine.duplex.runtime import duplex_resource_request_id
+from vllm_omni.entrypoints.openai.duplex.protocol import (
     DuplexCapabilities,
     DuplexOverlapPolicy,
     DuplexPlaybackCommitPolicy,
@@ -38,15 +24,29 @@ from vllm_omni.experimental.fullduplex.openai.protocol import (
     DuplexSessionConfig,
     ResponseCreateOptions,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_session import NativeRealtimeSessionProtocol
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import ServingRuntimeConfigError
-from vllm_omni.experimental.fullduplex.openai.serving import (
+from vllm_omni.entrypoints.openai.duplex.realtime_session import NativeRealtimeSessionProtocol
+from vllm_omni.entrypoints.openai.duplex.runtime_adapter import ServingRuntimeConfigError
+from vllm_omni.entrypoints.openai.duplex.serving import (
     OmniDuplexSessionHandler,
     should_enable_duplex_endpoint,
 )
-from vllm_omni.experimental.fullduplex.openai.websocket import DuplexWebSocketActor
-from vllm_omni.experimental.fullduplex.output import attach_duplex_output_decision
+from vllm_omni.entrypoints.openai.duplex.websocket import DuplexWebSocketActor
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex import (
+    MiniCPMO45NativeDuplexServingAdapter,
+    MiniCPMO45PcmAppendBuffer,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.data_plane import (
+    MiniCPMO45DataPlaneContext,
+    MiniCPMO45DataPlaneSession,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.runtime import (
+    MiniCPMO45DuplexRuntimeExtension,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.session import (
+    MiniCPMO45ServingSessionState,
+)
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.outputs.duplex import attach_duplex_output_decision
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -273,7 +273,7 @@ class FakeEngineClient:
 
 class FakeChatService:
     duplex_serving_adapter_path = (
-        "vllm_omni.experimental.fullduplex.minicpmo45.serving_adapter.MiniCPMO45ServingRuntimeAdapter"
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.serving_adapter.MiniCPMO45ServingRuntimeAdapter"
     )
 
     def __init__(self, engine_client: FakeEngineClient) -> None:
@@ -5499,7 +5499,7 @@ async def test_minicpmo_native_duplex_separates_public_and_runtime_config(monkey
         return [0.25] * 1600, 16000
 
     monkeypatch.setattr(
-        "vllm_omni.experimental.fullduplex.minicpmo45.MiniCPMO45NativeDuplexServingAdapter.resolve_ref_audio",
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.MiniCPMO45NativeDuplexServingAdapter.resolve_ref_audio",
         fake_resolve_ref_audio,
     )
     event = _native_session_create("sid-native-ref-audio", modalities=["text", "audio"])
@@ -5622,7 +5622,7 @@ async def test_minicpmo_native_duplex_preserves_ref_audio_channels_until_normali
             return np.tile(np.array([[0.25, -0.25], [0.5, -0.5]], dtype=np.float32), (800, 1)), 16000
 
     monkeypatch.setattr(
-        "vllm_omni.experimental.fullduplex.minicpmo45.adapter.MediaConnector",
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.adapter.MediaConnector",
         FakeMediaConnector,
     )
 

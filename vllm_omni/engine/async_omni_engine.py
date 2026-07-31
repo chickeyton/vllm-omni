@@ -78,9 +78,9 @@ from vllm_omni.metrics.prometheus import OmniRequestCounter
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm_omni.experimental.fullduplex.engine.duplex_control_client import DuplexControlClient
-    from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseActivity
-    from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence
+    from vllm_omni.engine.duplex.control_client import DuplexControlClient
+    from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
+    from vllm_omni.engine.duplex.messages import DuplexFence
 
 _STARTUP_POLL_INTERVAL_S = 1.0
 _REQUEST_QUEUE_MAXSIZE = 256
@@ -389,7 +389,7 @@ class AsyncOmniEngine:
             membership_controller = self._runtime.create_membership_controller()
             duplex_runtime_extension = None
             if self._duplex_control_enabled:
-                from vllm_omni.experimental.fullduplex.engine.duplex_runtime import (
+                from vllm_omni.engine.duplex.runtime import (
                     load_duplex_runtime_extension,
                     validate_duplex_runtime_extension,
                 )
@@ -1661,7 +1661,7 @@ class AsyncOmniEngine:
         )
 
     def _get_duplex_control_client(self) -> DuplexControlClient:
-        from vllm_omni.experimental.fullduplex.engine.duplex_control_client import DuplexControlClient
+        from vllm_omni.engine.duplex.control_client import DuplexControlClient
 
         client = getattr(self, "_duplex_control_client", None)
         if client is None:

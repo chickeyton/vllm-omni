@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from vllm_omni.experimental.fullduplex.client import (  # noqa: E402
+from vllm_omni.entrypoints.openai.duplex.client import (  # noqa: E402
     PCM16_BYTES_PER_SAMPLE,
     PCM16_SAMPLE_RATE,
     RealtimeDuplexClient,

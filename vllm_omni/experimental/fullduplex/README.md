@@ -1,28 +1,27 @@
-# Experimental Full-Duplex Runtime
+# Experimental Full-Duplex (JoyVL)
 
-This package contains two experimental integrations:
+This package now contains only the JoyVL framework and its example
+integration:
 
-- the existing JoyVL framework and example integration;
-- the MiniCPM-o 4.5 native audio path used by `/v1/duplex` and
-  `/v1/realtime?duplex=1`.
-
-For the MiniCPM active runtime path, lifecycle invariants, capability boundary,
-Realtime response contract, and validation scope, see [`DESIGN.md`](DESIGN.md).
+```text
+core/   generic duplex scaffold used by the JoyVL adapter
+joyvl/  JoyVL model-specific integration
+```
 
 To run JoyVL, see
 [`recipes/JD/JoyAI-VL-Interaction.md`](../../../recipes/JD/JoyAI-VL-Interaction.md).
 
-## Package boundaries
+The MiniCPM-o 4.5 native full-duplex runtime graduated out of this package.
+It now lives in the stable tree:
 
 ```text
-core/       existing JoyVL framework and experimental compatibility exports
-engine/     AsyncOmni/orchestrator scheduler data-plane adapter
-openai/     WebSocket transport, Realtime projection, and audio codecs
-minicpmo45/ MiniCPM input framing, policy, compatibility, and Stage0 state
-joyvl/      JoyVL model-specific integration
+vllm_omni/engine/duplex/                       engine control plane, sessions, leases
+vllm_omni/entrypoints/openai/duplex/           WebSocket serving and Realtime projection
+vllm_omni/entrypoints/duplex_request_client.py request/output lifecycle
+vllm_omni/model_executor/models/minicpmo_4_5/duplex/  MiniCPM adapter
+vllm_omni/model_executor/duplex_sampling.py    AR-runner sampling hook helper
+vllm_omni/outputs/duplex.py                    typed output decision envelope
 ```
 
-MiniCPM does not run through the removed experimental `core.DuplexRuntime`
-facade. Its active path uses the `openai` session controller, the experimental
-engine contracts, the standard scheduler/model runners, and an injected
-MiniCPM-specific runtime extension from `minicpmo45/runtime.py`.
+For its architecture and validation scope, see
+[`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md).

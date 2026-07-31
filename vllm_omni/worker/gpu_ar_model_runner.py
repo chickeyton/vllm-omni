@@ -357,7 +357,7 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
         self._duplex_sampling_hook = candidate if callable(candidate) else None
         self._duplex_sampling_hook_resolved = True
         if self._duplex_sampling_hook is not None and not hasattr(self, "_duplex_sampling_helper"):
-            from vllm_omni.experimental.fullduplex.model_executor import DuplexSamplingHelper
+            from vllm_omni.model_executor.duplex_sampling import DuplexSamplingHelper
 
             self._duplex_sampling_helper = DuplexSamplingHelper()
         return self._duplex_sampling_hook

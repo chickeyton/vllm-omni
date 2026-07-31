@@ -1119,7 +1119,7 @@ async def omni_init_app_state(
         state.stage_configs,
         config_path=getattr(args, "stage_configs_path", None) or getattr(args, "deploy_config", None),
     ):
-        from vllm_omni.experimental.fullduplex.openai.serving import OmniDuplexSessionHandler
+        from vllm_omni.entrypoints.openai.duplex.serving import OmniDuplexSessionHandler
 
         state.openai_serving_duplex = OmniDuplexSessionHandler(
             chat_service=state.openai_serving_chat,

@@ -44,12 +44,12 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.engine import PauseMode
 
-    from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseActivity
-    from vllm_omni.experimental.fullduplex.engine.messages import (
+    from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
+    from vllm_omni.engine.duplex.messages import (
         DuplexFence,
         DuplexSessionLifecycleMessage,
     )
-    from vllm_omni.experimental.fullduplex.request_client import DuplexRequestClient
+    from vllm_omni.entrypoints.duplex_request_client import DuplexRequestClient
     from vllm_omni.inputs.data import OmniInteractionPrompt, OmniPromptType
 
 logger = init_logger(__name__)
@@ -395,7 +395,7 @@ class AsyncOmni(EngineClient, OmniBase):
         )
 
     def _get_duplex_request_client(self) -> DuplexRequestClient:
-        from vllm_omni.experimental.fullduplex.request_client import (
+        from vllm_omni.entrypoints.duplex_request_client import (
             DuplexRequestClient,
             DuplexRequestOutputPort,
         )
@@ -418,7 +418,7 @@ class AsyncOmni(EngineClient, OmniBase):
 
     @staticmethod
     def _duplex_data_plane_request_info(result: dict[str, object]) -> tuple[str | None, int | None]:
-        from vllm_omni.experimental.fullduplex.request_client import DuplexRequestClient
+        from vllm_omni.entrypoints.duplex_request_client import DuplexRequestClient
 
         return DuplexRequestClient.request_info(result)
 
@@ -439,13 +439,13 @@ class AsyncOmni(EngineClient, OmniBase):
 
     @classmethod
     def _is_direct_duplex_data_plane_response(cls, output: object) -> bool:
-        from vllm_omni.experimental.fullduplex.request_client import DuplexRequestClient
+        from vllm_omni.entrypoints.duplex_request_client import DuplexRequestClient
 
         return DuplexRequestClient.is_direct_response(output)
 
     @classmethod
     def _duplex_multimodal_output(cls, output: object) -> dict[str, object]:
-        from vllm_omni.experimental.fullduplex.request_client import DuplexRequestClient
+        from vllm_omni.entrypoints.duplex_request_client import DuplexRequestClient
 
         return DuplexRequestClient.multimodal_output(output)
 

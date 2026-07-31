@@ -58,7 +58,7 @@ from vllm_omni.outputs import OmniRequestOutput
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm_omni.experimental.fullduplex.engine.contracts import (
+    from vllm_omni.engine.duplex.contracts import (
         DuplexControlPlanePort,
         DuplexOutputContext,
         DuplexOutputDecision,
@@ -68,11 +68,11 @@ if TYPE_CHECKING:
         DuplexStageSubmission,
         DuplexStageSubmissionResult,
     )
-    from vllm_omni.experimental.fullduplex.engine.duplex_session import (
+    from vllm_omni.engine.duplex.messages import DuplexFence
+    from vllm_omni.engine.duplex.session import (
         DuplexSessionRuntimeManager,
         DuplexSessionRuntimeState,
     )
-    from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence
 
 
 def _build_terminal_empty_output(
@@ -264,7 +264,7 @@ class _OrchestratorDuplexStagePort:
         )
 
     def ensure_request(self, context: DuplexStageRequestContext) -> None:
-        from vllm_omni.experimental.fullduplex.engine.contracts import DuplexRequestIdentity
+        from vllm_omni.engine.duplex.contracts import DuplexRequestIdentity
 
         request_state = self._request_states.get(context.request_id)
         if request_state is None:
@@ -287,7 +287,7 @@ class _OrchestratorDuplexStagePort:
         self._sync_bridge_state(request_state, context)
 
     async def submit(self, submission: DuplexStageSubmission) -> DuplexStageSubmissionResult:
-        from vllm_omni.experimental.fullduplex.engine.contracts import DuplexStageSubmissionResult
+        from vllm_omni.engine.duplex.contracts import DuplexStageSubmissionResult
 
         context = submission.context
         request_state = self._request_states.get(context.request_id)
@@ -388,8 +388,8 @@ class Orchestrator:
         self.duplex_control_plane: DuplexControlPlanePort | None = None
         self._duplex_reaper_interval_s = 1.0
         if enable_duplex_control:
-            from vllm_omni.experimental.fullduplex.engine.duplex_control_plane import DuplexControlPlane
-            from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseConfig
+            from vllm_omni.engine.duplex.control_plane import DuplexControlPlane
+            from vllm_omni.engine.duplex.lease import DuplexLeaseConfig
 
             runtime_session_config = duplex_session_config or DuplexSessionRuntimeConfig()
             self._duplex_reaper_interval_s = runtime_session_config.reaper_interval_s
@@ -1460,7 +1460,7 @@ class Orchestrator:
         identity = req_state.duplex_identity
         if identity is None:
             return None
-        from vllm_omni.experimental.fullduplex.engine.contracts import (
+        from vllm_omni.engine.duplex.contracts import (
             DuplexOutputContext,
             DuplexRequestIdentity,
         )
@@ -1518,7 +1518,7 @@ class Orchestrator:
         action = getattr(decision.action, "value", decision.action)
         if action != "direct_response":
             raise ValueError(f"Unsupported duplex output action: {action}")
-        from vllm_omni.experimental.fullduplex.output import attach_duplex_output_decision
+        from vllm_omni.outputs.duplex import attach_duplex_output_decision
 
         engine_output = attach_duplex_output_decision(
             OmniRequestOutput(

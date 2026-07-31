@@ -25,7 +25,7 @@ def _assert_isolated_import_succeeds(script: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_stable_engine_imports_do_not_load_experimental_duplex() -> None:
+def test_stable_engine_imports_do_not_load_duplex_packages() -> None:
     _assert_isolated_import_succeeds("""
 import sys
 
@@ -33,14 +33,21 @@ import vllm_omni.engine.async_omni_engine
 import vllm_omni.engine.orchestrator
 import vllm_omni.entrypoints.async_omni
 
+duplex_prefixes = (
+    "vllm_omni.engine.duplex",
+    "vllm_omni.entrypoints.openai.duplex",
+    "vllm_omni.entrypoints.duplex_request_client",
+    "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
+    "vllm_omni.model_executor.duplex_sampling",
+    "vllm_omni.outputs.duplex",
+)
 loaded = sorted(
     name
     for name in sys.modules
-    if name == "vllm_omni.experimental.fullduplex"
-    or name.startswith("vllm_omni.experimental.fullduplex.")
+    if any(name == prefix or name.startswith(prefix + ".") for prefix in duplex_prefixes)
 )
 if loaded:
-    raise SystemExit("stable imports loaded experimental duplex: " + ", ".join(loaded))
+    raise SystemExit("stable imports loaded duplex modules: " + ", ".join(loaded))
 """)
 
 
@@ -77,26 +84,41 @@ if "duplex_output_decision" in fields:
 """)
 
 
-def test_stable_model_executor_does_not_expose_duplex_helper_module() -> None:
+def test_duplex_sampling_helper_lives_in_model_executor() -> None:
     _assert_isolated_import_succeeds("""
 import importlib.util
 
-if importlib.util.find_spec("vllm_omni.model_executor.duplex") is not None:
-    raise SystemExit("stable model_executor still exposes duplex helper module")
+if importlib.util.find_spec("vllm_omni.model_executor.duplex_sampling") is None:
+    raise SystemExit("model_executor duplex_sampling helper module is missing")
 """)
+    assert not (REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "model_executor.py").exists()
 
 
 def test_runtime_package_does_not_bundle_the_browser_demo() -> None:
     assert not (REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "web").exists()
 
 
-def test_experimental_engine_uses_canonical_contract_module_names() -> None:
-    engine_dir = REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "engine"
+def test_engine_duplex_uses_canonical_contract_module_names() -> None:
+    engine_dir = REPO_ROOT / "vllm_omni" / "engine" / "duplex"
     core_dir = REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "core"
 
-    assert (engine_dir / "contracts.py").is_file()
-    assert (engine_dir / "lease.py").is_file()
-    assert (engine_dir / "messages.py").is_file()
+    for name in (
+        "contracts.py",
+        "lease.py",
+        "messages.py",
+        "session.py",
+        "control_plane.py",
+        "control_client.py",
+        "runtime.py",
+        "intermediate.py",
+    ):
+        assert (engine_dir / name).is_file()
+    # the duplex_ prefix is dropped inside the duplex package
+    assert not (engine_dir / "duplex_session.py").exists()
     assert not (engine_dir / "duplex_lease.py").exists()
     assert not (engine_dir / "duplex_types.py").exists()
+    # the experimental package retains only the joyvl framework; stale
+    # __pycache__ leftovers may exist, so assert on source files, not the dir
+    old_engine_dir = REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "engine"
+    assert not list(old_engine_dir.glob("*.py"))
     assert not (core_dir / "identity.py").exists()

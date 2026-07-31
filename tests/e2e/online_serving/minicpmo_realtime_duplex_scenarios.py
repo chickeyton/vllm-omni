@@ -47,7 +47,7 @@ try:
 except ImportError as exc:  # pragma: no cover - demo dependency.
     raise SystemExit("Install websockets first: pip install websockets") from exc
 
-from vllm_omni.experimental.fullduplex.client import (  # noqa: E402
+from vllm_omni.entrypoints.openai.duplex.client import (  # noqa: E402
     PCM16_BYTES_PER_SAMPLE,
     PCM16_SAMPLE_RATE,
     RealtimeEventCollector,

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from vllm_omni.experimental.fullduplex.openai.protocol import (
+from vllm_omni.entrypoints.openai.duplex.protocol import (
     DuplexCapabilities,
     DuplexOverlapPolicy,
     DuplexSession,
@@ -14,10 +14,10 @@ from vllm_omni.experimental.fullduplex.openai.protocol import (
     DuplexTurnState,
     ResponseCreateOptions,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_session import (
+from vllm_omni.entrypoints.openai.duplex.realtime_session import (
     NativeRealtimeSessionProtocol,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_state import RealtimeStateOwner
+from vllm_omni.entrypoints.openai.duplex.realtime_state import RealtimeStateOwner
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
