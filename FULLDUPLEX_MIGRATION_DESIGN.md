@@ -441,5 +441,29 @@ flowchart TD
 - Runtime validation (pytest, imports) could not run on the migration machine
   (no torch/vllm). Static verification passed: 77 files byte-compile, all 344
   `vllm_omni.*` imports in changed files resolve, ruff clean, CI YAML parses.
-  The focused suites and import-boundary tests still need a GPU/H20 run
-  before publishing.
+
+## 12. Remote validation results (2026-07-31, migration commit cc324de3)
+
+Environment: shared L20X test server, fresh `.venv-fdxtest` with Python
+3.12.13, torch 2.11.0+cu129, vLLM 0.25.0 (matching the DESIGN validation
+pairing), editable install of the migrated tree.
+
+- Focused batch — relocated duplex suites (`tests/engine/duplex/`,
+  `tests/entrypoints/openai/duplex/`,
+  `tests/model_executor/models/minicpmo_4_5/duplex/`), import-boundary,
+  capability, handler, protocol, session-attachment, async-omni duplex, and
+  fence-propagation tests: **399 passed** (`fdx_test_run1.log` + rerun).
+- Stable affected batch — orchestrator, stage-input bridge, engine outputs,
+  worker native-duplex hooks, minicpmo pipeline: **150 passed**
+  (`fdx_test_run2b.log`).
+- E2E — `tests/e2e/online_serving/test_minicpmo_4_5_duplex.py`
+  (`core_model and cuda`, 2 GPUs, offline HF cache): **1 passed** in 5m07s
+  (`fdx_test_e2e.log`).
+- Two test-rewrite defects were found by the first run and fixed:
+  the canonical-names test now asserts on remaining `*.py` files instead of
+  directory existence (stale `__pycache__` from a previous checkout made the
+  old directory exist), and the capability test's prefix match now requires a
+  module boundary (it wrongly matched the stable `duplex_capability` module).
+- Environment gaps hit and resolved: `pytest-mock` was missing from the
+  minimal test-dependency install.
+- Logs live in `/workspace/ngngaifai/fdx_test_run*.log` on the test server.
