@@ -105,7 +105,10 @@ def _start_worker(req_q, res_q, count=2):
 
     def _run():
         for _ in range(count):
-            req = req_q.get(timeout=10)
+            try:
+                req = req_q.get(timeout=10)
+            except queue.Empty:
+                break
             method = req.get("method", "")
             args = req.get("args", ())
             if method == "execute_model_batch" and args and isinstance(args[0], DiffusionSchedulerOutput):
@@ -149,7 +152,7 @@ def _inject_interleave(executor):
         orig_enqueue(item)
         if threading.current_thread().name == "thread_a":
             a_enqueued.set()  # tell B: "A has enqueued"
-            b_complete.wait(5)  # block A until B finishes
+            b_complete.wait(1)  # block A until B finishes
 
     executor._broadcast_mq.enqueue = _controlled
     return a_enqueued, b_complete
@@ -176,8 +179,8 @@ class TestConcurrentRequestExecution:
             results["B"] = engine.add_req_and_wait_for_response(_mock_request("B"))
             b_complete.set()  # release A
 
-        ta = threading.Thread(target=_a, name="thread_a")
-        tb = threading.Thread(target=_b, name="thread_b")
+        ta = threading.Thread(target=_a, name="thread_a", daemon=True)
+        tb = threading.Thread(target=_b, name="thread_b", daemon=True)
         ta.start()
         tb.start()
         ta.join(10)
@@ -277,8 +280,8 @@ class TestConcurrentCollectiveRpc:
             )
             b_complete.set()
 
-        ta = threading.Thread(target=_a, name="thread_a")
-        tb = threading.Thread(target=_b, name="thread_b")
+        ta = threading.Thread(target=_a, name="thread_a", daemon=True)
+        tb = threading.Thread(target=_b, name="thread_b", daemon=True)
         ta.start()
         tb.start()
         ta.join(10)
@@ -314,8 +317,8 @@ class TestConcurrentRequestExecutionAndCollectiveRpc:
             )
             b_complete.set()
 
-        ta = threading.Thread(target=_a, name="thread_a")
-        tb = threading.Thread(target=_b, name="thread_b")
+        ta = threading.Thread(target=_a, name="thread_a", daemon=True)
+        tb = threading.Thread(target=_b, name="thread_b", daemon=True)
         ta.start()
         tb.start()
         ta.join(10)
@@ -686,7 +689,10 @@ class TestMultiprocExecutorStepStreamingOutput:
 
         def _worker():
             for runner_output in runner_outputs:
-                req_q.get(timeout=10)
+                try:
+                    req_q.get(timeout=10)
+                except queue.Empty:
+                    break
                 res_q.put(runner_output)
 
         thread = threading.Thread(target=_worker, daemon=True)
