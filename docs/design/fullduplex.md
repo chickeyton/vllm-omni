@@ -391,12 +391,12 @@ vllm_omni.entrypoints.duplex_request_client
                                            # entrypoint request/output lifecycle
 ```
 
-Stable engine and entrypoint modules import only the kernel at module load.
-They load the ControlPlane, ControlClient, request client, and
-runtime extension inside duplex-only construction or call paths. Importing
-`Orchestrator`, `AsyncOmniEngine`, or `AsyncOmni` for an ordinary deployment
-therefore does not import any duplex module. Compatibility
-exports remain lazy and are not part of ordinary startup.
+Stable engine and entrypoint modules import the duplex kernel eagerly at
+module load (top-of-file imports). Duplex behavior remains opt-in: the
+ControlPlane, ControlClient, and request client are *constructed* only on
+duplex-enabled deployments, and the model runtime extension still loads only
+through the dotted-string plugin path. The websockets demo client
+(`entrypoints/openai/duplex/client.py`) is never imported by runtime code.
 
 `PipelineConfig.duplex_control_enabled` enables the generic mechanism, while
 `PipelineConfig.duplex_runtime_extension` separately selects the model adapter.

@@ -127,43 +127,64 @@ every one is mapped above. The top-level `__init__.py` stays behind — its
 ```mermaid
 graph TD
     subgraph entrypoints
-        API[openai/api_server.py]
-        SRV[openai/duplex/serving.py + session_runner + bridge]
-        AO[async_omni.py]
-        RC[duplex_request_client.py]
+        API[API · openai/api_server.py]
+        SRV[SRV · openai/duplex/serving.py + session_runner + bridge]
+        AO[AO · async_omni.py]
+        RC[RC · duplex_request_client.py]
     end
     subgraph engine
-        AOE[async_omni_engine.py]
-        ORCH[orchestrator.py]
-        DX[engine/duplex/*  control_plane, session, lease, contracts]
+        AOE[AOE · async_omni_engine.py]
+        ORCH[ORCH · orchestrator.py]
+        DX[DX · engine/duplex/*  control_plane, session, lease, contracts]
     end
     subgraph model_executor
-        PIPE[models/minicpmo_4_5/pipeline.py]
-        MDX[models/minicpmo_4_5/duplex/*]
-        DS[duplex_sampling.py]
+        PIPE[PIPE · models/minicpmo_4_5/pipeline.py]
+        MDX[MDX · models/minicpmo_4_5/duplex/*]
+        DS[DS · duplex_sampling.py]
     end
     subgraph worker
-        RUN[gpu_ar_model_runner.py]
+        RUN[RUN · gpu_ar_model_runner.py]
     end
-    OUT[outputs/duplex.py]
+    OUT[OUT · outputs/duplex.py]
 
-    API -->|lazy, session_mode check| SRV
+    API -->|session_mode check| SRV
     SRV --> RC
     SRV -->|ServingRuntimeAdapter protocol| MDX
     RC --> AO
     AO --> AOE
-    AOE -->|lazy| DX
-    ORCH -->|lazy| DX
+    AOE --> DX
+    ORCH --> DX
     DX -->|dotted path from PIPE| MDX
-    RUN -->|lazy hook| DS
+    RUN -->|model hook check| DS
     ORCH --> OUT
     PIPE -.->|string paths| MDX
 ```
 
-- Import rules preserved from the experimental design:
-  - Ordinary (non-duplex) deployments must **not** import any `duplex`
-    subpackage at startup. All existing lazy imports stay lazy; only the
-    dotted paths change.
+Decision annotations (gated edges — this graph has no diamond nodes; the
+decisions live on the gated/string edges). Imports along these edges are
+top-level (eager); the gates decide runtime behavior, not module loading.
+`vllm/...` paths are the external vLLM checkout.
+
+| Edge | Decision | Source |
+| --- | --- | --- |
+| `API → SRV` (session_mode check) | is the duplex endpoint enabled for this deployment? | `vllm_omni/entrypoints/openai/api_server.py` — `omni_init_app_state()` (gate + handler construction); predicate `vllm_omni/entrypoints/openai/duplex_capability.py` — `should_enable_duplex_endpoint()` |
+| `ORCH → DX` | `enable_duplex_control` set? | `vllm_omni/engine/orchestrator.py` — `Orchestrator.__init__()` (plane construction) |
+| `AOE → DX` | duplex runtime/control requested? | `vllm_omni/engine/async_omni_engine.py` — `AsyncOmniEngine._run_orchestrator()` (runtime), `AsyncOmniEngine._get_duplex_control_client()` (control client) |
+| `RUN → DS` (model hook check) | does the model expose `prepare_duplex_sampling`? | `vllm_omni/worker/gpu_ar_model_runner.py` — `_resolve_duplex_sampling_hook()` |
+| `PIPE ⇢ MDX` (string paths) | dotted-path plugin selection, resolved at runtime | `vllm_omni/model_executor/models/minicpmo_4_5/pipeline.py` — `MINICPMO_4_5_PIPELINE` config (`duplex_runtime_extension` / `duplex_serving_adapter` fields) |
+
+- Import rules (revised 2026-08-03 — eager-import follow-up):
+  - The in-repo duplex kernel and serving modules are imported **eagerly**:
+    `orchestrator.py`, `async_omni_engine.py`, `async_omni.py`,
+    `api_server.py`, and `gpu_ar_model_runner.py` import their duplex
+    dependencies at the top of the file. Duplex behavior remains opt-in via
+    the `enable_duplex_control` / capability gates; only module loading
+    changed.
+  - Two imports stay dynamic by necessity: model adapters load via the
+    dotted-string plugin paths (config decides which module), and
+    `entrypoints/openai/duplex/client.py` (websockets demo helper that
+    raises `SystemExit` when `websockets` is missing) is never imported by
+    runtime code.
   - Generic serving (`serving.py`, `runtime_bridge.py`, `session_runner.py`)
     must not import MiniCPM modules; the model is selected only via
     `PipelineConfig.duplex_serving_adapter` / `duplex_runtime_extension`
@@ -176,28 +197,40 @@ graph TD
 
 ```mermaid
 flowchart LR
-    WS[WebSocket] --> H[entrypoints/openai/duplex/serving.py<br/>OmniDuplexSessionHandler]
-    H --> S[protocol.py DuplexSession<br/>+ minicpmo_4_5/duplex/session.py]
-    S --> RC[entrypoints/duplex_request_client.py]
-    RC --> AO[entrypoints/async_omni.py<br/>open/append/signal/close proxies]
-    AO --> CC[engine/duplex/control_client.py]
-    CC --> CP[engine/duplex/control_plane.py<br/>+ engine/duplex/session.py]
-    CP --> EXT[minicpmo_4_5/duplex/runtime.py<br/>DuplexRuntimeExtension]
-    EXT --> SP[StagePool → resumable scheduler request]
-    SP --> ST0[MiniCPM Stage0] --> ST1[Stage1 TTS / Token2Wav]
-    ST1 --> OP[output processor + outputs/duplex.py]
-    OP --> RT[realtime_output.py projection] --> WS
+    WS[WS · WebSocket] --> H[H · entrypoints/openai/duplex/serving.py<br/>OmniDuplexSessionHandler]
+    H --> S[S · protocol.py DuplexSession<br/>+ minicpmo_4_5/duplex/session.py]
+    S --> RC[RC · entrypoints/duplex_request_client.py]
+    RC --> AO[AO · entrypoints/async_omni.py<br/>open/append/signal/close proxies]
+    AO --> CC[CC · engine/duplex/control_client.py]
+    CC --> CP[CP · engine/duplex/control_plane.py<br/>+ engine/duplex/session.py]
+    CP --> EXT[EXT · minicpmo_4_5/duplex/runtime.py<br/>DuplexRuntimeExtension]
+    EXT --> SP[SP · StagePool → resumable scheduler request]
+    SP --> ST0[ST0 · MiniCPM Stage0] --> ST1[ST1 · Stage1 TTS / Token2Wav]
+    ST1 --> OP[OP · output processor + outputs/duplex.py]
+    OP --> RT[RT · realtime_output.py projection] --> WS
 ```
+
+Decision annotations — this path is linear; the only decision sits before the
+first box (which WebSocket connections enter the duplex path at all):
+
+| Node / edge | Decision | Source |
+| --- | --- | --- |
+| `WS → H` | `/v1/realtime` with query `duplex` = `1` / `true` / `on` → duplex projection | `vllm_omni/entrypoints/openai/api_server.py` — `realtime_websocket()` |
+| `WS → H` | native `/v1/duplex` endpoint (handler present, else error frame) | `vllm_omni/entrypoints/openai/api_server.py` — `duplex_websocket()` |
+
+Every hop after `H` (`OmniDuplexSessionHandler`,
+`entrypoints/openai/duplex/serving.py`) is an unconditional call chain; the
+output-side branching of `OP`/`RT` is annotated in §9.3.
 
 ## 5. Reference-update matrix
 
 | File | Change |
 | --- | --- |
-| `engine/orchestrator.py` | lazy imports → `vllm_omni.engine.duplex.{contracts,session,messages,control_plane,lease}`; `vllm_omni.outputs.duplex` |
-| `engine/async_omni_engine.py` | lazy imports → `vllm_omni.engine.duplex.{control_client,lease,messages,runtime}` |
-| `entrypoints/async_omni.py` | lazy imports → `vllm_omni.entrypoints.duplex_request_client`, `vllm_omni.engine.duplex.{lease,messages}` |
-| `entrypoints/openai/api_server.py` | lazy import of duplex handler → `vllm_omni.entrypoints.openai.duplex.serving` |
-| `worker/gpu_ar_model_runner.py` | lazy import → `vllm_omni.model_executor.duplex_sampling` |
+| `engine/orchestrator.py` | duplex imports (top-level since 2026-08-03) → `vllm_omni.engine.duplex.{contracts,session,messages,control_plane,lease}`; `vllm_omni.outputs.duplex` |
+| `engine/async_omni_engine.py` | duplex imports (top-level) → `vllm_omni.engine.duplex.{control_client,lease,messages,runtime}` |
+| `entrypoints/async_omni.py` | duplex imports (top-level) → `vllm_omni.entrypoints.duplex_request_client`, `vllm_omni.engine.duplex.{lease,messages}` |
+| `entrypoints/openai/api_server.py` | duplex handler import (top-level) → `vllm_omni.entrypoints.openai.duplex.serving` |
+| `worker/gpu_ar_model_runner.py` | duplex import (top-level) → `vllm_omni.model_executor.duplex_sampling` |
 | `model_executor/stage_input_processors/minicpmo_4_5_omni.py` | → `vllm_omni.engine.duplex.intermediate`, `...models.minicpmo_4_5.duplex.input` |
 | `model_executor/models/minicpmo_4_5/pipeline.py` | dotted strings → `vllm_omni.model_executor.models.minicpmo_4_5.duplex.runtime.MiniCPMO45DuplexRuntimeExtension`, `...duplex.serving_adapter.MiniCPMO45ServingRuntimeAdapter` |
 | `model_executor/models/minicpmo_4_5/*.py` (3 model files) | import path updates |
@@ -221,11 +254,12 @@ flowchart LR
 - Tests already in stable locations (`tests/engine/test_duplex_import_boundary.py`,
   `tests/entrypoints/...`, `tests/worker/test_native_duplex_hooks.py`,
   `tests/e2e/online_serving/test_minicpmo_4_5_duplex.py`) only get import updates.
-- `test_duplex_import_boundary.py` is updated to assert that importing
-  `Orchestrator` / `AsyncOmniEngine` / `AsyncOmni` / the API server for an
-  ordinary deployment does **not** load any of:
-  `vllm_omni.engine.duplex`, `vllm_omni.entrypoints.openai.duplex`,
-  `vllm_omni.model_executor.models.minicpmo_4_5.duplex`.
+- `test_duplex_import_boundary.py` (revised 2026-08-03 with the eager-import
+  follow-up) asserts that importing `Orchestrator` / `AsyncOmniEngine` /
+  `AsyncOmni` loads the duplex kernel eagerly, while
+  `vllm_omni.model_executor.models.minicpmo_4_5.duplex` and
+  `vllm_omni.entrypoints.openai.duplex.client` are still **not** loaded
+  (plugin-only / demo-only).
 - `__init__.py` convention per target: `tests/engine/` and
   `tests/model_executor/models/minicpmo_4_5/` use `__init__.py` → new `duplex/`
   subdirs get one; `tests/entrypoints/openai/` has none → follow suit.
@@ -268,7 +302,10 @@ flowchart LR
 
 ## 8. Invariants that must survive the move
 
-- Lazy-import boundary: ordinary startup imports zero duplex modules
+- Import boundary (revised 2026-08-03): the duplex kernel imports eagerly
+  with the stable engine; model-specific duplex adapters load only via the
+  dotted-string plugin paths, and the websockets demo client is never
+  imported by runtime code
   (guarded by the updated import-boundary test).
 - No behavior change: this is a pure relocation — no renamed public symbols,
   no logic edits, no new abstractions.
@@ -288,7 +325,7 @@ flowchart LR
   1. **Construction** — `enable_duplex_control` (from
      `PipelineConfig.duplex_control_enabled`) decides whether a
      `DuplexControlPlane` exists at all. Ordinary deployments: `None`,
-     single fast-path check, no duplex imports.
+     single fast-path check.
   2. **Message intake** — `_request_handler()` reads one
      `request_async_queue`; duplex control envelopes are claimed by
      `duplex_control_plane.accepts(msg)` in the same `elif` chain that
@@ -301,24 +338,43 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Q[request_async_queue] --> T{msg.type}
-    T -->|add_request| AR[_handle_add_request<br/>ordinary request-response]
-    T -->|streaming_update| SU[_handle_streaming_update]
-    T -->|add_companion_request| CO[_handle_add_companion]
-    T -->|other| DX{duplex_control_plane != None<br/>AND accepts msg?}
-    DX -->|yes: open / append /<br/>signal / update / close| CP[DuplexControlPlane.dispatch]
-    DX -->|no| REST{abort / interaction /<br/>collective_rpc / membership /<br/>shutdown}
-    REST -->|match| H[normal handlers]
-    REST -->|no match| W[log unknown message]
+    Q[Q · request_async_queue] --> T{T · msg.type}
+    T -->|add_request| AR[AR · _handle_add_request<br/>ordinary request-response]
+    T -->|streaming_update| SU[SU · _handle_streaming_update]
+    T -->|add_companion_request| CO[CO · _handle_add_companion]
+    T -->|other| DX{DX · duplex_control_plane != None<br/>AND accepts msg?}
+    DX -->|yes: open / append /<br/>signal / update / close| CP[CP · DuplexControlPlane.dispatch]
+    DX -->|no| REST{REST · abort / interaction /<br/>collective_rpc / membership /<br/>shutdown}
+    REST -->|match| H[H · normal handlers]
+    REST -->|no match| W[W · log unknown message]
 
-    CP --> SP2[_OrchestratorDuplexStagePort<br/>ensure_request + submit]
-    AR --> POOL[StagePool submit]
+    CP --> SP2[SP2 · _OrchestratorDuplexStagePort<br/>ensure_request + submit]
+    AR --> POOL[POOL · StagePool submit]
     SP2 --> POOL
 
     style DX fill:#e8f0fe,stroke:#4285f4
     style CP fill:#e8f0fe,stroke:#4285f4
     style SP2 fill:#e8f0fe,stroke:#4285f4
 ```
+
+Decision annotations:
+
+| Node | Role / decision | Source |
+| --- | --- | --- |
+| `Q` | single intake queue read | `vllm_omni/engine/orchestrator.py` — `Orchestrator._request_handler()` |
+| `T` | `msg.type` elif chain | `Orchestrator._request_handler()` |
+| `AR` | ordinary add_request | `Orchestrator._handle_add_request()` |
+| `SU` | streaming update | `Orchestrator._handle_streaming_update()` |
+| `CO` | CFG companion | `Orchestrator._handle_add_companion()` |
+| `DX` | `duplex_control_plane is not None and accepts(msg)` | branch in `Orchestrator._request_handler()`; predicate `vllm_omni/engine/duplex/control_plane.py` — `DuplexControlPlane.accepts()` (isinstance against the control-message types) |
+| `CP` | dispatch (per-session ordered task) → typed handler fan-out | `DuplexControlPlane.dispatch()` → `handle()` → `handle_open()` / `handle_append()` / `handle_signal()` / `handle_close()` |
+| `REST` | remaining stable handlers | `Orchestrator._handle_abort()` / `_handle_interaction()` / `_handle_collective_rpc()`; membership and shutdown branches inline in `_request_handler()` |
+| `W` | unknown message warning | tail of `Orchestrator._request_handler()` |
+| `SP2` | duplex stage port (ensure + submit) | `vllm_omni/engine/orchestrator.py` — `_OrchestratorDuplexStagePort.ensure_request()` / `.submit()` |
+| `POOL` | shared StagePool submission | ordinary path `StagePool.submit_initial()` called from `Orchestrator._handle_add_request()`; the duplex port submits into the same `stage_pools` |
+
+The construction-time switch that makes `DX` a one-check no-op for ordinary
+deployments is the `enable_duplex_control` gate in `Orchestrator.__init__()`.
 
 - Key point: when the deployment is ordinary, `duplex_control_plane is None`
   and the `accepts()` branch costs one `is not None` check — the duplex path
@@ -331,25 +387,25 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph "client side"
-        A1[AsyncOmni.add_request]
-        A2[AsyncOmni duplex proxies<br/>open / append / signal / close]
-        RC2[DuplexRequestClient<br/>preregisters ClientRequestState]
-        CC[DuplexControlClient<br/>correlated RPC]
+        A1[A1 · AsyncOmni.add_request]
+        A2[A2 · AsyncOmni duplex proxies<br/>open / append / signal / close]
+        RC2[RC2 · DuplexRequestClient<br/>preregisters ClientRequestState]
+        CC[CC · DuplexControlClient<br/>correlated RPC]
     end
     subgraph orchestrator
-        RH[_request_handler]
-        CP[DuplexControlPlane<br/>fences, leases, sessions]
-        PORT[DuplexStagePort]
+        RH[RH · _request_handler]
+        CP[CP · DuplexControlPlane<br/>fences, leases, sessions]
+        PORT[PORT · DuplexStagePort]
     end
     subgraph "scheduler / stages"
-        S1[one-shot request<br/>RUNNING → FINISHED<br/>KV released at EOS]
-        S2[resumable request<br/>RUNNING ⇄ WAITING_FOR_STREAMING_REQ<br/>KV retained across segments]
+        S1[S1 · one-shot request<br/>RUNNING → FINISHED<br/>KV released at EOS]
+        S2[S2 · resumable request<br/>RUNNING ⇄ WAITING_FOR_STREAMING_REQ<br/>KV retained across segments]
     end
 
     A1 -->|add_request msg| RH --> S1
     A2 --> RC2 --> CC -->|duplex control msg<br/>same queue| RH
     RH -->|accepts| CP --> PORT --> S2
-    S2 -->|session close| FIN[FINISHED, KV released]
+    S2 -->|session close| FIN[FIN · FINISHED, KV released]
 
     style A2 fill:#e8f0fe,stroke:#4285f4
     style RC2 fill:#e8f0fe,stroke:#4285f4
@@ -358,6 +414,25 @@ flowchart LR
     style PORT fill:#e8f0fe,stroke:#4285f4
     style S2 fill:#e8f0fe,stroke:#4285f4
 ```
+
+Decision annotations:
+
+| Node | Role / decision | Source |
+| --- | --- | --- |
+| `A1` | ordinary entry (`generate` → add_request message) | `vllm_omni/entrypoints/async_omni.py` — `AsyncOmni.generate()` → `engine.add_request_async()` |
+| `A2` | duplex proxies | `AsyncOmni.open_duplex_session_async()` / `append_duplex_input_async()` / `signal_duplex_turn_async()` / `close_duplex_session_async()` |
+| `RC2` | preregisters `ClientRequestState` for the fence-derived request id *before* submitting the append; rolls back on failure/mismatch | `vllm_omni/entrypoints/duplex_request_client.py` — `DuplexRequestClient.append()` |
+| `CC` | correlated RPC: register waiter, submit, block on result | `vllm_omni/engine/duplex/control_client.py` — `DuplexControlClient.execute()` (waiter key `("duplex", control_id)`); result key `DuplexControlResultMessage.rpc_correlation_key` (`engine/duplex/messages.py`) |
+| `RH` | same intake loop as §9.1 | `Orchestrator._request_handler()` (duplex branch via `accepts()`) |
+| `CP` | fence/lease/session state machine | `vllm_omni/engine/duplex/control_plane.py` — `DuplexControlPlane`; fence accept `DuplexSessionRuntimeState.accept_fence()`, transactional append `prepare_append()`, stage-request reservation `reserve_stage_request()` (`engine/duplex/session.py`) |
+| `PORT` | duplex → stage machinery bridge | `vllm_omni/engine/orchestrator.py` — `_OrchestratorDuplexStagePort.ensure_request()` / `.submit()` |
+| `S1` | one-shot lifecycle | `Orchestrator._handle_add_request()` → `StagePool.submit_initial()`; runs to EOS under the vLLM scheduler (KV freed on finish) |
+| `S2` | resumable lifecycle: parked as `WAITING_FOR_STREAMING_REQ`, woken by the next segment | status enum `vllm/v1/request.py` — `RequestStatus`; parked in vLLM `Scheduler._handle_stopped_request()` (`vllm/v1/core/sched/scheduler.py`); woken on streaming update by `OmniARScheduler._update_request_as_session()` and `OmniSchedulerMixin._replace_streaming_session()` (`vllm_omni/core/sched/`); orchestrator side `Orchestrator._handle_streaming_update()` → `StagePool.submit_update()` |
+| `FIN` | session close or lease expiry | `DuplexControlPlane.handle_close()`; reaper `Orchestrator._duplex_reaper_loop()` → `DuplexControlPlane.reap_expired()` |
+
+Barge-in (mentioned below) is `DuplexControlPlane.handle_signal()` →
+`DuplexSessionRuntimeState.prepare_cancel_fence()` — a fence advance, not the
+ordinary abort handler.
 
 - Ordinary path: request enters, runs to EOS, KV freed — identity is the
   request.
@@ -374,22 +449,38 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    ST[stage output] --> OP[output processor]
-    OP --> DEC{duplex request?}
-    DEC -->|no| ORD[OmniRequestOutput →<br/>per-request output queue →<br/>caller of add_request]
-    DEC -->|yes| TAG[attach DuplexOutputDecision<br/>listen / speak envelope]
-    TAG --> REG{request id preregistered by<br/>DuplexRequestClient?}
-    REG -->|yes| SESS[ClientRequestState →<br/>duplex session runner →<br/>Realtime projection → WebSocket]
-    REG -->|no| DROP[dropped - stale or unknown]
+    ST[ST · stage output] --> OP[OP · output processor]
+    OP --> DEC{DEC · duplex request?}
+    DEC -->|no| ORD[ORD · OmniRequestOutput →<br/>per-request output queue →<br/>caller of add_request]
+    DEC -->|yes| TAG[TAG · attach DuplexOutputDecision<br/>listen / speak envelope]
+    TAG --> REG{REG · request id preregistered by<br/>DuplexRequestClient?}
+    REG -->|yes| SESS[SESS · ClientRequestState →<br/>duplex session runner →<br/>Realtime projection → WebSocket]
+    REG -->|no| DROP[DROP · dropped - stale or unknown]
 
-    RPC[rpc_output_queue] --> RTR[RpcResultRouter]
-    RTR -->|duplex, control_id| CCW[DuplexControlClient waiter]
-    RTR -->|collective, rpc_id| COLW[collective RPC waiter]
+    RPC[RPC · rpc_output_queue] --> RTR[RTR · RpcResultRouter]
+    RTR -->|duplex, control_id| CCW[CCW · DuplexControlClient waiter]
+    RTR -->|collective, rpc_id| COLW[COLW · collective RPC waiter]
 
     style TAG fill:#e8f0fe,stroke:#4285f4
     style SESS fill:#e8f0fe,stroke:#4285f4
     style CCW fill:#e8f0fe,stroke:#4285f4
 ```
+
+Decision annotations:
+
+| Node | Role / decision | Source |
+| --- | --- | --- |
+| `ST → OP` | per-output routing entry | `vllm_omni/engine/orchestrator.py` — `Orchestrator._route_output()` |
+| `DEC` | duplex request? (`None` fast path when no control plane / no duplex context) | `Orchestrator._duplex_output_decision()`; plane-side `DuplexControlPlane.decide_output()` (`engine/duplex/control_plane.py`, consults the runtime extension) |
+| `ORD` | ordinary output flow | continues in `Orchestrator._route_output()`; client side `OmniBase._handle_output_message()` (`vllm_omni/entrypoints/omni_base.py`); per-request queue put in `AsyncOmni._final_output_handler()` |
+| `TAG` | attach typed decision envelope | `Orchestrator._emit_duplex_direct_output()`; `attach_duplex_output_decision()` (`vllm_omni/outputs/duplex.py`) |
+| `REG` | request id preregistered? | preregistration in `DuplexRequestClient.append()` (`vllm_omni/entrypoints/duplex_request_client.py`); lookup in `OmniBase._handle_output_message()` |
+| `SESS` | registered → session runner → Realtime projection | `DuplexRequestClient.collect_registered_outputs()` / `collect_outputs()`; `DuplexSessionRunnerMixin` (`vllm_omni/entrypoints/openai/duplex/session_runner.py`); `RealtimeOutputProjector` (`vllm_omni/entrypoints/openai/duplex/realtime_output.py`) |
+| `DROP` | unknown/stale request id dropped | unknown-request branch of `OmniBase._handle_output_message()` |
+| `RPC` | shared RPC result queue | `vllm_omni/engine/async_omni_engine.py` — `AsyncOmniEngine.__init__()` (`rpc_output_queue`) |
+| `RTR` | route by correlation key; late/unknown results dropped | `vllm_omni/engine/rpc_result_router.py` — `RpcResultRouter.register()` / `_run()` |
+| `CCW` | duplex control waiter | key `("duplex", control_id)` — `DuplexControlClient.execute()`; result key `DuplexControlResultMessage.rpc_correlation_key` (`engine/duplex/messages.py`) |
+| `COLW` | collective RPC waiter | key `("collective", rpc_id)` — `AsyncOmniEngine.collective_rpc()`; result key `CollectiveRPCResultMessage.rpc_correlation_key` (`engine/messages.py`) |
 
 - Control results and data outputs travel on different channels: control
   acknowledgements come back through the single `RpcResultRouter` keyed by
@@ -441,6 +532,18 @@ flowchart TD
 - Runtime validation (pytest, imports) could not run on the migration machine
   (no torch/vllm). Static verification passed: 77 files byte-compile, all 344
   `vllm_omni.*` imports in changed files resolve, ruff clean, CI YAML parses.
+- **Eager-import follow-up (2026-08-03)**: the duplex lazy imports in
+  `orchestrator.py`, `async_omni_engine.py`, `async_omni.py`,
+  `api_server.py`, and `gpu_ar_model_runner.py` were moved to the top of the
+  file (verified beforehand: no import cycles, no heavy/optional deps, no
+  module-level side effects in the duplex tree). Kept dynamic: dotted-string
+  plugin loading and the websockets demo client. The two contract tests were
+  rewritten to pin the new boundary —
+  `test_stable_engine_imports_load_duplex_kernel_eagerly` (kernel eager,
+  model adapters + demo client still never loaded) and
+  `test_duplex_capability.py` (AST check that neither the API server nor the
+  duplex serving stack imports `client.py`). Docs in §3/§5/§6/§8/§9 revised
+  to match; §7 keeps the original migration narrative.
 
 ## 12. Remote validation results (2026-07-31, migration commit cc324de3)
 

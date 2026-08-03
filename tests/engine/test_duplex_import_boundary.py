@@ -25,7 +25,11 @@ def _assert_isolated_import_succeeds(script: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_stable_engine_imports_do_not_load_duplex_packages() -> None:
+def test_stable_engine_imports_load_duplex_kernel_eagerly() -> None:
+    # The duplex kernel is imported eagerly by the stable engine modules.
+    # Model-specific duplex adapters must still load only via the
+    # dotted-string plugin paths, and the websockets demo client must never
+    # be imported (it exits at import time when websockets is missing).
     _assert_isolated_import_succeeds("""
 import sys
 
@@ -33,21 +37,27 @@ import vllm_omni.engine.async_omni_engine
 import vllm_omni.engine.orchestrator
 import vllm_omni.entrypoints.async_omni
 
-duplex_prefixes = (
-    "vllm_omni.engine.duplex",
-    "vllm_omni.entrypoints.openai.duplex",
+expected_eager = (
+    "vllm_omni.engine.duplex.contracts",
+    "vllm_omni.engine.duplex.control_plane",
     "vllm_omni.entrypoints.duplex_request_client",
-    "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
-    "vllm_omni.model_executor.duplex_sampling",
     "vllm_omni.outputs.duplex",
+)
+missing = sorted(name for name in expected_eager if name not in sys.modules)
+if missing:
+    raise SystemExit("duplex kernel modules not imported eagerly: " + ", ".join(missing))
+
+forbidden_prefixes = (
+    "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
+    "vllm_omni.entrypoints.openai.duplex.client",
 )
 loaded = sorted(
     name
     for name in sys.modules
-    if any(name == prefix or name.startswith(prefix + ".") for prefix in duplex_prefixes)
+    if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden_prefixes)
 )
 if loaded:
-    raise SystemExit("stable imports loaded duplex modules: " + ", ".join(loaded))
+    raise SystemExit("stable imports loaded plugin-only duplex modules: " + ", ".join(loaded))
 """)
 
 

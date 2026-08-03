@@ -94,6 +94,7 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm_omni.config.endpoint_policy import shutdown_unsupported_routes
 from vllm_omni.diffusion.models.interface import ReferenceVideoDecodeSpec
 from vllm_omni.entrypoints.async_omni import AsyncOmni
+from vllm_omni.entrypoints.openai.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.openai.duplex_capability import should_enable_duplex_endpoint
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
 from vllm_omni.entrypoints.openai.image_api_utils import (
@@ -1119,8 +1120,6 @@ async def omni_init_app_state(
         state.stage_configs,
         config_path=getattr(args, "stage_configs_path", None) or getattr(args, "deploy_config", None),
     ):
-        from vllm_omni.entrypoints.openai.duplex.serving import OmniDuplexSessionHandler
-
         state.openai_serving_duplex = OmniDuplexSessionHandler(
             chat_service=state.openai_serving_chat,
             duplex_session_config=getattr(engine_client, "duplex_session_config", None),

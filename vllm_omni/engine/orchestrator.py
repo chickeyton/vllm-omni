@@ -15,7 +15,7 @@ import asyncio
 import time as _time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import janus
 import torch
@@ -32,6 +32,23 @@ from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
 from vllm_omni.distributed.omni_connectors.utils.config import stage_receives_chunks
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.cfg_companion_tracker import CfgCompanionTracker
+from vllm_omni.engine.duplex.contracts import (
+    DuplexControlPlanePort,
+    DuplexOutputContext,
+    DuplexOutputDecision,
+    DuplexRequestIdentity,
+    DuplexRuntimeExtension,
+    DuplexStageRequestContext,
+    DuplexStageSubmission,
+    DuplexStageSubmissionResult,
+)
+from vllm_omni.engine.duplex.control_plane import DuplexControlPlane
+from vllm_omni.engine.duplex.lease import DuplexLeaseConfig
+from vllm_omni.engine.duplex.messages import DuplexFence
+from vllm_omni.engine.duplex.session import (
+    DuplexSessionRuntimeManager,
+    DuplexSessionRuntimeState,
+)
 from vllm_omni.engine.membership_controller import MembershipController
 from vllm_omni.engine.messages import (
     AbortRequestMessage,
@@ -54,25 +71,9 @@ from vllm_omni.engine.stage_pool import StagePool
 from vllm_omni.metrics.prometheus import OmniRequestCounter
 from vllm_omni.metrics.stat_logger import OmniPrometheusStatLogger
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.outputs.duplex import attach_duplex_output_decision
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm_omni.engine.duplex.contracts import (
-        DuplexControlPlanePort,
-        DuplexOutputContext,
-        DuplexOutputDecision,
-        DuplexRequestIdentity,
-        DuplexRuntimeExtension,
-        DuplexStageRequestContext,
-        DuplexStageSubmission,
-        DuplexStageSubmissionResult,
-    )
-    from vllm_omni.engine.duplex.messages import DuplexFence
-    from vllm_omni.engine.duplex.session import (
-        DuplexSessionRuntimeManager,
-        DuplexSessionRuntimeState,
-    )
 
 
 def _build_terminal_empty_output(
@@ -264,8 +265,6 @@ class _OrchestratorDuplexStagePort:
         )
 
     def ensure_request(self, context: DuplexStageRequestContext) -> None:
-        from vllm_omni.engine.duplex.contracts import DuplexRequestIdentity
-
         request_state = self._request_states.get(context.request_id)
         if request_state is None:
             request_state = OrchestratorRequestState(
@@ -287,8 +286,6 @@ class _OrchestratorDuplexStagePort:
         self._sync_bridge_state(request_state, context)
 
     async def submit(self, submission: DuplexStageSubmission) -> DuplexStageSubmissionResult:
-        from vllm_omni.engine.duplex.contracts import DuplexStageSubmissionResult
-
         context = submission.context
         request_state = self._request_states.get(context.request_id)
         if request_state is None:
@@ -388,9 +385,6 @@ class Orchestrator:
         self.duplex_control_plane: DuplexControlPlanePort | None = None
         self._duplex_reaper_interval_s = 1.0
         if enable_duplex_control:
-            from vllm_omni.engine.duplex.control_plane import DuplexControlPlane
-            from vllm_omni.engine.duplex.lease import DuplexLeaseConfig
-
             runtime_session_config = duplex_session_config or DuplexSessionRuntimeConfig()
             self._duplex_reaper_interval_s = runtime_session_config.reaper_interval_s
 
@@ -1460,11 +1454,6 @@ class Orchestrator:
         identity = req_state.duplex_identity
         if identity is None:
             return None
-        from vllm_omni.engine.duplex.contracts import (
-            DuplexOutputContext,
-            DuplexRequestIdentity,
-        )
-
         fence = req_state.duplex_stage_fences.get(stage_id, identity.fence) if stage_id is not None else identity.fence
         return DuplexOutputContext(
             identity=DuplexRequestIdentity(
@@ -1518,8 +1507,6 @@ class Orchestrator:
         action = getattr(decision.action, "value", decision.action)
         if action != "direct_response":
             raise ValueError(f"Unsupported duplex output action: {action}")
-        from vllm_omni.outputs.duplex import attach_duplex_output_decision
-
         engine_output = attach_duplex_output_decision(
             OmniRequestOutput(
                 request_id=req_id,
