@@ -494,17 +494,87 @@ Decision annotations:
 
 ## 10. Known risks
 
-- Two `DuplexSession` classes exist (engine transaction state in
-  `engine/duplex/session.py` vs serving aggregate in
-  `entrypoints/openai/duplex/protocol.py`). They already coexist under
-  different modules; keep both names, rely on module paths — no rename in
-  this mission.
+- Two session classes coexist by design: the serving aggregate
+  `DuplexSession` (`entrypoints/openai/duplex/protocol.py`) and the engine
+  transaction state `DuplexSessionRuntimeState` (`engine/duplex/session.py`).
+  They coexist under different modules; keep both names, rely on module
+  paths — no rename in this mission. §10.1 compares them and explains why
+  they cannot be united into one class.
 - Dotted-string paths (`pipeline.py`, deploy profiles, any user-supplied
   `duplex_serving_adapter`) fail at runtime, not import time — step 4 must
   include a startup smoke test of the MiniCPM pipeline config resolution.
 - H20-validated tree: DESIGN.md ties validation evidence to exact file paths;
   the relocation invalidates none of the runtime evidence but the doc must
   state the tree moved after validation.
+
+### 10.1 The two coexisting session classes — comparison, and why they cannot be united
+
+Both classes model "one full-duplex session", which makes the duplication
+look accidental. It is not: each is the session as seen from one side of the
+control plane, and the split is what the fence/lease design is built on.
+
+| Dimension | Serving `DuplexSession` — `entrypoints/openai/duplex/protocol.py` | Engine `DuplexSessionRuntimeState` — `engine/duplex/session.py` |
+|---|---|---|
+| Process / layer | API-server frontend, mutated on the WebSocket event loop | Engine process, inside `DuplexControlPlane` (owned by the `Orchestrator`) |
+| Owner / registry | `DuplexSessionRegistry.create()/get()/close()`; reconnects handled by `DuplexSessionAttachmentRegistry` | `DuplexSessionRuntimeManager.open_session()/require()/close_session()` |
+| Identity | `session_id` plus `incarnation` / `epoch` / `turn_id` counters that this side *originates* (barge-in advances the epoch here first) | A `DuplexFence` (`session_id`, `incarnation`, `epoch`, `turn_id`, `response_seq`) that this side *validates*: `accept_fence()` rejects any regression with `DuplexFenceMismatchError` |
+| Lifecycle | Client-facing: created at session open, survives WebSocket reconnects via attachment/resume, closed by protocol events or idle timeout | Lease-driven: `DuplexLeaseState` `touch`/`detach`/`resume` with generation counters; reaped by `collect_expired()` on `disconnect_grace_expired` / `idle_ttl_expired` |
+| State carried | Protocol aggregate: session + turn state machines, session config and per-response config snapshots (`response_config`), input buffer with byte/turn quotas, assistant text/audio-mark buffers, playback ledger, full conversation history | Resource ledger: stage bindings, per-`(stage_id, request_id)` request resources, input/turn sequence counters, completed-append LRU (replay dedupe), capabilities and config dicts guarded by `config_generation` |
+| Mutation discipline | Mutated freely in protocol-event order within one asyncio loop | Every mutating method takes a fence and validates monotonicity first; an epoch change resets the per-epoch input accounting |
+| Consumers | `serving.py`, `session_runner.py`, `chat_fallback.py`, `session_attachment.py` | `DuplexControlPlane`, `Orchestrator` (`duplex_sessions`, `_duplex_session_for_req_state`) |
+
+Why they cannot be united into one class:
+
+1. **Different processes.** The serving aggregate lives in the API-server
+   frontend; the engine state lives in the engine process behind the message
+   queue (control results correlate back via `("duplex", control_id)`). A
+   united object would have to be shared memory or continuously serialized —
+   the design instead ships narrow fences and control messages, which is the
+   entire point of the control plane.
+2. **Deliberately decoupled lifecycles.** A WebSocket drop detaches the
+   engine lease without destroying engine resources (attachment/resume
+   reattaches later); conversely the lease can expire and free engine
+   resources while the protocol object still exists to report the failure to
+   a resuming client. One class means one lifetime, re-coupling client
+   connectivity to engine resource ownership — the exact failure mode the
+   lease design removes.
+3. **Different consistency models.** Serving mutates optimistically as
+   client events arrive; the engine accepts only fence-monotonic transitions
+   and throws `DuplexFenceMismatchError` on stale writes — which is what
+   makes barge-in safe without locks. A merged class would need an
+   "as promised to the client" copy and an "as applied by the engine" copy of
+   every field plus reconciliation rules — the two classes would re-emerge as
+   two halves of the merged one.
+4. **Different data weight and trust.** Serving state contains user-supplied
+   payloads (pending audio, conversation history) that must never ride the
+   small-message control plane; engine state contains scheduler resource
+   handles the frontend must never mutate except through validated control
+   messages. A union either bloats every control message with history/audio
+   or exposes stage bindings to unvalidated frontend writes.
+5. **Import layering forbids it.** `engine/duplex/*` must not import from
+   `entrypoints/*`, and entrypoints already imports the engine kernel — a
+   merge in either direction creates a cycle or drags serving/protocol types
+   into every engine deployment. `test_stable_engine_imports_load_duplex_kernel_eagerly`
+   pins this direction.
+
+What the two *do* share is already factored out: `DuplexFence` and the
+capability/config shapes live in `engine/duplex/contracts.py` /
+`engine/duplex/messages.py`, imported by both sides. The contracts module is
+the intended union — identity and capability semantics unified, state
+holders separate.
+
+Name-collision footnote: a third class literally named `DuplexSession`
+(`experimental/fullduplex/core/session.py`) still exists. Everything left
+under `experimental/fullduplex/` is demo-only: `core/` is the minimal
+adapter runtime (single process, epoch-int barge-in) and `joyvl/` is the
+JoyVL interaction demo built on it, served by its own standalone server.
+This `DuplexSession` is the demo runtime's state machine — four states plus
+`epoch`/`response_index`, nothing else — and is never imported by stable
+runtime code (`test_runtime_adapter_boundary.py` enforces this). It keeps
+the name because the demo's `DuplexAdapter` protocol is typed against it;
+folding it into the serving aggregate would hand the demo the full
+Realtime-protocol machinery and couple demo churn to a stable class.
+Renames were explicitly out of scope for the migration.
 
 ## 11. Execution log (deviations found while executing and reviewing the move)
 
