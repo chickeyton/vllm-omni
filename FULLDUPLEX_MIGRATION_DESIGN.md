@@ -640,3 +640,57 @@ pairing), editable install of the migrated tree.
 - Environment gaps hit and resolved: `pytest-mock` was missing from the
   minimal test-dependency install.
 - Logs live in `/workspace/ngngaifai/fdx_test_run*.log` on the test server.
+
+## 13. Pre-move file disposition audit — no scripts were discarded
+
+Audit question: of the files that lived under
+`vllm_omni/experimental/fullduplex/` before the move, which were discarded?
+**Answer: none.** The pre-move tree held 62 files; the move commit
+(`1c7ecca8 "move code"`, verified with `git show --find-renames --name-status`)
+contains zero deletions under that path — 39 files were moved (git rename
+detection, similarity 91–100%; the deltas are the import-path rewrites of
+§5–§6) and 23 files stayed in place as the demo-only tree (§10.1). The
+pre-move tree is file-for-file identical to the upstream checkout at
+`d5d47e9b` (the last commit before the move).
+
+Old paths below are relative to `vllm_omni/experimental/fullduplex/`; new
+paths are relative to the repo root.
+
+### 13.1 Moved — filename or path shape changed (10 files)
+
+| Old path | New path |
+| --- | --- |
+| `DESIGN.md` | `docs/design/fullduplex.md` |
+| `client.py` | `vllm_omni/entrypoints/openai/duplex/client.py` |
+| `request_client.py` | `vllm_omni/entrypoints/duplex_request_client.py` |
+| `output.py` | `vllm_omni/outputs/duplex.py` |
+| `model_executor.py` | `vllm_omni/model_executor/duplex_sampling.py` |
+| `engine/duplex_control_client.py` | `vllm_omni/engine/duplex/control_client.py` |
+| `engine/duplex_control_plane.py` | `vllm_omni/engine/duplex/control_plane.py` |
+| `engine/duplex_runtime.py` | `vllm_omni/engine/duplex/runtime.py` |
+| `engine/duplex_session.py` | `vllm_omni/engine/duplex/session.py` |
+| `engine/__init__.py` | `vllm_omni/engine/duplex/__init__.py` (rewritten: re-exports for the renamed modules) |
+
+### 13.2 Moved — whole directory, filenames preserved (29 files)
+
+| Old directory | New directory | Files |
+| --- | --- | --- |
+| `engine/` (remaining files) | `vllm_omni/engine/duplex/` | `contracts.py`, `intermediate.py`, `lease.py`, `messages.py` (4) |
+| `openai/` | `vllm_omni/entrypoints/openai/duplex/` | `__init__.py`, `audio.py`, `chat_fallback.py`, `commit_policy.py`, `protocol.py`, `realtime_input.py`, `realtime_output.py`, `realtime_session.py`, `realtime_state.py`, `runtime_adapter.py`, `runtime_bridge.py`, `serving.py`, `session_attachment.py`, `session_runner.py`, `websocket.py` (15) |
+| `minicpmo45/` | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/` | `__init__.py`, `adapter.py`, `compat.py`, `data_plane.py`, `input.py`, `policy.py`, `runtime.py`, `serving_adapter.py`, `session.py`, `stage0.py` (10) |
+
+### 13.3 Retained in `experimental/fullduplex/` — demo-only tree (23 files)
+
+| Path | Files | Note |
+| --- | --- | --- |
+| `__init__.py` | 1 | unchanged |
+| `README.md` | 1 | updated by the move commit to describe the demo-only scope |
+| `core/` | 5 | minimal adapter runtime (`__init__.py`, `adapter.py`, `protocol.py`, `runtime.py`, `session.py`) |
+| `joyvl/` | 16 | JoyVL interaction demo (`adapter.py`, `bridges/`, `decision/`, `memory/`, `serving/` and their `__init__.py` files) |
+
+### 13.4 Discarded (0 files)
+
+None. 10 + 29 + 23 = 62 — every pre-move file is accounted for as either
+moved or retained. (The relocated test suites are covered separately in §6;
+they were likewise moved, not dropped, and two were later rewritten to pin
+the eager-import boundary — see §11.)
