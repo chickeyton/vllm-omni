@@ -7,6 +7,9 @@ from vllm_omni.entrypoints.openai.duplex.protocol import DuplexCapabilities
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.adapter import (
     MiniCPMO45NativeDuplexServingAdapter,
 )
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
+    minicpmo45_native_capabilities,
+)
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.data_plane import (
     MiniCPMO45DataPlaneContext,
     MiniCPMO45DataPlaneSession,
@@ -49,7 +52,7 @@ class MiniCPMO45ServingRuntimeAdapter:
 
     @staticmethod
     def capabilities(*, max_sessions: int) -> DuplexCapabilities:
-        return DuplexCapabilities.minicpmo45_native(max_sessions=max_sessions)
+        return minicpmo45_native_capabilities(max_sessions=max_sessions)
 
     @staticmethod
     def validate_client_extra_body(extra_body: object) -> None:

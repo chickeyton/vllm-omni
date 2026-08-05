@@ -8,8 +8,8 @@ import pytest
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 _REPO_ROOT = Path(__file__).parents[3]
-_CLIENT_MODULE = "vllm_omni.entrypoints.openai.duplex.client"
-_DUPLEX_PACKAGE = "vllm_omni.entrypoints.openai.duplex"
+_CLIENT_MODULE = "vllm_omni.model_executor.models.minicpmo_4_5.duplex.client"
+_CLIENT_PACKAGE = "vllm_omni.model_executor.models.minicpmo_4_5.duplex"
 
 
 def _imports_demo_client(path: Path) -> bool:
@@ -22,10 +22,7 @@ def _imports_demo_client(path: Path) -> bool:
         elif isinstance(node, ast.ImportFrom):
             if node.module == _CLIENT_MODULE:
                 return True
-            if node.module == _DUPLEX_PACKAGE and any(alias.name == "client" for alias in node.names):
-                return True
-            # relative import inside the duplex package: from .client import ...
-            if node.level > 0 and node.module == "client":
+            if node.module == _CLIENT_PACKAGE and any(alias.name == "client" for alias in node.names):
                 return True
     return False
 
@@ -43,6 +40,6 @@ def test_duplex_serving_stack_does_not_import_demo_client() -> None:
     offenders = [
         path.name
         for path in sorted(duplex_pkg.glob("*.py"))
-        if path.name != "client.py" and _imports_demo_client(path)
+        if _imports_demo_client(path)
     ]
     assert not offenders, f"duplex serving modules import the demo client: {offenders}"

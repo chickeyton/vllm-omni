@@ -93,6 +93,7 @@ vllm_omni/
 │           ├── chat_fallback.py     # ← openai/chat_fallback.py
 │           ├── commit_policy.py     # ← openai/commit_policy.py
 │           └── client.py            # ← client.py (top level) — demo/e2e WS client
+│                                    #   (moved again 2026-08-05 → model_executor/models/minicpmo_4_5/duplex/client.py, §15)
 │
 └── experimental/
     └── fullduplex/                  # REMAINS: joyvl only
@@ -116,8 +117,9 @@ every one is mapped above. The top-level `__init__.py` stays behind — its
   `MiniCPMO45PcmAppendBuffer`, `MiniCPMO45Stage0DuplexRuntime`) that
   `tests/entrypoints/openai_api/test_duplex_handler.py` imports at package
   level; the openai package re-exports `DuplexWebSocketActor`.
-- The new `entrypoints/openai/duplex/__init__.py` must **not** import
-  `client.py`: it raises `SystemExit` at import time when the optional
+- The serving stack must **not** import the demo WS client
+  (since 2026-08-05 at `model_executor/models/minicpmo_4_5/duplex/client.py`,
+  see §15): it raises `SystemExit` at import time when the optional
   `websockets` dependency is missing (it is a demo/e2e helper only).
 - Packaging needs no change: `pyproject.toml` uses
   `include = ["vllm_omni*"]`, which covers the new subpackages.
@@ -181,9 +183,10 @@ top-level (eager); the gates decide runtime behavior, not module loading.
     the `enable_duplex_control` / capability gates; only module loading
     changed.
   - Two imports stay dynamic by necessity: model adapters load via the
-    dotted-string plugin paths (config decides which module), and
-    `entrypoints/openai/duplex/client.py` (websockets demo helper that
-    raises `SystemExit` when `websockets` is missing) is never imported by
+    dotted-string plugin paths (config decides which module), and the
+    websockets demo helper (since 2026-08-05 at
+    `model_executor/models/minicpmo_4_5/duplex/client.py`; raises
+    `SystemExit` when `websockets` is missing) is never imported by
     runtime code.
   - Generic serving (`serving.py`, `runtime_bridge.py`, `session_runner.py`)
     must not import MiniCPM modules; the model is selected only via
@@ -234,8 +237,8 @@ output-side branching of `OP`/`RT` is annotated in §9.3.
 | `model_executor/stage_input_processors/minicpmo_4_5_omni.py` | → `vllm_omni.engine.duplex.intermediate`, `...models.minicpmo_4_5.duplex.input` |
 | `model_executor/models/minicpmo_4_5/pipeline.py` | dotted strings → `vllm_omni.model_executor.models.minicpmo_4_5.duplex.runtime.MiniCPMO45DuplexRuntimeExtension`, `...duplex.serving_adapter.MiniCPMO45ServingRuntimeAdapter` |
 | `model_executor/models/minicpmo_4_5/*.py` (3 model files) | import path updates |
-| `examples/online_serving/minicpmo/realtime_duplex_demo.py` | → `vllm_omni.entrypoints.openai.duplex.client` |
-| `tests/e2e/online_serving/minicpmo_realtime_duplex_scenarios.py` | → `vllm_omni.entrypoints.openai.duplex.client` |
+| `examples/online_serving/minicpmo/realtime_duplex_demo.py` | → `vllm_omni.entrypoints.openai.duplex.client` (since 2026-08-05: `vllm_omni.model_executor.models.minicpmo_4_5.duplex.client`, §15) |
+| `tests/e2e/online_serving/minicpmo_realtime_duplex_scenarios.py` | → `vllm_omni.entrypoints.openai.duplex.client` (since 2026-08-05: `vllm_omni.model_executor.models.minicpmo_4_5.duplex.client`, §15) |
 | `.buildkite/cuda/test-ready.yml`, `test-merge.yml` | in the "MiniCPM-o 4.5 Duplex Test" blocks, replace `vllm_omni/experimental/fullduplex/` with 3 dirs (`engine/duplex/`, `entrypoints/openai/duplex/`, `model_executor/models/minicpmo_4_5/duplex/`) + 3 files (`outputs/duplex.py`, `entrypoints/duplex_request_client.py`, `model_executor/duplex_sampling.py`) + new test dirs |
 | `pyproject.toml` | lint-ignore line is joyvl-only → unchanged |
 | `experimental/fullduplex/README.md` | trim to joyvl/core scope |
@@ -248,7 +251,7 @@ output-side branching of `OP`/`RT` is annotated in §9.3.
 | `engine/` — 6 files: `test_duplex_control_client.py`, `test_duplex_control_plane.py`, `test_duplex_deploy_config.py`, `test_duplex_intermediate.py`, `test_duplex_lease.py`, `test_duplex_runtime.py` | `tests/engine/duplex/` |
 | `openai/` — 3 files: `test_duplex_audio.py`, `test_websocket_actor.py`, `test_runtime_adapter_boundary.py` | `tests/entrypoints/openai/duplex/` |
 | `minicpmo45/` — 2 files: `test_commit_policy.py`, `test_input.py` | `tests/model_executor/models/minicpmo_4_5/duplex/` |
-| `test_client.py` | `tests/entrypoints/openai/duplex/` |
+| `test_client.py` | `tests/entrypoints/openai/duplex/` (since 2026-08-05: `tests/model_executor/models/minicpmo_4_5/duplex/`, §15) |
 | `test_runtime.py` (covers `core/` + joyvl adapter), `test_joyvl_*.py` | stay (joyvl/core scope) |
 
 - Tests already in stable locations (`tests/engine/test_duplex_import_boundary.py`,
@@ -257,8 +260,8 @@ output-side branching of `OP`/`RT` is annotated in §9.3.
 - `test_duplex_import_boundary.py` (revised 2026-08-03 with the eager-import
   follow-up) asserts that importing `Orchestrator` / `AsyncOmniEngine` /
   `AsyncOmni` loads the duplex kernel eagerly, while
-  `vllm_omni.model_executor.models.minicpmo_4_5.duplex` and
-  `vllm_omni.entrypoints.openai.duplex.client` are still **not** loaded
+  `vllm_omni.model_executor.models.minicpmo_4_5.duplex` (which since
+  2026-08-05 also contains the demo client, §15) is still **not** loaded
   (plugin-only / demo-only).
 - `__init__.py` convention per target: `tests/engine/` and
   `tests/model_executor/models/minicpmo_4_5/` use `__init__.py` → new `duplex/`
@@ -304,8 +307,8 @@ output-side branching of `OP`/`RT` is annotated in §9.3.
 
 - Import boundary (revised 2026-08-03): the duplex kernel imports eagerly
   with the stable engine; model-specific duplex adapters load only via the
-  dotted-string plugin paths, and the websockets demo client is never
-  imported by runtime code
+  dotted-string plugin paths, and the websockets demo client (since
+  2026-08-05 in the model folder, §15) is never imported by runtime code
   (guarded by the updated import-boundary test).
 - No behavior change: this is a pure relocation — no renamed public symbols,
   no logic edits, no new abstractions.
@@ -614,6 +617,19 @@ Renames were explicitly out of scope for the migration.
   `test_duplex_capability.py` (AST check that neither the API server nor the
   duplex serving stack imports `client.py`). Docs in §3/§5/§6/§8/§9 revised
   to match; §7 keeps the original migration narrative.
+- **Model-specific split follow-up (2026-08-05)**: after auditing
+  `entrypoints/openai/duplex/` for genericity against a second full-duplex
+  reference model (Moshi v0.2.5 source), the MiniCPM-specific pieces were
+  separated into the model folder (§15 records the audit):
+  `client.py` → `model_executor/models/minicpmo_4_5/duplex/client.py`
+  (with `test_client.py` relocated to mirror);
+  `DuplexCapabilities.minicpmo45_native()` classmethod → new
+  `model_executor/models/minicpmo_4_5/duplex/capabilities.py`
+  (`minicpmo45_native_capabilities()`); the test-only
+  `_minicpmo_session_state` / `_minicpmo_sessions` / `_minicpmo_data_plane`
+  compatibility accessors were deleted from `serving.py` (handler tests now
+  use the generic `_runtime_session_state` / `_serving_runtime_adapter`
+  accessors). No Moshi support was added; no runtime behavior changed.
 
 ## 12. Remote validation results (2026-07-31, migration commit cc324de3)
 
@@ -661,7 +677,7 @@ paths are relative to the repo root.
 | Old path | New path |
 | --- | --- |
 | `DESIGN.md` | `docs/design/fullduplex.md` |
-| `client.py` | `vllm_omni/entrypoints/openai/duplex/client.py` |
+| `client.py` | `vllm_omni/entrypoints/openai/duplex/client.py` (moved again 2026-08-05 → `vllm_omni/model_executor/models/minicpmo_4_5/duplex/client.py`, §15) |
 | `request_client.py` | `vllm_omni/entrypoints/duplex_request_client.py` |
 | `output.py` | `vllm_omni/outputs/duplex.py` |
 | `model_executor.py` | `vllm_omni/model_executor/duplex_sampling.py` |
@@ -694,3 +710,106 @@ None. 10 + 29 + 23 = 62 — every pre-move file is accounted for as either
 moved or retained. (The relocated test suites are covered separately in §6;
 they were likewise moved, not dropped, and two were later rewritten to pin
 the eager-import boundary — see §11.)
+
+## 14. HTTP/WebSocket endpoints added by the MiniCPM full-duplex work
+
+Routes mount at the app root (no router prefix — `api_server.py` calls
+`app.include_router(router)` with no `prefix=`), so the base URL is directly
+`http(s)://<host>:<port><path>` / `ws(s)://<host>:<port><path>`.
+
+### 14.1 Main OpenAI API server (`vllm_omni/entrypoints/openai/api_server.py`)
+
+The full-duplex feature added exactly **one** endpoint to the main server
+(verified with `git log -S` per route path):
+
+| Endpoint | Added by | Purpose |
+| --- | --- | --- |
+| `WS /v1/duplex` | `05b794f2` "[Full Duplex] Feat: Support Full-Duplex realtime runtime & add MiniCPM-o 4.5 demo (#3907)" | full-duplex session protocol; handler `OmniDuplexSessionHandler`; registered only when `should_enable_duplex_endpoint()` (`duplex_capability.py`) passes |
+
+Neighboring websocket routes that are **not** MiniCPM/duplex additions (each
+predates #3907 and belongs to a different feature): `/v1/realtime`
+(Qwen3-Omni session audio streaming, #2208), `/v1/realtime/video` (streaming
+diffusion video, #3737), `/v1/realtime/robot/openpi` (OpenPI robot serving,
+#3673), `/v1/audio/speech/stream` (Qwen3-TTS streaming audio, #1719),
+`/v1/video/chat/stream` (EVS streaming video input, #2342).
+
+### 14.2 MiniCPM realtime web demo server (standalone)
+
+`examples/online_serving/minicpmo/realtime_web/server.py` — its own FastAPI
+app on its own port, added by the same #3907 commit. It bridges a browser to
+the main server's `/v1/duplex`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /` | browser demo page (HTML) |
+| `GET /healthz` | liveness probe |
+| `WS /v1/realtime` | the demo's own socket (distinct from the main server's `/v1/realtime`); proxies to `/v1/duplex` |
+| `/static` (mount) | static assets for the demo page |
+
+### 14.3 JoyVL demo server (standalone, demo-only tree)
+
+`vllm_omni/experimental/fullduplex/joyvl/serving/server.py` — the standalone
+server of the JoyVL interaction demo (§10.1, §13.3).
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | liveness probe |
+| `GET /v1/models` | model listing |
+| `POST /v1/chat/completions` | OpenAI-compatible chat entry |
+| `POST /reset` | reset demo session state |
+| `POST /v1/streaming/reset` | reset streaming session |
+| `POST /v1/streaming/persona` | set demo persona |
+
+## 15. Serving-package genericity audit (2026-08-05): generic vs model-specific
+
+Audit question: which modules in `vllm_omni/entrypoints/openai/duplex/` are
+common to any full-duplex model, and which are MiniCPM-specific? Judged by
+inspecting every module plus a second full-duplex reference implementation
+(Moshi v0.2.5 source: one websocket, binary opus frames, a continuous
+encode–step–decode loop — no commits, turns, or response objects). The
+serving package's genericity boundary was already sound: all mode decisions
+run through `DuplexCapabilities` fields (e.g.
+`implementation_level == "model_native_duplex"`) or the
+`ServingRuntimeAdapter` protocol, never through model imports (enforced by
+`test_runtime_adapter_boundary.py` and `test_duplex_capability.py`).
+
+### 15.1 Generic modules (stay in `entrypoints/openai/duplex/`)
+
+| Module | Role |
+| --- | --- |
+| `websocket.py` | WebSocket actor: single inbound mailbox, single writer |
+| `serving.py` | session handler: handshake, lifecycle, capability-gated flow |
+| `session_runner.py` | per-session event loop / response scheduling |
+| `runtime_bridge.py` | serving ↔ engine bridge, capability-gated |
+| `runtime_adapter.py` | `ServingRuntimeAdapter` protocol (the plugin seam models implement) |
+| `protocol.py` | `DuplexSession` aggregate, `DuplexCapabilities`, config/registry |
+| `realtime_session.py`, `realtime_state.py`, `realtime_input.py`, `realtime_output.py` | OpenAI-Realtime wire projection |
+| `audio.py` | PCM/WAV codec helpers |
+| `commit_policy.py` | commit → response-scheduling decision (pure function on a snapshot) |
+| `chat_fallback.py` | fallback path to ordinary chat requests |
+| `session_attachment.py` | attachment transport handling |
+
+### 15.2 MiniCPM-specific pieces (moved to `model_executor/models/minicpmo_4_5/duplex/`)
+
+| Piece | Old location | New location |
+| --- | --- | --- |
+| demo/e2e websocket client (defaults `minicpmo45_native_duplex=1`; consumers are only MiniCPM examples and e2e tests) | `entrypoints/openai/duplex/client.py` | `model_executor/models/minicpmo_4_5/duplex/client.py` |
+| `test_client.py` (mirrors the module) | `tests/entrypoints/openai/duplex/` | `tests/model_executor/models/minicpmo_4_5/duplex/` |
+| `minicpmo45_native()` capability preset (only production caller was the MiniCPM serving adapter) | classmethod on `DuplexCapabilities` in `protocol.py` | `minicpmo45_native_capabilities()` in new `capabilities.py` |
+| `_minicpmo_session_state` / `_minicpmo_sessions` / `_minicpmo_data_plane` ("temporary compatibility accessors", test-only, pure delegation) | `serving.py` | deleted — tests use the generic accessors |
+
+### 15.3 Intentional MiniCPM references that remain in generic modules
+
+- `realtime_state.py` maps the `minicpmo45_native_duplex` query parameter
+  into default `extra_body`. The key is part of the public wire contract;
+  serving treats `extra_body` as opaque — only the model adapter interprets
+  it (`minicpmo_4_5/duplex/adapter.py::is_enabled`). Renaming would break
+  deployed clients.
+- MiniCPM-flavored wording in comments/error strings (e.g. the
+  `ref_audio_required` error text, the `duplex_generate`-loop docstring,
+  the omni-client wire-contract note in `realtime_input.py`). The checks
+  themselves are capability-gated generic code.
+- A Moshi-class (parallel-stream) model would implement
+  `ServingRuntimeAdapter` differently and skip the commit/turn machinery via
+  its own `DuplexCapabilities`; nothing was added to support that — this
+  audit only relocated MiniCPM-owned code.

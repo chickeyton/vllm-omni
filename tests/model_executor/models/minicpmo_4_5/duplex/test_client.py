@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from vllm_omni.entrypoints.openai.duplex.client import (
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
     RealtimeDuplexClient,
     RealtimeEventCollector,
     build_realtime_url,

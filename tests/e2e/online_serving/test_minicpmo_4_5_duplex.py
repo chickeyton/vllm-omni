@@ -27,7 +27,7 @@ from tests.helpers.minicpmo_4_5_duplex import (
     resolve_ref_audio,
     validated_input_wav,
 )
-from vllm_omni.entrypoints.openai.duplex.client import build_realtime_url
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import build_realtime_url
 
 pytestmark = pytest.mark.omni
 

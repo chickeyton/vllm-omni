@@ -49,7 +49,7 @@ if missing:
 
 forbidden_prefixes = (
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
-    "vllm_omni.entrypoints.openai.duplex.client",
+    "vllm_omni.model_executor.models.minicpmo_4_5.duplex.client",
 )
 loaded = sorted(
     name

@@ -751,18 +751,6 @@ class OmniDuplexSessionHandler(
     def _runtime_session_state(self, session: DuplexSession) -> ServingRuntimeSessionState:
         return self._serving_runtime_adapter.session_state(session.session_id)
 
-    # Temporary compatibility accessors for downstream tests and extensions.
-    def _minicpmo_session_state(self, session: DuplexSession) -> ServingRuntimeSessionState:
-        return self._runtime_session_state(session)
-
-    @property
-    def _minicpmo_sessions(self):
-        return self._serving_runtime_adapter.session_states
-
-    @property
-    def _minicpmo_data_plane(self):
-        return self._serving_runtime_adapter.data_plane
-
     def _should_force_listen_for_auto_response_overlap(
         self,
         session: DuplexSession,
