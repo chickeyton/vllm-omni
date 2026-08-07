@@ -60,9 +60,9 @@ from vllm_omni.engine.messages import (
 )
 from vllm_omni.engine.orchestrator import Orchestrator
 from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
-from vllm_omni.engine.stage_client import StageClient
+from vllm_omni.engine.stage.stage_core_client import StageCoreClientBase
+from vllm_omni.engine.stage.stage_replica_pool import StageReplicaPool as StagePool
 from vllm_omni.engine.stage_init_utils import build_stage0_input_processor
-from vllm_omni.engine.stage_pool import StagePool
 from vllm_omni.engine.stage_runtime import (
     StageRuntimeInfo,
     create_stage_runtime,
@@ -251,7 +251,7 @@ class AsyncOmniEngine:
         stage0_args = getattr(self.stage_configs[0], "engine_args", None) if self.num_stages > 0 else None
         self.async_chunk = bool(getattr(stage0_args, "async_chunk", False))
         self.stage_pools: list[StagePool] = []
-        self.stage_clients: list[StageClient] = []  # logical-stage view for external readers
+        self.stage_clients: list[StageCoreClientBase] = []  # logical-stage view for external readers
         self.input_processor: InputProcessor | None = None
         self.prompt_expand_func: Any | None = None
         self.supported_tasks: tuple[str, ...] = ("generate",)
@@ -315,8 +315,16 @@ class AsyncOmniEngine:
             from types import SimpleNamespace
 
             from vllm_omni.diffusion.data import resolve_model_class_name
+            from vllm_omni.diffusion.model_metadata import get_diffusion_model_metadata
 
-            self._diffusion_od_config_view = SimpleNamespace(model_class_name=resolve_model_class_name(self.model))
+            model_class_name = resolve_model_class_name(self.model)
+            metadata = get_diffusion_model_metadata(model_class_name)
+            self._diffusion_od_config_view = SimpleNamespace(
+                model_class_name=model_class_name,
+                supports_multimodal_inputs=metadata.supports_multimodal_inputs,
+                max_multimodal_image_inputs=metadata.max_multimodal_image_inputs,
+                supports_mixed_reference_inputs=metadata.supports_mixed_reference_inputs,
+            )
         return self._diffusion_od_config_view
 
     def _initialize_stages(self, stage_init_timeout: int) -> None:
@@ -343,9 +351,7 @@ class AsyncOmniEngine:
 
         self.num_stages = len(self.stage_configs)
         self.stage_pools = self._runtime.stage_pools
-        self.stage_clients = [
-            cast(StageClient, pool.stage_client) for pool in self.stage_pools if pool.stage_client is not None
-        ]
+        self.stage_clients = [pool.stage_client for pool in self.stage_pools if pool.stage_client is not None]
         self.stage_vllm_configs = [pool.stage_vllm_config for pool in self.stage_pools]
         self.output_processors = [pool.output_processor for pool in self.stage_pools]
         self.input_processor = (
@@ -1011,6 +1017,7 @@ class AsyncOmniEngine:
             "max_num_seqs": kwargs.get("max_num_seqs") or 1,
             "parallel_config": parallel_config,
             "model_class_name": kwargs.get("model_class_name", None),
+            "task_type": kwargs.get("task_type", None),
             "model_config": kwargs.get("model_config", None),
             "additional_config": kwargs.get("additional_config", None),
             "step_execution": kwargs.get("step_execution", False),
@@ -1024,6 +1031,7 @@ class AsyncOmniEngine:
             "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
             "enable_distributed_layerwise_offload": kwargs.get("enable_distributed_layerwise_offload", False),
             "dlo_use_allgather": kwargs.get("dlo_use_allgather", True),
+            "dlo_resident_layers": kwargs.get("dlo_resident_layers", 0),
             "enforce_eager": False if kwargs.get("enforce_eager") is None else kwargs.get("enforce_eager"),
             "diffusion_compile_granularity": (
                 "regional"
@@ -1320,7 +1328,7 @@ class AsyncOmniEngine:
         Input processing and output
         processor registration happen here in the caller's thread, avoiding
         a queue + coroutine-switch round-trip.  The Orchestrator receives a
-        ready-to-submit OmniEngineCoreRequest.
+        ready-to-submit StageLLMCoreRequest.
         """
         msg = self._build_add_request_message(
             request_id=request_id,
