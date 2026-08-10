@@ -4,9 +4,9 @@ This directory contains MiniCPM-o 4.5 online serving demos for vLLM-Omni.
 Inputs can include text, image, audio, or video; outputs are text and optional
 24 kHz speech.
 
-For the experimental native duplex runtime architecture, lifecycle invariants,
+For the native duplex runtime architecture, lifecycle invariants,
 capability boundary, and validation scope, see
-[`vllm_omni/experimental/fullduplex/DESIGN.md`](../../../vllm_omni/experimental/fullduplex/DESIGN.md).
+[`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md).
 
 ## Installation
 

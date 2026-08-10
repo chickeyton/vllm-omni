@@ -1,34 +1,15 @@
-# Experimental Full-Duplex Runtime
+# Experimental Full-Duplex
 
-This package contains three experimental integrations:
-
-- the existing JoyVL framework and example integration;
-- the MiniCPM-o 4.5 native audio path used by `/v1/duplex` and
-  `/v1/realtime?duplex=1`;
-- the PersonaPlex lockstep speech-to-speech path (browser demo + batched
-  serving, see `recipes/NVIDIA/PersonaPlex.md`).
-
-For the MiniCPM active runtime path, lifecycle invariants, capability boundary,
-Realtime response contract, and validation scope, see [`DESIGN.md`](DESIGN.md).
-
-To run JoyVL, see
-[`recipes/JD/JoyAI-VL-Interaction.md`](../../../recipes/JD/JoyAI-VL-Interaction.md).
-
-## Package boundaries
+This package contains two experimental integrations:
 
 ```text
-core/        model-agnostic duplex contracts (adapter, session, turn runtime)
-engine/      AsyncOmni/orchestrator scheduler data-plane adapter
-openai/      WebSocket transport, Realtime projection, and audio codecs
-minicpmo45/  MiniCPM input framing, policy, compatibility, and Stage0 state
+core/        generic duplex scaffold (adapter, session, turn runtime)
 joyvl/       JoyVL model-specific integration
 personaplex/ PersonaPlex lockstep engine, model-owned runtime, and serving
 ```
 
-MiniCPM does not run through the experimental `core.DuplexRuntime`
-facade. Its active path uses the `openai` session controller, the experimental
-engine contracts, the standard scheduler/model runners, and an injected
-MiniCPM-specific runtime extension from `minicpmo45/runtime.py`.
+To run JoyVL, see
+[`recipes/JD/JoyAI-VL-Interaction.md`](../../../recipes/JD/JoyAI-VL-Interaction.md).
 
 `personaplex/` is a Moshi-class, pure-lockstep speech-to-speech model on the
 `core/` contracts. It keeps `core/` untouched: the lockstep lifecycle (ONE
@@ -37,7 +18,23 @@ start/cancel-per-trigger one) is model policy and lives in the model package as
 `PersonaPlexDuplexRuntime`, mirroring the model-owned runtime shape of the
 MiniCPM-o duplex work. Its runnable serving path is `personaplex/serving/`
 (single-session lease or `--batch-size` elastic slots) over
-`personaplex/session.py` (lockstep driver).
+`personaplex/session.py` (lockstep driver). See also
+`recipes/NVIDIA/PersonaPlex.md`.
+
+The MiniCPM-o 4.5 native full-duplex runtime graduated out of this package.
+It now lives in the stable tree:
+
+```text
+vllm_omni/engine/duplex/                       engine control plane, sessions, leases
+vllm_omni/entrypoints/openai/duplex/           WebSocket serving and Realtime projection
+vllm_omni/entrypoints/duplex_request_client.py request/output lifecycle
+vllm_omni/model_executor/models/minicpmo_4_5/duplex/  MiniCPM adapter
+vllm_omni/model_executor/duplex_sampling.py    AR-runner sampling hook helper
+vllm_omni/outputs/duplex.py                    typed output decision envelope
+```
+
+For its architecture and validation scope, see
+[`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md).
 
 ## Adding a full-duplex model on the core contracts
 
