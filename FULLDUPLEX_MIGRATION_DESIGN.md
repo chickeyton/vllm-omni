@@ -954,6 +954,21 @@ stateDiagram-v2
 
 ## 17. Upstream delta — PersonaPlex (PR #4771): the migration's second wave
 
+> **Status: EXECUTED on this branch (2026-08-10).** Upstream main was merged
+> into `fullduplex` (merge commit `86b867f1`; conflicts: `api_server.py`
+> imports, `docs/design/index.md`, the experimental README, and the #5613
+> redaction test relocated to `tests/entrypoints/openai/duplex/`), and the
+> §17.2 plan below was applied verbatim: 8 glue files graduated to
+> `model_executor/models/personaplex/duplex/`, 7 demo files dropped, dotted
+> strings retargeted, keeper tests relocated to
+> `tests/model_executor/models/personaplex/`, boundary contract tests
+> extended to PersonaPlex. The two open dispositions from
+> `FULLDUPLEX_UPDATE_SITES_LAYOUT.md` were resolved as: the offline example
+> (`personaplex_offline.py`) was **dropped** with the demo set, and the e2e
+> driver (`personaplex_realtime_duplex.py`) was **kept** with its client
+> import retargeted to the moved demo client
+> (`models/minicpmo_4_5/duplex/client.py`).
+
 Upstream `vllm-project/vllm-omni` main merged
 "[Feature] PersonaPlex (Moshi-based full-duplex S2S): native vLLM port +
 duplex serving" (PR #4771, merged 2026-08-05): `nvidia/personaplex-7b-v1`,

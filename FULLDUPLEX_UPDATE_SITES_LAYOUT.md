@@ -63,13 +63,10 @@ examples/
 │   └── README.md                        # rewrite: standalone Moshi-web server is dropped (§17.2) —
 │                                        #   document /v1/duplex + /v1/realtime?duplex=1 serving instead
 └── offline_inference/personaplex/
-    └── personaplex_offline.py           # ⚠ DECISION NEEDED — imports PersonaPlexEngine/PersonaPlexSession,
-                                         #   i.e. the single-process trio §17.2 DROPS. Either
-                                         #   (a) drop this example with the demo set (offline PersonaPlex
-                                         #       inference unsupported until an offline path exists over the
-                                         #       stage machinery), or
-                                         #   (b) reclassify engine.py/runtime.py/session.py as the offline
-                                         #       Python API and graduate them (revisits §17.2's drop list).
+    └── personaplex_offline.py           # ✔ RESOLVED (2026-08-10): dropped with the demo set — it imports
+                                         #   PersonaPlexEngine/PersonaPlexSession, the single-process trio
+                                         #   §17.2 drops. Offline PersonaPlex inference is unsupported until
+                                         #   an offline path exists over the stage machinery.
 tests/
 ├── engine/
 │   ├── test_duplex_import_boundary.py   # contract: pin new eager/forbidden module lists (both waves)
@@ -88,9 +85,10 @@ tests/
 └── e2e/online_serving/
     ├── test_minicpmo_4_5_duplex.py      # client import retarget
     ├── minicpmo_realtime_duplex_scenarios.py
-    └── personaplex_realtime_duplex.py   # ⚠ imports the dropped top-level demo client
-                                         #   (experimental/fullduplex/client.py) — rewrite against the
-                                         #   /v1/duplex native dialect (cf. duplex_barge_in_demo.py) or drop
+    └── personaplex_realtime_duplex.py   # ✔ RESOLVED (2026-08-10): kept — one-line retarget of the demo
+                                         #   client import to models/minicpmo_4_5/duplex/client.py (the
+                                         #   client is protocol-generic; a neutral home for it is a
+                                         #   possible future cleanup)
 docs/design/
 ├── session-state-generalization.md      # path references → stable homes
 ├── session-state-generalization.engine-hosted-joyvl.bak.md  # historical — annotate, don't rewrite
@@ -103,9 +101,10 @@ Notes:
   above was already executed once on the `fullduplex` branch (design doc
   §5, §11, §15) and validated by the relocated suites; on upstream they
   must be replayed as a 3-way merge against drift, not cherry-picked.
-- **The two ⚠ items are the only open decisions.** Both exist because the
-  §17.2 drop list removes PersonaPlex's demo/offline surfaces; everything
-  else in this file is mechanical retargeting.
+- **Both former ⚠ items are resolved** (see the ✔ annotations above): the
+  offline example was dropped, the e2e driver kept with a retargeted client
+  import. Everything else in this file was mechanical retargeting, executed
+  on this branch on 2026-08-10 together with the upstream merge.
 - **What is deliberately absent:** `config/pipeline_registry.py`,
   `engine/arg_utils.py`, and the model GPU files' registration — they
   point at the stable model tree, which never moves. The `/v1/duplex` and
