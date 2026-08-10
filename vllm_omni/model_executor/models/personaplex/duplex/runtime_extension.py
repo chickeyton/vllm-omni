@@ -9,12 +9,12 @@ from typing import Any
 
 from vllm.sampling_params import SamplingParams
 
-from vllm_omni.experimental.fullduplex.engine.duplex_runtime import (
+from vllm_omni.engine.duplex.messages import DuplexFence
+from vllm_omni.engine.duplex.runtime import (
     DuplexAppendPlan,
     DuplexInputMode,
     DuplexOutputDecision,
 )
-from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence
 
 _FRAME_BYTES = 1920 * 4
 

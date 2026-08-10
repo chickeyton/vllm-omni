@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from vllm_omni.experimental.fullduplex.personaplex.policy import (
+from vllm_omni.model_executor.models.personaplex.duplex.policy import (
     AUDIO_SILENCE_FRAME_CNT,
     SILENCE_TOKENS,
     SINE_TOKENS,

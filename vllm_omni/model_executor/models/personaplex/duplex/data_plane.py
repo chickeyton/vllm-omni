@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from vllm_omni.experimental.fullduplex.engine.contracts import (
+from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_belongs_to_session,
 )
 

@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import numpy as np
 
-from vllm_omni.experimental.fullduplex.client import (
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
     RealtimeDuplexClient,
     wait_for,
     write_pcm16_wav,

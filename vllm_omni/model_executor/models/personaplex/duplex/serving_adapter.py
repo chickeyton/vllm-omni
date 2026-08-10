@@ -10,18 +10,18 @@ from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any
 
-from vllm_omni.experimental.fullduplex.openai.protocol import (
+from vllm_omni.entrypoints.openai.duplex.protocol import (
     DuplexCapabilities,
 )
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
 )
-from vllm_omni.experimental.fullduplex.personaplex.config import DEFAULT_PERSONA
-from vllm_omni.experimental.fullduplex.personaplex.data_plane import (
+from vllm_omni.model_executor.models.personaplex.duplex.config import DEFAULT_PERSONA
+from vllm_omni.model_executor.models.personaplex.duplex.data_plane import (
     PersonaPlexDataPlaneContext,
     PersonaPlexDataPlaneSession,
 )
-from vllm_omni.experimental.fullduplex.personaplex.input import (
+from vllm_omni.model_executor.models.personaplex.duplex.input import (
     PersonaPlexPcmAppendBuffer,
 )
 
@@ -163,7 +163,7 @@ class PersonaPlexServingRuntimeAdapter:
             raise ServingRuntimeConfigError("PersonaPlex model path is unavailable")
         voice = cls._voice_name(getattr(config, "voice", None))
         instructions = getattr(config, "instructions", None) or DEFAULT_PERSONA
-        from vllm_omni.experimental.fullduplex.personaplex.stage0 import (
+        from vllm_omni.model_executor.models.personaplex.duplex.stage0 import (
             personaplex_prefill_slots,
         )
 

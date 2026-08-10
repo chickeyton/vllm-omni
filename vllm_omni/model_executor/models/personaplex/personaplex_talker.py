@@ -420,7 +420,7 @@ class PersonaPlexTalkerForConditionalGeneration(nn.Module):
         runtime = getattr(self, "_personaplex_duplex_stage0_runtime", None)
         if runtime is not None:
             return runtime
-        from vllm_omni.experimental.fullduplex.personaplex.stage0 import (
+        from vllm_omni.model_executor.models.personaplex.duplex.stage0 import (
             PersonaPlexStage0DuplexRuntime,
         )
 

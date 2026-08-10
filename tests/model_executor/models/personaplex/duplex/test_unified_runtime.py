@@ -14,21 +14,21 @@ from vllm_omni.config.stage_config import (
     load_deploy_config,
     merge_pipeline_deploy,
 )
-from vllm_omni.experimental.fullduplex.engine.duplex_runtime import (
+from vllm_omni.engine.duplex.messages import DuplexFence
+from vllm_omni.engine.duplex.runtime import (
     DuplexInputMode,
 )
-from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence
-from vllm_omni.experimental.fullduplex.personaplex.data_plane import (
+from vllm_omni.model_executor.models.personaplex.duplex.data_plane import (
     PersonaPlexDataPlaneContext,
     PersonaPlexDataPlaneSession,
 )
-from vllm_omni.experimental.fullduplex.personaplex.input import (
+from vllm_omni.model_executor.models.personaplex.duplex.input import (
     PersonaPlexPcmAppendBuffer,
 )
-from vllm_omni.experimental.fullduplex.personaplex.runtime_extension import (
+from vllm_omni.model_executor.models.personaplex.duplex.runtime_extension import (
     PersonaPlexDuplexRuntimeExtension,
 )
-from vllm_omni.experimental.fullduplex.personaplex.serving_adapter import (
+from vllm_omni.model_executor.models.personaplex.duplex.serving_adapter import (
     PersonaPlexServingRuntimeAdapter,
 )
 from vllm_omni.model_executor.models.personaplex.pipeline import (
@@ -180,11 +180,11 @@ def test_e2e_driver_rejects_unexpected_input_sha256(tmp_path: Path) -> None:
     [
         (
             "duplex_runtime_extension",
-            "vllm_omni.experimental.fullduplex.personaplex.runtime_extension.PersonaPlexDuplexRuntimeExtension",
+            "vllm_omni.model_executor.models.personaplex.duplex.runtime_extension.PersonaPlexDuplexRuntimeExtension",
         ),
         (
             "duplex_serving_adapter",
-            "vllm_omni.experimental.fullduplex.personaplex.serving_adapter.PersonaPlexServingRuntimeAdapter",
+            "vllm_omni.model_executor.models.personaplex.duplex.serving_adapter.PersonaPlexServingRuntimeAdapter",
         ),
     ],
 )
