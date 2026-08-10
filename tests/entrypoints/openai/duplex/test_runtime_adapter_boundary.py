@@ -25,21 +25,27 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
         "vllm_omni.entrypoints.openai.duplex.serving",
     ],
 )
-def test_generic_openai_runtime_import_does_not_load_minicpmo45(module_name: str) -> None:
+def test_generic_openai_runtime_import_does_not_load_model_adapters(module_name: str) -> None:
     repo_root = Path(__file__).resolve().parents[4]
     script = f"""
 import sys
 
 import {module_name}
 
+model_duplex_prefixes = (
+    "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
+    "vllm_omni.model_executor.models.personaplex.duplex",
+)
 loaded = sorted(
     name
     for name in sys.modules
-    if name == "vllm_omni.model_executor.models.minicpmo_4_5.duplex"
-    or name.startswith("vllm_omni.model_executor.models.minicpmo_4_5.duplex.")
+    if any(
+        name == prefix or name.startswith(prefix + ".")
+        for prefix in model_duplex_prefixes
+    )
 )
 if loaded:
-    raise SystemExit("generic OpenAI runtime loaded MiniCPM-o: " + ", ".join(loaded))
+    raise SystemExit("generic OpenAI runtime loaded model duplex modules: " + ", ".join(loaded))
 """
 
     result = subprocess.run(

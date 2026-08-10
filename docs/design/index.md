@@ -14,6 +14,7 @@ in the active navigation.
 ### Runtime and stage execution
 
 - [Full-Duplex Runtime (MiniCPM-o 4.5)](fullduplex.md)
+- [Full-Duplex Runtime (PersonaPlex)](fullduplex-personaplex.md)
 - [Disaggregated Inference](feature/disaggregated_inference.md)
 - [Async Chunk](feature/async_chunk.md)
 - [Async Diffusion Output](feature/async_diffusion_output.md)

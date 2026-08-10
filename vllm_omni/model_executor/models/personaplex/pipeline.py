@@ -32,10 +32,10 @@ PERSONAPLEX_PIPELINE = PipelineConfig(
     model_arch="PersonaPlexTalkerForConditionalGeneration",
     default_deploy_config_name="personaplex.yaml",
     duplex_runtime_extension=(
-        "vllm_omni.experimental.fullduplex.personaplex.runtime_extension.PersonaPlexDuplexRuntimeExtension"
+        "vllm_omni.model_executor.models.personaplex.duplex.runtime_extension.PersonaPlexDuplexRuntimeExtension"
     ),
     duplex_serving_adapter=(
-        "vllm_omni.experimental.fullduplex.personaplex.serving_adapter.PersonaPlexServingRuntimeAdapter"
+        "vllm_omni.model_executor.models.personaplex.duplex.serving_adapter.PersonaPlexServingRuntimeAdapter"
     ),
     duplex_control_enabled=True,
     stages=(
