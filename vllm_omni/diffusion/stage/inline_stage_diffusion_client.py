@@ -8,6 +8,8 @@ IPC overhead. Used when there is only a single diffusion stage.
 from __future__ import annotations
 
 import asyncio
+import copy
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
@@ -78,6 +80,8 @@ class InlineStageDiffusionClient(StageCoreClientBase):
         self._tasks: dict[str, asyncio.Task] = {}
         self._engine_dead = False
         self._shutting_down = False
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
 
         self._engine.executor.register_failure_callback(self._mark_engine_dead)
 
@@ -108,15 +112,25 @@ class InlineStageDiffusionClient(StageCoreClientBase):
 
     async def add_request_async(self, request: StageDiffusionCoreRequest) -> None:
         # The pool hands the inline client the original
-        # ``OmniDiffusionSamplingParams`` unmodified (no process boundary), so
-        # per-output ``generator`` state and ``modules`` are preserved. Use it
-        # as-is. For robustness we still accept the plain-dict wire form (used by
-        # the out-of-process client) and reconstruct the dataclass in-process;
-        # in that case a stripped ``generator`` is recreated from ``seed`` by the
+        # ``OmniDiffusionSamplingParams`` unmodified (no process boundary). Each
+        # request mutates its sampling state while it is normalized and
+        # executed, and callers commonly reuse one params object for concurrent
+        # requests, so take a copy synchronously before either task starts.
+        # ``generator`` and ``modules`` are kept by reference: advancing
+        # per-output generator state and passing live component modules through
+        # unchanged is the reason the inline path bypasses the lossy wire form.
+        # For robustness we still accept the plain-dict wire form (used by the
+        # out-of-process client) and reconstruct the dataclass in-process; in
+        # that case a stripped ``generator`` is recreated from ``seed`` by the
         # engine, matching the out-of-process path.
         sp = request.sampling_params
         if isinstance(sp, OmniDiffusionSamplingParams):
-            sampling_params = sp
+            memo: dict[int, Any] = {id(sp.modules): sp.modules}
+            generators = sp.generator if isinstance(sp.generator, list) else [sp.generator]
+            for gen in generators:
+                if gen is not None:
+                    memo[id(gen)] = gen
+            sampling_params = copy.deepcopy(sp, memo)
         else:
             sampling_params = OmniDiffusionSamplingParams(**sp)
         logger.debug(
@@ -363,19 +377,25 @@ class InlineStageDiffusionClient(StageCoreClientBase):
     def shutdown(self, timeout: float | None = None) -> None:
         # ``timeout`` is part of the StageCoreClientBase contract; inline shutdown
         # is synchronous and deterministic, so it is accepted but unused.
-        self._shutting_down = True
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutting_down = True
 
-        # Cancel all pending tasks
-        for task in self._tasks.values():
-            task.cancel()
+            # Cancel all pending tasks
+            for task in self._tasks.values():
+                task.cancel()
 
-        try:
-            # Cancel queued futures and wait for the running one to complete deterministically
-            self._executor.shutdown(wait=True, cancel_futures=True)
-        except Exception:
-            pass
+            try:
+                # Stop the engine first so any control RPC running in the thread
+                # pool can observe shutdown instead of keeping stage teardown
+                # blocked while the executor waits for that RPC.
+                self._engine.close()
+            except Exception:
+                pass
 
-        try:
-            self._engine.close()
-        except Exception:
-            pass
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except Exception:
+                pass
+            self._shutdown_complete = True
