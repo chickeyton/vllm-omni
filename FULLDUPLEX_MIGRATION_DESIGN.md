@@ -72,6 +72,21 @@ vllm_omni/
 │           ├── stage0.py            # ← minicpmo45/stage0.py — Stage0 conversation state
 │           ├── runtime.py           # ← minicpmo45/runtime.py — MiniCPMO45DuplexRuntimeExtension
 │           └── compat.py            # ← minicpmo45/compat.py — HF remote-config patching
+│   └── models/personaplex/          # (second wave, §17 — upstream PR #4771)
+│       └── duplex/                  # NEW — production /v1/duplex path only
+│           ├── __init__.py          # ← personaplex/__init__.py, rewritten: drop demo re-exports
+│           ├── serving_adapter.py   # ← personaplex/serving_adapter.py — PersonaPlexServingRuntimeAdapter (seam 1)
+│           ├── runtime_extension.py # ← personaplex/runtime_extension.py — PersonaPlexDuplexRuntimeExtension (seam 2)
+│           ├── stage0.py            # ← personaplex/stage0.py — frame stepping on the stage runner
+│           ├── policy.py            # ← personaplex/policy.py — frame/turn policy
+│           ├── data_plane.py        # ← personaplex/data_plane.py — frame data-plane projection
+│           ├── input.py             # ← personaplex/input.py — audio framing
+│           └── config.py            # ← personaplex/config.py — PersonaPlexConfig, DEFAULT_PERSONA
+│                                    # DROPPED (demo, not migrated): personaplex/adapter.py (core-scaffold
+│                                    # demo adapter), engine.py + runtime.py + session.py (single-process
+│                                    # frame engine used only by the demo surfaces), serving/server.py +
+│                                    # serving/batched.py + serving/__init__.py (standalone Moshi-web-client
+│                                    # server). Production serving is the generic /v1/duplex stack.
 │
 ├── entrypoints/
 │   ├── duplex_request_client.py     # ← request_client.py — beside client_request_state.py it uses
@@ -103,11 +118,14 @@ vllm_omni/
         └── joyvl/                   # untouched
 ```
 
-File count check: the experimental package (excluding `core/`, `joyvl/`,
-`README.md`, `DESIGN.md`, and the top-level `__init__.py`) holds
-9 engine + 15 openai + 10 minicpmo45 + 4 top-level modules = 38 files;
-every one is mapped above. The top-level `__init__.py` stays behind — its
-`core` re-exports are joyvl-scope; `DESIGN.md` → `docs/design/fullduplex.md`.
+File count check (first wave): the experimental package (excluding
+`core/`, `joyvl/`, `README.md`, `DESIGN.md`, and the top-level
+`__init__.py`) holds 9 engine + 15 openai + 10 minicpmo45 + 4 top-level
+modules = 38 files; every one is mapped above. The top-level
+`__init__.py` stays behind — its `core` re-exports are joyvl-scope;
+`DESIGN.md` → `docs/design/fullduplex.md`. Second wave (§17, upstream
+PR #4771): `personaplex/` holds 12 + 3 serving = 15 files; 8 graduate
+into the tree above, 7 demo scripts are dropped (see §17.2).
 
 - `DESIGN.md` moves to `docs/design/fullduplex.md` (`docs/design/` already
   exists), with module paths updated.
@@ -515,6 +533,7 @@ Decision annotations:
 Both classes model "one full-duplex session", which makes the duplication
 look accidental. It is not: each is the session as seen from one side of the
 control plane, and the split is what the fence/lease design is built on.
+(Diagrammed in §16.1.)
 
 | Dimension | Serving `DuplexSession` — `entrypoints/openai/duplex/protocol.py` | Engine `DuplexSessionRuntimeState` — `engine/duplex/session.py` |
 |---|---|---|
@@ -571,6 +590,8 @@ Name-collision footnote: a third class literally named `DuplexSession`
 under `experimental/fullduplex/` is demo-only: `core/` is the minimal
 adapter runtime (single process, epoch-int barge-in) and `joyvl/` is the
 JoyVL interaction demo built on it, served by its own standalone server.
+(True on this branch — upstream main has since added a second `core/`
+consumer, PersonaPlex; see §17.)
 This `DuplexSession` is the demo runtime's state machine — four states plus
 `epoch`/`response_index`, nothing else — and is never imported by stable
 runtime code (`test_runtime_adapter_boundary.py` enforces this). It keeps
@@ -813,3 +834,218 @@ run through `DuplexCapabilities` fields (e.g.
   `ServingRuntimeAdapter` differently and skip the commit/turn machinery via
   its own `DuplexCapabilities`; nothing was added to support that — this
   audit only relocated MiniCPM-owned code.
+
+## 16. Module relationship diagrams (2026-08-06)
+
+Four diagrams summarizing how the major full-duplex modules relate. They
+complement (not replace) the earlier figures: §3 carries the full layering
+graph with decision annotations, §4 the runtime path, §9.1–§9.3 the
+orchestrator internals. Reading order here: identity → layering → data
+path → lifecycle.
+
+### 16.1 One session, two processes (the §10.1 split, drawn)
+
+The two session classes are one identity split across the process boundary.
+Only fence-stamped messages cross; the engine validates fences monotonically
+instead of taking cross-process locks.
+
+```mermaid
+flowchart LR
+    subgraph API["API-server process"]
+        H["OmniDuplexSessionHandler<br/>entrypoints/openai/duplex/serving.py"]
+        S["DuplexSession · protocol.py<br/>owner: DuplexSessionRegistry<br/>originates incarnation / epoch / turn_id<br/>config snapshots · input quotas<br/>playback ledger · history"]
+        H --> S
+    end
+    subgraph ORCH["Orchestrator process"]
+        CP["DuplexControlPlane<br/>engine/duplex/control_plane.py"]
+        R["DuplexSessionRuntimeState · session.py<br/>owner: DuplexSessionRuntimeManager<br/>accept_fence validation<br/>lease · stage bindings · request resources<br/>completed-append LRU · config_generation"]
+        CP --> R
+    end
+    S -->|"open / append / signal / close<br/>+ DuplexFence {session, incarnation,<br/>epoch, turn_id, response_seq}"| CP
+    CP -->|"control results keyed<br/>(duplex, control_id) via RpcResultRouter"| S
+```
+
+Barge-in is an epoch bump on the serving side; any message still carrying
+the old epoch fails fence validation on the engine side
+(`DuplexFenceMismatchError`) — that replaces distributed locking entirely.
+
+### 16.2 Layers and the two plugin seams
+
+Solid edges are ordinary eager imports inside the generic layers. Exactly
+two dashed edges reach model code — the dotted-string paths from the
+model's `pipeline.py`. A second model adds a folder, not generic edits.
+
+```mermaid
+flowchart TD
+    subgraph EP["entrypoints/openai/duplex/ — generic serving"]
+        API2["api_server.py · WS /v1/duplex"]
+        STACK["session stack<br/>websocket · serving · session_runner ·<br/>runtime_bridge · chat_fallback"]
+        PROJ["wire projection<br/>realtime_input / output / session / state"]
+        SHARED["shared state<br/>protocol · audio · commit_policy ·<br/>session_attachment"]
+        SEAM1["runtime_adapter.py<br/>ServingRuntimeAdapter protocol — seam 1"]
+        API2 -->|session_mode gate| STACK
+        STACK --- PROJ
+        STACK --- SHARED
+        STACK --> SEAM1
+    end
+    subgraph EK["engine/duplex/ — generic kernel (eager imports)"]
+        CLI["async_omni.py +<br/>duplex_request_client.py"]
+        CC2["control_client.py"]
+        CP2["control_plane.py +<br/>session · lease · messages · contracts"]
+        LOAD["runtime.py — extension loader — seam 2<br/>orchestrator.py — intake + DuplexStagePort"]
+        CLI --> CC2 --> CP2 --> LOAD
+    end
+    subgraph MDL["model_executor/models/minicpmo_4_5/duplex/ — MiniCPM only"]
+        SA["serving_adapter.py (implements seam 1)"]
+        EXT2["stage0.py + data_plane.py + policy.py<br/>(implements seam 2)"]
+        MISC["adapter · capabilities · session ·<br/>input · compat · client (demo)"]
+    end
+    STACK -->|"open / append / signal / close"| CLI
+    SEAM1 -.->|"pipeline.py string:<br/>duplex_serving_adapter"| SA
+    LOAD -.->|"pipeline.py string:<br/>duplex_runtime_extension"| EXT2
+```
+
+### 16.3 The runtime loop — one audio chunk, round trip
+
+The live path is a ring; both crossings of the process boundary are queues,
+never calls. The model decides listen-or-speak per chunk inside Stage0; the
+decision rides the output as a `DuplexOutputDecision` envelope. Outputs
+whose request id was not preregistered by `duplex_request_client.py` are
+dropped — that is how stale audio dies after a barge-in.
+
+```mermaid
+flowchart LR
+    WS2[client] -->|PCM| ACT[websocket.py<br/>actor mailbox]
+    ACT --> HND[serving.py +<br/>session_runner.py]
+    HND -->|append| CLI2[async_omni.py<br/>request_client · control_client]
+    CLI2 -->|"queue (fence-stamped)"| CPL[control_plane.py<br/>fence accept]
+    CPL -->|dispatch| EXT3[stage0.py runtime ext<br/>minicpmo_4_5/duplex/]
+    EXT3 -->|wakes resumable request| SPO[StagePool<br/>Stage0 LLM → Stage1 TTS/Token2Wav]
+    SPO -->|chunks| OPR[output processor<br/>outputs/duplex.py attaches<br/>DuplexOutputDecision]
+    OPR -->|"queue (preregistered request id)"| RTO[realtime_output.py<br/>projection]
+    RTO -->|audio deltas · listen/speak| ACT2[websocket.py<br/>single writer]
+    ACT2 --> WS2
+```
+
+### 16.4 Two request lifecycles on one scheduler
+
+Same `StagePool` and scheduler; the difference is one state and who owns
+identity. Interruption never destroys the duplex request — it only advances
+the fence, and the parked request keeps its KV.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "one-shot · identity = request" as OS {
+        [*] --> RUNNING
+        RUNNING --> FINISHED: EOS — KV freed
+    }
+    state "duplex resumable · identity = session" as DX {
+        [*] --> ACTIVE
+        ACTIVE: RUNNING
+        PARKED: WAITING_FOR_STREAMING_REQ — KV retained
+        ACTIVE --> PARKED: segment stop
+        PARKED --> ACTIVE: next append (fence validated)
+        ACTIVE --> DONE: close / lease expiry
+        PARKED --> DONE: close / lease expiry (reaper)
+        DONE: FINISHED — KV freed
+    }
+```
+
+## 17. Upstream delta — PersonaPlex (PR #4771): the migration's second wave
+
+Upstream `vllm-project/vllm-omni` main merged
+"[Feature] PersonaPlex (Moshi-based full-duplex S2S): native vLLM port +
+duplex serving" (PR #4771, merged 2026-08-05): `nvidia/personaplex-7b-v1`,
+a Moshi finetune — the parallel-stream duplex tier that
+`FULLDUPLEX_NEXT_MODELS_LAYOUT.md` §4 sketched is now real, and it was
+added **into the old experimental layout**. Consequence for this
+migration: graduating `experimental/fullduplex/` on top of current
+upstream main means moving **two** model trees, not one —
+`minicpmo45/` (already replayed on this branch, §2–§7 and §15) **and**
+`personaplex/`.
+
+### 17.1 What upstream added, where
+
+- Model classes are **already stable**:
+  `model_executor/models/personaplex/` — `modeling_helium.py` (temporal
+  transformer), `personaplex_depformer.py`, `personaplex_mimi.py`,
+  `personaplex_talker.py`, `personaplex_temporal.py`,
+  `personaplex_code2wav.py`, configs, `pipeline.py`. Registered in
+  `config/pipeline_registry.py`; `engine/arg_utils.py` patches
+  `model_type=personaplex` (the checkpoint ships an empty `config.json`).
+- Duplex glue is **experimental**:
+  `experimental/fullduplex/personaplex/` — 15 files: `adapter.py`,
+  `config.py`, `data_plane.py`, `engine.py` (`FrameStepper` /
+  `PersonaPlexEngine` — the ~80 ms frame loop), `input.py`, `policy.py`,
+  `runtime.py`, `runtime_extension.py`, `serving_adapter.py`,
+  `session.py`, `stage0.py`, `__init__.py`, and
+  `serving/{server.py, batched.py, __init__.py}`.
+- It plugs into the **same two seams** this design defends:
+  `pipeline.py` sets `duplex_runtime_extension` and
+  `duplex_serving_adapter` dotted strings (currently pointing into
+  `experimental.fullduplex.personaplex.*`) plus
+  `duplex_control_enabled=True`, and `deploy/personaplex.yaml` sets
+  `session_mode: duplex` — so the generic serving handler serves
+  PersonaPlex over `/v1/duplex` exactly as it serves MiniCPM. One gate
+  difference: `PersonaPlexServingRuntimeAdapter.is_enabled()` returns
+  `True` unconditionally (no extra-body opt-in — every session on a
+  PersonaPlex deployment is native), and its capability preset switches
+  the generic machinery to continuous mode
+  (`supports_client_commit=False`, `supports_external_turn_signal=False`,
+  `supports_barge_in=False`, model-native turn policy). It is therefore
+  the second real implementation of both seams — the §15.3 caveat ("the
+  seam has never been proven by a second model") is resolved at upstream
+  head, and by a Moshi-class model at that.
+- It also ships a **standalone serving surface**:
+  `serving/server.py` is an aiohttp server compatible with the official
+  Moshi web client — binary WS protocol at `/api/chat` (opus in/out,
+  inner-monologue text) plus a raw-PCM `/v1/audio/duplex` endpoint —
+  with `serving/batched.py` providing elastic batching (up to 32
+  concurrent sessions per GPU within the frame budget). Note for §14:
+  these are endpoints of PersonaPlex's own server, not the main API
+  server.
+
+### 17.2 Move plan for the PersonaPlex tree (mirrors §2/§15 conventions;
+target tree drawn in §2)
+
+Decision (2026-08-06): only the production `/v1/duplex` path graduates;
+all PersonaPlex demo scripts are **dropped**, not migrated. The demo set
+was determined from the import graph: `engine.py`/`runtime.py`/
+`session.py` (the single-process frame engine) are consumed only by
+`adapter.py` (the `core/`-scaffold demo adapter) and the standalone
+Moshi-web-client server — never by the engine-integrated path.
+
+| From `experimental/fullduplex/personaplex/` | Disposition |
+| --- | --- |
+| `serving_adapter.py`, `runtime_extension.py`, `stage0.py`, `policy.py`, `data_plane.py`, `input.py`, `config.py`, `__init__.py` (rewritten) | → `vllm_omni/model_executor/models/personaplex/duplex/` |
+| `adapter.py` (core-scaffold demo adapter) | **dropped** |
+| `engine.py`, `runtime.py`, `session.py` (single-process frame engine, demo-only consumers) | **dropped** |
+| `serving/server.py`, `serving/batched.py`, `serving/__init__.py` (standalone Moshi-web-client server, opus UI) | **dropped** |
+| dotted strings in `models/personaplex/pipeline.py` | retarget to `vllm_omni.model_executor.models.personaplex.duplex.*` |
+| `tests/e2e/features/fullduplex/personaplex/` + `test_personaplex_*.py` | tests of migrated modules → `tests/model_executor/models/personaplex/duplex/`; tests of dropped demo modules (standalone server, batched manager, core adapter, single-process engine) are dropped with them; the online driver stays under `tests/e2e/online_serving/` if it targets `/v1/duplex`, else dropped |
+
+### 17.3 Complications the second wave adds
+
+1. **`core/` is no longer joyvl-only at upstream head.** PersonaPlex's
+   `__init__.py` and `adapter.py` implement the `core/` scaffold's
+   `DuplexAdapter` protocol (same as JoyVL) for its single-process demo
+   runtime path, alongside the engine-integrated extension. Resolved by
+   the §17.2 decision: `adapter.py` is a demo script and is dropped, so
+   after the move `core/` is joyvl-only again and the §10.1/§13.3
+   demo-only classification holds without changes.
+2. **Replay is a 3-way merge, not a rename.** Upstream's
+   `experimental/{engine,openai}/` have drifted since this branch's fork
+   point (`d5d47e9b`), so the §2–§7 move must be replayed against
+   upstream content, not cherry-picked from this branch's commits.
+3. **The layout sketch's Moshi-tier prediction needs one revision.**
+   `FULLDUPLEX_NEXT_MODELS_LAYOUT.md` §4 predicted the parallel-stream
+   tier would force generic growth (`frame_session.py`, new capability
+   fields, a persistent-request engine mode). Upstream needed none of it:
+   the *existing* capability payload already expresses continuous mode
+   (commit/turn-signal/barge-in flags off, model-native policy on), so
+   PersonaPlex runs through the generic `/v1/duplex` stack — fences,
+   leases, and all — with zero generic edits. The standalone aiohttp
+   server (`/api/chat`) is an *additional* surface for official-Moshi-
+   client compatibility (opus framing), not a replacement for the
+   session stack.

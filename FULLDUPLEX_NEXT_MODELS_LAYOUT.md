@@ -194,3 +194,39 @@ folder).
 The ordering is also the recommended implementation order: the first three
 validate that the existing seams generalize (cheap, additive), and only
 then does the Moshi tier justify touching generic code.
+
+## 7. Addendum (2026-08-06): the Moshi tier arrived as PersonaPlex
+
+Upstream merged PersonaPlex (`nvidia/personaplex-7b-v1`, a Moshi finetune —
+PR #4771) the day before this addendum, into the **old experimental
+layout**. Sketch vs. reality:
+
+- **Model folder: close to §4's prediction.** The stable
+  `model_executor/models/personaplex/` holds the Moshi architecture
+  (Helium temporal transformer, depformer, Mimi, Code2Wav); the
+  experimental duplex glue has the predicted roles under different names
+  (`engine.py` `FrameStepper` ≈ `frame_runtime.py`; inner-monologue text
+  handled in the frame outputs rather than a separate `monologue.py`).
+- **Generic layer: prediction wrong, in an instructive way.** §4 assumed
+  the frame tier would grow the generic stack (`frame_session.py`, new
+  capability fields, a persistent-request engine mode). Upstream needed
+  none of it: the existing capability payload already expresses
+  continuous mode (`supports_client_commit=False`,
+  `supports_external_turn_signal=False`, `supports_barge_in=False`,
+  model-native turn policy), so PersonaPlex is served by the generic
+  `/v1/duplex` handler with zero generic edits — its adapter's
+  `is_enabled()` is unconditionally `True`, every session on a
+  PersonaPlex deployment is native. The standalone aiohttp server
+  speaking the official Moshi binary WS protocol (`/api/chat`, opus +
+  text; raw-PCM `/v1/audio/duplex`; elastic batching ≤32 sessions/GPU in
+  the ~80 ms frame budget) is an *additional* compatibility surface, not
+  a replacement for the session stack.
+- **It also implements both §-seams** (`duplex_runtime_extension`,
+  `duplex_serving_adapter`, `duplex_control_enabled=True`) — the second
+  real implementation of the plugin seams, validating the "a new model
+  adds a folder" rule this sketch is built on.
+
+Migration consequence: graduating `experimental/fullduplex/` on top of
+current upstream main now moves two model trees (`minicpmo45/`,
+`personaplex/`) — see `FULLDUPLEX_MIGRATION_DESIGN.md` §17 for the move
+plan and complications (including that `core/` gained a second consumer).
