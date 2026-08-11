@@ -39,8 +39,8 @@ session was rejected and capacity returned after one session closed. The two
 accepted sessions independently completed their audio, transcript, response,
 playback, and close lifecycles. This is isolation and admission evidence for the
 tested two-session deployment, not a production fairness, arbitrary-capacity,
-or failure-recovery claim. The validated paths include the experimental runtime
-extension, typed resumable policy, extracted control plane and clients, request
+or failure-recovery claim. The validated paths include the MiniCPM duplex
+runtime extension, typed resumable policy, extracted control plane and clients, request
 preregistration, typed direct-output decision, engine-managed two-session
 capacity in the checked-in deploy profile, separate public/runtime configuration
 channels, private Session ledgers, ordered `session.update`, the MiniCPM runner
@@ -89,7 +89,7 @@ WebSocket
   -> AsyncOmni thin open/append/signal/close proxies
   -> DuplexControlClient over the engine-owned correlated RPC transport
   -> DuplexControlPlane + DuplexSessionRuntimeManager
-  -> experimental DuplexRuntimeExtension + engine session/stage bindings
+  -> MiniCPM DuplexRuntimeExtension + engine session/stage bindings
   -> StagePool
   -> resumable scheduler request
   -> MiniCPM Stage0
@@ -517,9 +517,9 @@ The MiniCPM Stage1 input processor consumes that capability for token-faithful
 delta transcripts. The generic orchestrator no longer installs or names a
 MiniCPM-specific bridge-state key.
 
-The stable API server inspects the deployment `session_mode` before importing or
-constructing the experimental duplex handler. Ordinary deployments do not load
-the full-duplex serving package or create its registries and background state.
+The stable API server imports the duplex serving package eagerly and inspects
+the deployment `session_mode` before constructing the duplex handler. Ordinary
+deployments do not create its registries and background state.
 For an enabled deployment, the client still selects the Realtime duplex route
 with `?duplex=1` (or an equivalent explicit true value). Model-name matching is
 not used for routing or native-runtime activation. MiniCPM clients explicitly

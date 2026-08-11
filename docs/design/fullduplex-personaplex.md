@@ -23,16 +23,18 @@ The target is the engine-native path:
   -> response.audio.delta + response.audio_transcript.delta
 ```
 
-The standalone `/api/chat` and `/v1/audio/duplex` server remains a compatibility
-surface. It is not evidence that the unified engine path works.
+The standalone `/api/chat` and `/v1/audio/duplex` server that accompanied the
+original PR was demo-only and has been removed from the tree; the unified
+engine path above is the only serving surface. It was never evidence that the
+unified engine path works.
 
-## Why configuration-only enablement is invalid
+## Why configuration-only enablement was invalid
 
-The current staged pipeline is explicitly turn based. Its Talker reads
-`pplex_user_codes`, `pplex_prefill_text`, and `pplex_silence_codes`, but no
-production staged input path writes those fields. The voice prompt, persona
-prefill, and streaming Mimi state live only in the standalone
-`PersonaPlexEngine`.
+The staged pipeline as shipped by the original PR was explicitly turn based.
+Its Talker read `pplex_user_codes`, `pplex_prefill_text`, and
+`pplex_silence_codes`, but no production staged input path wrote those fields.
+The voice prompt, persona prefill, and streaming Mimi state lived only in the
+standalone `PersonaPlexEngine` (demo-only, since removed).
 
 Setting only the following fields would therefore advertise an endpoint whose
 model never receives the live microphone stream:
@@ -210,8 +212,8 @@ turn boundary.
 - New sessions cannot observe the previous voice, persona, PCM tail, Mimi
   convolution state, or Talker delayed code frame.
 
-The legacy `PersonaPlexDuplexRuntime.run()` and standalone server drain path
-must follow the same exception-safe rule while they remain in the tree.
+(The legacy `PersonaPlexDuplexRuntime.run()` and standalone server drain path,
+which followed the same exception-safe rule, have been removed from the tree.)
 
 ## Testing and acceptance
 
