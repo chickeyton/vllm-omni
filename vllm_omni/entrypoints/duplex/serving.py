@@ -17,6 +17,9 @@ from vllm.logger import init_logger
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
 from vllm_omni.engine.duplex.messages import DuplexFence, DuplexSessionLifecycleMessage
 from vllm_omni.engine.duplex.runtime import duplex_resource_request_id
+from vllm_omni.entrypoints.duplex.capability import (
+    should_enable_duplex_endpoint,
+)
 from vllm_omni.entrypoints.duplex.chat_fallback import (
     ChatFallbackProjectorMixin,
 )
@@ -58,9 +61,6 @@ from vllm_omni.entrypoints.duplex.websocket import (
     DOMAIN_TERMINAL_EVENTS,
     DuplexSessionTasks,
     DuplexWebSocketActor,
-)
-from vllm_omni.entrypoints.openai.duplex_capability import (
-    should_enable_duplex_endpoint,
 )
 
 if TYPE_CHECKING:
