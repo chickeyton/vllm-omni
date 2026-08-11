@@ -47,5 +47,5 @@ answer is saved as `response_1_cancelled.wav`, a completed one as
 `response_1_completed.wav`, and `summary.json` records status, text, and
 duration per answer.
 
-Companion: the module-relationship diagrams live in
-`FULLDUPLEX_MIGRATION_DESIGN.md` §16.
+Companion: the runtime architecture behind this flow is documented in
+`docs/design/fullduplex.md`.
