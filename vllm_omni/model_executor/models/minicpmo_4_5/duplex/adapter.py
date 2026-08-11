@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 from vllm.multimodal.media import MediaConnector
 
-from vllm_omni.entrypoints.openai.duplex.protocol import DuplexSessionConfig
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.protocol import DuplexSessionConfig
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
 )
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.policy import MiniCPMO45DuplexPolicy

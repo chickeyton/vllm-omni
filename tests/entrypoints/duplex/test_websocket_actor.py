@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from vllm_omni.entrypoints.openai.duplex.websocket import (
+from vllm_omni.entrypoints.duplex.websocket import (
     DuplexWebSocketActor,
     normalize_duplex_input_event,
 )

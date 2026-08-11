@@ -2,7 +2,7 @@
 
 > Relocation note: after the H20 validation recorded below, the full-duplex
 > implementation moved out of `vllm_omni/experimental/fullduplex/` into the
-> stable tree (`vllm_omni/engine/duplex/`, `vllm_omni/entrypoints/openai/duplex/`,
+> stable tree (`vllm_omni/engine/duplex/`, `vllm_omni/entrypoints/duplex/`,
 > `vllm_omni/model_executor/models/minicpmo_4_5/duplex/`, and companion
 > modules). Module paths in this document reflect the new layout; the runtime
 > evidence was produced on the pre-move tree, which is file-identical apart

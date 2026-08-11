@@ -17,10 +17,10 @@ from vllm.logger import init_logger
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
 from vllm_omni.engine.duplex.messages import DuplexFence, DuplexSessionLifecycleMessage
 from vllm_omni.engine.duplex.runtime import duplex_resource_request_id
-from vllm_omni.entrypoints.openai.duplex.chat_fallback import (
+from vllm_omni.entrypoints.duplex.chat_fallback import (
     ChatFallbackProjectorMixin,
 )
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexCapabilities,
     DuplexCommittedInput,
     DuplexOverlapPolicy,
@@ -32,29 +32,29 @@ from vllm_omni.entrypoints.openai.duplex.protocol import (
     DuplexTurnController,
     ResponseCreateOptions,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_session import (
+from vllm_omni.entrypoints.duplex.realtime_session import (
     REALTIME_OUTPUT_AUDIO_FORMATS,
     NativeRealtimeSessionProtocol,
 )
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeAdapter,
     ServingRuntimeConfigError,
     ServingRuntimeSessionState,
     load_serving_runtime_adapter,
     validate_serving_runtime_adapter,
 )
-from vllm_omni.entrypoints.openai.duplex.runtime_bridge import (
+from vllm_omni.entrypoints.duplex.runtime_bridge import (
     NativeRuntimeBridgeMixin,
 )
-from vllm_omni.entrypoints.openai.duplex.session_attachment import (
+from vllm_omni.entrypoints.duplex.session_attachment import (
     DuplexJournalGapError,
     DuplexSessionAttachmentRegistry,
     InvalidResumeTokenError,
 )
-from vllm_omni.entrypoints.openai.duplex.session_runner import (
+from vllm_omni.entrypoints.duplex.session_runner import (
     DuplexSessionRunnerMixin,
 )
-from vllm_omni.entrypoints.openai.duplex.websocket import (
+from vllm_omni.entrypoints.duplex.websocket import (
     DOMAIN_TERMINAL_EVENTS,
     DuplexSessionTasks,
     DuplexWebSocketActor,

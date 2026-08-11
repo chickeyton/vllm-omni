@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from vllm_omni.entrypoints.openai.duplex.audio import convert_output_audio
-from vllm_omni.entrypoints.openai.duplex.realtime_state import (
+from vllm_omni.entrypoints.duplex.audio import convert_output_audio
+from vllm_omni.entrypoints.duplex.realtime_state import (
     _RealtimeResponseState,
 )
 

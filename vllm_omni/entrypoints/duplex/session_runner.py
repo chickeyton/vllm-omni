@@ -11,30 +11,30 @@ from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.messages import DuplexFence
-from vllm_omni.entrypoints.openai.duplex.audio import convert_input_audio_with_rate
-from vllm_omni.entrypoints.openai.duplex.commit_policy import (
+from vllm_omni.entrypoints.duplex.audio import convert_input_audio_with_rate
+from vllm_omni.entrypoints.duplex.commit_policy import (
     CommitAction,
     CommitSnapshot,
     decide_commit_action,
 )
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexPlaybackCommitPolicy,
     DuplexSession,
     DuplexSessionState,
     DuplexTurnEventType,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_session import (
+from vllm_omni.entrypoints.duplex.realtime_session import (
     NativeRealtimeSessionProtocol,
 )
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     PcmAppendReservation,
     ServingRuntimeSessionState,
     payload_turn_id,
 )
-from vllm_omni.entrypoints.openai.duplex.session_attachment import (
+from vllm_omni.entrypoints.duplex.session_attachment import (
     DuplexJournalOverflowError,
 )
-from vllm_omni.entrypoints.openai.duplex.websocket import (
+from vllm_omni.entrypoints.duplex.websocket import (
     DuplexWebSocketActor,
     is_input_event,
     normalize_duplex_input_event,

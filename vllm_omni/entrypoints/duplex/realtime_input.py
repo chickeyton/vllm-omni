@@ -8,10 +8,10 @@ from uuid import uuid4
 
 import numpy as np
 
-from vllm_omni.entrypoints.openai.duplex.audio import (
+from vllm_omni.entrypoints.duplex.audio import (
     convert_input_audio_with_rate,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_state import (
+from vllm_omni.entrypoints.duplex.realtime_state import (
     REALTIME_INPUT_AUDIO_FORMATS,
     REALTIME_OUTPUT_AUDIO_FORMATS,
 )

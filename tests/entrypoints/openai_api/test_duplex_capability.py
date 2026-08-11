@@ -36,10 +36,6 @@ def test_api_server_does_not_import_duplex_demo_client() -> None:
 
 
 def test_duplex_serving_stack_does_not_import_demo_client() -> None:
-    duplex_pkg = _REPO_ROOT / "vllm_omni/entrypoints/openai/duplex"
-    offenders = [
-        path.name
-        for path in sorted(duplex_pkg.glob("*.py"))
-        if _imports_demo_client(path)
-    ]
+    duplex_pkg = _REPO_ROOT / "vllm_omni/entrypoints/duplex"
+    offenders = [path.name for path in sorted(duplex_pkg.glob("*.py")) if _imports_demo_client(path)]
     assert not offenders, f"duplex serving modules import the demo client: {offenders}"

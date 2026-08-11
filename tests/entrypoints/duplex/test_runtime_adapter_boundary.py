@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     validate_serving_runtime_adapter,
 )
 
@@ -20,13 +20,13 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 @pytest.mark.parametrize(
     "module_name",
     [
-        "vllm_omni.entrypoints.openai.duplex.session_runner",
-        "vllm_omni.entrypoints.openai.duplex.runtime_bridge",
-        "vllm_omni.entrypoints.openai.duplex.serving",
+        "vllm_omni.entrypoints.duplex.session_runner",
+        "vllm_omni.entrypoints.duplex.runtime_bridge",
+        "vllm_omni.entrypoints.duplex.serving",
     ],
 )
 def test_generic_openai_runtime_import_does_not_load_model_adapters(module_name: str) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     script = f"""
 import sys
 
@@ -61,11 +61,11 @@ if loaded:
 
 
 def test_generic_handler_requires_explicit_serving_runtime_adapter() -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     script = """
 from types import SimpleNamespace
 
-from vllm_omni.entrypoints.openai.duplex.serving import OmniDuplexSessionHandler
+from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 
 chat_service = SimpleNamespace(engine_client=SimpleNamespace())
 try:

@@ -6,11 +6,11 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
-from vllm_omni.entrypoints.openai.duplex import realtime_state as _state
-from vllm_omni.entrypoints.openai.duplex.realtime_input import (
+from vllm_omni.entrypoints.duplex import realtime_state as _state
+from vllm_omni.entrypoints.duplex.realtime_input import (
     RealtimeInputTranslator,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_output import (
+from vllm_omni.entrypoints.duplex.realtime_output import (
     RealtimeOutputProjector,
 )
 

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexOverlapPolicy,
     DuplexSession,
     DuplexSessionConfig,
@@ -13,10 +13,10 @@ from vllm_omni.entrypoints.openai.duplex.protocol import (
     DuplexTurnState,
     ResponseCreateOptions,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_session import (
+from vllm_omni.entrypoints.duplex.realtime_session import (
     NativeRealtimeSessionProtocol,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_state import RealtimeStateOwner
+from vllm_omni.entrypoints.duplex.realtime_state import RealtimeStateOwner
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
     minicpmo45_native_capabilities,
 )

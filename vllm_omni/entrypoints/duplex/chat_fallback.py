@@ -9,7 +9,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.logger import init_logger
 
-from vllm_omni.entrypoints.openai.duplex.protocol import DuplexSession
+from vllm_omni.entrypoints.duplex.protocol import DuplexSession
 
 logger = init_logger(__name__)
 

@@ -20,7 +20,7 @@ from enum import Enum
 import pytest
 
 from vllm_omni.engine.duplex.messages import DuplexFence
-from vllm_omni.entrypoints.openai.duplex.runtime_bridge import NativeRuntimeBridgeMixin
+from vllm_omni.entrypoints.duplex.runtime_bridge import NativeRuntimeBridgeMixin
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

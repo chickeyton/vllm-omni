@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm_omni.entrypoints.openai.duplex.commit_policy import (
+from vllm_omni.entrypoints.duplex.commit_policy import (
     CommitAction,
     CommitSnapshot,
     decide_commit_action,

@@ -13,11 +13,11 @@ from vllm.logger import init_logger
 from vllm_omni.engine.duplex.control_client import DuplexControlRequestError
 from vllm_omni.engine.duplex.messages import DuplexFence
 from vllm_omni.engine.duplex.runtime import duplex_data_plane_request_info
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexSession,
     DuplexSessionState,
 )
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     coerce_int,
     payload_turn_id,
 )

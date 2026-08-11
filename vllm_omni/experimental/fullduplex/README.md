@@ -16,7 +16,7 @@ of this package. They now live in the stable tree:
 
 ```text
 vllm_omni/engine/duplex/                       engine control plane, sessions, leases
-vllm_omni/entrypoints/openai/duplex/           WebSocket serving and Realtime projection
+vllm_omni/entrypoints/duplex/           WebSocket serving and Realtime projection
 vllm_omni/entrypoints/duplex_request_client.py request/output lifecycle
 vllm_omni/model_executor/models/minicpmo_4_5/duplex/  MiniCPM adapter
 vllm_omni/model_executor/models/personaplex/duplex/   PersonaPlex adapter

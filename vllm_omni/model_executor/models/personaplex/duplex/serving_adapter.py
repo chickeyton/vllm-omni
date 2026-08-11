@@ -10,10 +10,10 @@ from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any
 
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexCapabilities,
 )
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
 )
 from vllm_omni.model_executor.models.personaplex.duplex.config import DEFAULT_PERSONA

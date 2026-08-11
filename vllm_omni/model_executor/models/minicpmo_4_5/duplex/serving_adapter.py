@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from vllm_omni.entrypoints.openai.duplex.protocol import DuplexCapabilities
+from vllm_omni.entrypoints.duplex.protocol import DuplexCapabilities
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.adapter import (
     MiniCPMO45NativeDuplexServingAdapter,
 )

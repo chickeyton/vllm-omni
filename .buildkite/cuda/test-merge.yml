@@ -154,12 +154,12 @@ steps:
           - tests/helpers/minicpmo_4_5_duplex.py
           - vllm_omni/deploy/minicpmo_4_5_duplex.yaml
           - vllm_omni/engine/duplex/
-          - vllm_omni/entrypoints/openai/duplex/
+          - vllm_omni/entrypoints/duplex/
           - vllm_omni/entrypoints/duplex_request_client.py
           - vllm_omni/outputs/duplex.py
           - vllm_omni/model_executor/duplex_sampling.py
           - tests/engine/duplex/
-          - tests/entrypoints/openai/duplex/
+          - tests/entrypoints/duplex/
           - tests/model_executor/models/minicpmo_4_5/duplex/
           - vllm_omni/model_executor/models/minicpmo_4_5/
           - vllm_omni/model_executor/stage_input_processors/minicpmo_4_5_omni.py

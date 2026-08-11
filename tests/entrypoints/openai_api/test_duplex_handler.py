@@ -16,20 +16,20 @@ from vllm_omni.engine.duplex.control_client import DuplexControlRequestError
 from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.messages import DuplexFence, DuplexSessionLifecycleMessage
 from vllm_omni.engine.duplex.runtime import duplex_resource_request_id
-from vllm_omni.entrypoints.openai.duplex.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexOverlapPolicy,
     DuplexPlaybackCommitPolicy,
     DuplexSession,
     DuplexSessionConfig,
     ResponseCreateOptions,
 )
-from vllm_omni.entrypoints.openai.duplex.realtime_session import NativeRealtimeSessionProtocol
-from vllm_omni.entrypoints.openai.duplex.runtime_adapter import ServingRuntimeConfigError
-from vllm_omni.entrypoints.openai.duplex.serving import (
+from vllm_omni.entrypoints.duplex.realtime_session import NativeRealtimeSessionProtocol
+from vllm_omni.entrypoints.duplex.runtime_adapter import ServingRuntimeConfigError
+from vllm_omni.entrypoints.duplex.serving import (
     OmniDuplexSessionHandler,
     should_enable_duplex_endpoint,
 )
-from vllm_omni.entrypoints.openai.duplex.websocket import DuplexWebSocketActor
+from vllm_omni.entrypoints.duplex.websocket import DuplexWebSocketActor
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex import (
     MiniCPMO45NativeDuplexServingAdapter,
     MiniCPMO45PcmAppendBuffer,
