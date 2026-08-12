@@ -38,7 +38,7 @@ import wave
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -62,6 +62,7 @@ __all__ = [
     "SessionConfig",
     "SessionCreated",
     "SpeakDecision",
+    "WebSocketTransport",
     "TextDelta",
     "TranscriptDelta",
     "audio_data_url",
@@ -92,7 +93,7 @@ class DuplexProtocolError(DuplexClientError):
         *,
         code: str | None = None,
         event_id: str | None = None,
-        raw: dict[str, Any] | None = None,
+        raw: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -153,11 +154,11 @@ class SessionConfig:
     auto_response: bool = True
     overlap_policy: str | None = None
     playback_commit_policy: str | None = None
-    turn_detection: dict[str, Any] | None = None
-    extra_body: dict[str, Any] = field(default_factory=dict)
+    turn_detection: dict[str, object] | None = None
+    extra_body: dict[str, object] = field(default_factory=dict)
 
-    def to_session_payload(self, *, model: str, session_id: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_session_payload(self, *, model: str, session_id: str | None = None) -> dict[str, object]:
+        payload: dict[str, object] = {
             "model": model,
             "modalities": list(self.modalities),
             "input_audio_format": self.input_audio.encoding,
@@ -176,13 +177,13 @@ class SessionConfig:
             payload["overlap_policy"] = self.overlap_policy
         if self.playback_commit_policy is not None:
             payload["playback_commit_policy"] = self.playback_commit_policy
-        extra_body: dict[str, Any] = {"auto_response": self.auto_response}
+        extra_body: dict[str, object] = {"auto_response": self.auto_response}
         extra_body.update(self.extra_body)
         payload["extra_body"] = extra_body
         return payload
 
     @classmethod
-    def for_minicpmo45(cls, *, ref_audio: str | None = None, **overrides: Any) -> SessionConfig:
+    def for_minicpmo45(cls, *, ref_audio: str | None = None, **overrides: object) -> SessionConfig:
         """Preset matching the MiniCPM-o 4.5 native duplex deployment."""
         extra_body = {"minicpmo45_native_duplex": True, "force_listen_count": 0}
         extra_body.update(overrides.pop("extra_body", {}))
@@ -195,7 +196,7 @@ class SessionConfig:
         return replace(config, **overrides) if overrides else config
 
     @classmethod
-    def for_personaplex(cls, *, voice: str = "NATF2.pt", persona: str = "", **overrides: Any) -> SessionConfig:
+    def for_personaplex(cls, *, voice: str = "NATF2.pt", persona: str = "", **overrides: object) -> SessionConfig:
         """Preset matching the PersonaPlex duplex deployment (24 kHz float32 in)."""
         config = cls(
             input_audio=AudioFormat("pcm_f32le", 24_000),
@@ -228,7 +229,7 @@ class DuplexEvent:
 
     __slots__ = ("raw",)
 
-    def __init__(self, raw: dict[str, Any]) -> None:
+    def __init__(self, raw: dict[str, object]) -> None:
         self.raw = raw
 
     @property
@@ -297,7 +298,7 @@ class DuplexEvent:
 
 class SessionCreated(DuplexEvent):
     @property
-    def session(self) -> dict[str, Any]:
+    def session(self) -> dict[str, object]:
         value = self.raw.get("session")
         return value if isinstance(value, dict) else {}
 
@@ -366,7 +367,7 @@ class ConnectionResumed(DuplexEvent):
 
 class ErrorEvent(DuplexEvent):
     @property
-    def _error(self) -> dict[str, Any] | None:
+    def _error(self) -> dict[str, object] | None:
         value = self.raw.get("error")
         return value if isinstance(value, dict) else None
 
@@ -435,7 +436,7 @@ _FATAL_RESUME_CODES = frozenset(
 )
 
 
-def wrap_event(raw: dict[str, Any]) -> DuplexEvent:
+def wrap_event(raw: dict[str, object]) -> DuplexEvent:
     event_type = raw.get("type")
     event_cls = _EVENT_TYPES.get(event_type) if isinstance(event_type, str) else None
     return (event_cls or DuplexEvent)(raw)
@@ -445,9 +446,6 @@ def wrap_event(raw: dict[str, Any]) -> DuplexEvent:
 class _ClosedMarker:
     reason: str
     expected: bool
-
-
-_RESPONSE_DONE = object()
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +476,7 @@ class ResponseHandle:
         self.created_event = created_event
         self.done_event: DuplexEvent | None = None
         self._output_format = output_format
-        self._audio_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max_buffered_events)
+        self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=max_buffered_events)
         self._done = asyncio.Event()
 
     @property
@@ -500,10 +498,9 @@ class ResponseHandle:
         """
         while True:
             item = await self._audio_queue.get()
-            if item is _RESPONSE_DONE:
+            if item is None:
                 return
-            chunk: bytes = item[0]
-            sample_rate_hz: int | None = item[1]
+            chunk, sample_rate_hz = item
             rate = sample_rate_hz or self._output_format.sample_rate_hz
             self.played_ms += len(chunk) * 1000.0 / (rate * self._output_format.bytes_per_sample)
             yield chunk
@@ -532,19 +529,30 @@ class ResponseHandle:
         # A full queue cannot block _finish: the sentinel is delivered by a
         # non-blocking put with a drop-oldest fallback.
         try:
-            self._audio_queue.put_nowait(_RESPONSE_DONE)
+            self._audio_queue.put_nowait(None)
         except asyncio.QueueFull:
             try:
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:  # pragma: no cover - racing consumer
                 pass
-            self._audio_queue.put_nowait(_RESPONSE_DONE)
+            self._audio_queue.put_nowait(None)
 
 
 # ---------------------------------------------------------------------------
 # Client
 
-ConnectFn = Callable[[str], Awaitable[Any]]
+
+class WebSocketTransport(Protocol):
+    """Minimal WebSocket surface the client needs (satisfied by ``websockets``)."""
+
+    async def send(self, data: str) -> None: ...
+
+    async def recv(self) -> str | bytes: ...
+
+    async def close(self) -> None: ...
+
+
+ConnectFn = Callable[[str], Awaitable["WebSocketTransport"]]
 
 
 class DuplexClient:
@@ -569,7 +577,7 @@ class DuplexClient:
         self.model = model
         self.config = config or SessionConfig()
         self.session_id = session_id
-        self.session_info: dict[str, Any] = {}
+        self.session_info: dict[str, object] = {}
         self.incarnation = 0
         self.resume_token: str | None = None
         self._reconnect = reconnect
@@ -579,11 +587,11 @@ class DuplexClient:
         self._handshake_timeout_s = handshake_timeout_s
         self._auto_ack = auto_ack
         self._connect_fn: ConnectFn = connect or self._default_connect
-        self._ws: Any = None
+        self._ws: WebSocketTransport | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
-        self._subscribers: list[asyncio.Queue[Any]] = []
-        self._response_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max_buffered_events)
+        self._subscribers: list[asyncio.Queue[DuplexEvent | _ClosedMarker]] = []
+        self._response_queue: asyncio.Queue[ResponseHandle | _ClosedMarker] = asyncio.Queue(maxsize=max_buffered_events)
         self._responses: dict[str, ResponseHandle] = {}
         self._last_server_event_seq: int | None = None
         self._input_audio_end_ms = 0.0
@@ -669,7 +677,7 @@ class DuplexClient:
         input_format = self.config.input_audio
         duration_ms = input_format.duration_ms(len(pcm))
         self._input_audio_end_ms += duration_ms
-        event: dict[str, Any] = {
+        event: dict[str, object] = {
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(pcm).decode("ascii"),
             "format": input_format.encoding,
@@ -715,18 +723,18 @@ class DuplexClient:
         )
 
     async def commit(self, *, final: bool = True, create_response: bool | None = None) -> None:
-        event: dict[str, Any] = {"type": "input_audio_buffer.commit", "final": final}
+        event: dict[str, object] = {"type": "input_audio_buffer.commit", "final": final}
         if create_response is not None:
             event["response_create"] = create_response
         await self.send(event)
 
-    async def create_response(self, **overrides: Any) -> None:
+    async def create_response(self, **overrides: object) -> None:
         await self.send({"type": "response.create", "response": overrides})
 
     # -- interruption ---------------------------------------------------------
 
     async def cancel_response(self, response_id: str | None = None) -> None:
-        event: dict[str, Any] = {"type": "response.cancel"}
+        event: dict[str, object] = {"type": "response.cancel"}
         if response_id is not None:
             event["response_id"] = response_id
         await self.send(event)
@@ -758,7 +766,7 @@ class DuplexClient:
         committed_ms: float | None = None,
     ) -> None:
         """Report cumulative playback progress; call periodically while playing."""
-        event: dict[str, Any] = {
+        event: dict[str, object] = {
             "type": "playback.ack",
             "played_ms": int(played_ms),
             "committed_ms": int(committed_ms if committed_ms is not None else played_ms),
@@ -810,7 +818,7 @@ class DuplexClient:
         finally:
             self._remove_subscriber(queue)
 
-    async def send(self, event: dict[str, Any]) -> str:
+    async def send(self, event: dict[str, object]) -> str:
         """Send one raw client event; returns the (possibly stamped) event_id."""
         if self._closed.is_set():
             marker = self._closed_marker
@@ -835,7 +843,7 @@ class DuplexClient:
         query.setdefault("model", self.model)
         return urlunsplit((parts.scheme or "ws", parts.netloc, path, urlencode(query), parts.fragment))
 
-    async def _default_connect(self, url: str) -> Any:
+    async def _default_connect(self, url: str) -> WebSocketTransport:
         try:
             import websockets
         except ImportError as exc:  # pragma: no cover - websockets is a pinned dep
@@ -856,15 +864,15 @@ class DuplexClient:
         if event.resume_token:
             self.resume_token = event.resume_token
 
-    def _add_subscriber(self) -> asyncio.Queue[Any]:
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self._max_buffered_events)
+    def _add_subscriber(self) -> asyncio.Queue[DuplexEvent | _ClosedMarker]:
+        queue: asyncio.Queue[DuplexEvent | _ClosedMarker] = asyncio.Queue(maxsize=self._max_buffered_events)
         if self._closed.is_set() and self._closed_marker is not None:
             queue.put_nowait(self._closed_marker)
         else:
             self._subscribers.append(queue)
         return queue
 
-    def _remove_subscriber(self, queue: asyncio.Queue[Any]) -> None:
+    def _remove_subscriber(self, queue: asyncio.Queue[DuplexEvent | _ClosedMarker]) -> None:
         try:
             self._subscribers.remove(queue)
         except ValueError:
@@ -872,7 +880,7 @@ class DuplexClient:
 
     async def _wait_on_queue(
         self,
-        queue: asyncio.Queue[Any],
+        queue: asyncio.Queue[DuplexEvent | _ClosedMarker],
         types: tuple[str, ...],
         *,
         timeout_s: float,
@@ -914,7 +922,7 @@ class DuplexClient:
                 self._finalize(f"connection lost: {exc}", expected=False)
                 return
 
-    async def _dispatch(self, data: dict[str, Any]) -> None:
+    async def _dispatch(self, data: dict[str, object]) -> None:
         seq = data.get("server_event_seq")
         if isinstance(seq, int):
             if self._last_server_event_seq is not None and seq <= self._last_server_event_seq:
@@ -1005,7 +1013,7 @@ class DuplexClient:
                     )
                 )
                 deadline = time.monotonic() + self._handshake_timeout_s
-                pending: list[dict[str, Any]] = []
+                pending: list[dict[str, object]] = []
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -1043,7 +1051,7 @@ class DuplexClient:
         return False
 
     @staticmethod
-    async def _close_quietly(ws: Any) -> None:
+    async def _close_quietly(ws: WebSocketTransport) -> None:
         try:
             await ws.close()
         except Exception:  # noqa: BLE001
@@ -1118,8 +1126,8 @@ def _interval_summary(values: list[float]) -> dict[str, float | int]:
     }
 
 
-def _event_stage_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
-    candidates: list[Any] = [event.get("vllm_omni")]
+def _event_stage_metrics(event: dict[str, object]) -> dict[str, object] | None:
+    candidates: list[object] = [event.get("vllm_omni")]
     metadata = event.get("metadata")
     if isinstance(metadata, dict):
         candidates.extend((metadata, metadata.get("vllm_omni")))
@@ -1145,7 +1153,7 @@ class EventCollector:
     """
 
     def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
+        self.events: list[dict[str, object]] = []
         self.event_received_at_s: list[float] = []
         self.response_audio: dict[str, list[bytes]] = {}
         self.response_ids: list[str] = []
@@ -1159,7 +1167,7 @@ class EventCollector:
         except DuplexSessionClosedError:
             pass
 
-    def add(self, event: dict[str, Any] | DuplexEvent, *, received_at_s: float | None = None) -> None:
+    def add(self, event: dict[str, object] | DuplexEvent, *, received_at_s: float | None = None) -> None:
         raw = event.raw if isinstance(event, DuplexEvent) else event
         received_at = time.monotonic() if received_at_s is None else float(received_at_s)
         stored_event = dict(raw)
@@ -1188,7 +1196,7 @@ class EventCollector:
             chunk for response_id in self.response_ids for chunk in self.response_audio.get(response_id, ())
         )
 
-    def errors(self) -> list[dict[str, Any]]:
+    def errors(self) -> list[dict[str, object]]:
         return [event for event in self.events if event.get("type") == "error"]
 
     def first_received_at(self, *event_types: str, after_s: float = 0.0) -> float | None:
@@ -1213,9 +1221,9 @@ class EventCollector:
         after_s: float,
         input_committed_at_s: float | None = None,
         response_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Summarize engine token metrics and client-observed audio cadence."""
-        stage0_metrics: dict[str, Any] | None = None
+        stage0_metrics: dict[str, object] | None = None
         response_created_at_s: float | None = None
         audio_received_at_s: list[float] = []
         cumulative_audio_ms: list[float] = []
@@ -1244,7 +1252,7 @@ class EventCollector:
             if isinstance(duration_ms, int | float) and math.isfinite(float(duration_ms)):
                 cumulative_audio_ms.append(max(0.0, float(duration_ms)))
 
-        result: dict[str, Any] = {}
+        result: dict[str, object] = {}
         if stage0_metrics is not None:
             raw_itls = stage0_metrics.get("vllm_itls_ms")
             itls = (
