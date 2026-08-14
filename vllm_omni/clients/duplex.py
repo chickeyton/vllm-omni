@@ -152,6 +152,7 @@ class SessionConfig:
     ref_audio: str | None = None
     voice: str | None = None
     auto_response: bool = True
+    temperature: float | None = None
     overlap_policy: str | None = None
     playback_commit_policy: str | None = None
     turn_detection: dict[str, object] | None = None
@@ -173,6 +174,8 @@ class SessionConfig:
             payload["ref_audio"] = self.ref_audio
         if self.voice is not None:
             payload["voice"] = self.voice
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
         if self.overlap_policy is not None:
             payload["overlap_policy"] = self.overlap_policy
         if self.playback_commit_policy is not None:
@@ -841,6 +844,12 @@ class DuplexClient:
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
         query.setdefault("duplex", "1")
         query.setdefault("model", self.model)
+        # The client always opens with an explicit session.update (and resumes
+        # with an explicit session.resume). Autostart would race that handshake:
+        # with a model query param, the server creates a bare default session
+        # before reading the first client event, silently dropping ref_audio
+        # and the model-specific extra_body.
+        query.setdefault("autostart", "0")
         return urlunsplit((parts.scheme or "ws", parts.netloc, path, urlencode(query), parts.fragment))
 
     async def _default_connect(self, url: str) -> WebSocketTransport:

@@ -96,13 +96,14 @@ def test_session_config_payload_defaults():
 
 
 def test_session_config_minicpmo_preset():
-    config = SessionConfig.for_minicpmo45(ref_audio="data:audio/wav;base64,AAA=")
+    config = SessionConfig.for_minicpmo45(ref_audio="data:audio/wav;base64,AAA=", temperature=0.0)
     payload = config.to_session_payload(model="openbmb/MiniCPM-o-4_5")
     assert payload["ref_audio"] == "data:audio/wav;base64,AAA="
     assert payload["overlap_policy"] == "listen_only"
     assert payload["playback_commit_policy"] == "ack_only"
     assert payload["extra_body"]["minicpmo45_native_duplex"] is True
     assert payload["extra_body"]["auto_response"] is True
+    assert payload["temperature"] == 0.0
 
 
 def test_session_config_personaplex_preset():
@@ -135,7 +136,7 @@ async def test_handshake_adopts_session_and_acks():
     async with client:
         assert client.session_id == "sess-1"
         assert client.resume_token == "tok-1"
-        assert calls == ["ws://test-host:8099/v1/realtime?duplex=1&model=test-model"]
+        assert calls == ["ws://test-host:8099/v1/realtime?duplex=1&model=test-model&autostart=0"]
         assert sock.sent[0]["type"] == "session.update"
         assert sock.sent[0]["session"]["model"] == "test-model"
         await _drain(lambda: {"type": "session.event_ack", "server_event_seq": 1} in _acks(sock))
