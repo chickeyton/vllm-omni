@@ -26,6 +26,17 @@ DEPLOY_CONFIG = modify_stage_config(
         },
     },
 )
+# Eager-execution variant for fast-startup core-tier probes (e.g. the duplex
+# client live test): skips CUDA-graph capture on the LLM and Talker stages.
+CORE_DEPLOY_CONFIG = modify_stage_config(
+    DEPLOY_CONFIG,
+    updates={
+        "stages": {
+            0: {"enforce_eager": True},
+            1: {"enforce_eager": True},
+        }
+    },
+)
 ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "minicpmo_4_5"
 RESPONSE_REQUIRED_WAV = ASSET_DIR / "response_required_16k.wav"
 RESPONSE_REQUIRED_SHA256 = "2e5fd4eb3ee434ce107ee3a0591fa624a33f7683c7462f45fe651c443c9af941"
@@ -38,6 +49,18 @@ SERVER_PARAMS = [
         OmniServerParams(
             model=MODEL,
             stage_config_path=DEPLOY_CONFIG,
+            use_stage_cli=False,
+            server_args=["--trust-remote-code"],
+        ),
+        id="three-stage-single-gpu",
+    )
+]
+
+CORE_SERVER_PARAMS = [
+    pytest.param(
+        OmniServerParams(
+            model=MODEL,
+            stage_config_path=CORE_DEPLOY_CONFIG,
             use_stage_cli=False,
             server_args=["--trust-remote-code"],
         ),

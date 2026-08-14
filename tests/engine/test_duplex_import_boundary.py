@@ -66,6 +66,7 @@ if missing:
     raise SystemExit("duplex kernel modules not imported eagerly: " + ", ".join(missing))
 
 forbidden_prefixes = (
+    "vllm_omni.clients",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex.client",
     "vllm_omni.model_executor.models.personaplex.duplex",
