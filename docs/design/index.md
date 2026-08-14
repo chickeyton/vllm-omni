@@ -17,6 +17,7 @@ implementation contract; it is not, by itself, a general support claim.
 
 ### Runtime and stage execution
 
+- [Full-Duplex Runtime (MiniCPM-o 4.5)](fullduplex.md)
 - [Disaggregated Inference](feature/disaggregated_inference.md)
 - [Async Chunk](feature/async_chunk.md)
 - [Async Diffusion Output](feature/async_diffusion_output.md)

@@ -3,8 +3,7 @@ import json
 
 import pytest
 
-from vllm_omni.experimental.fullduplex.openai.protocol import (
-    DuplexCapabilities,
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexOverlapPolicy,
     DuplexSession,
     DuplexSessionConfig,
@@ -14,10 +13,13 @@ from vllm_omni.experimental.fullduplex.openai.protocol import (
     DuplexTurnState,
     ResponseCreateOptions,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_session import (
+from vllm_omni.entrypoints.duplex.realtime_session import (
     NativeRealtimeSessionProtocol,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_state import RealtimeStateOwner
+from vllm_omni.entrypoints.duplex.realtime_state import RealtimeStateOwner
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
+    minicpmo45_native_capabilities,
+)
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -436,7 +438,7 @@ def test_duplex_capabilities_do_not_claim_core_kv_or_input_append():
 
 
 def test_minicpmo_native_capabilities_separate_model_state_from_core_kv_lease():
-    caps = DuplexCapabilities.minicpmo45_native(max_sessions=2).as_dict()
+    caps = minicpmo45_native_capabilities(max_sessions=2).as_dict()
 
     assert caps["implementation_level"] == "model_native_duplex"
     assert caps["supports_input_append"] is True
@@ -463,7 +465,7 @@ def test_minicpmo_native_capabilities_separate_model_state_from_core_kv_lease():
 
 
 def test_minicpmo_native_capabilities_do_not_overclaim_single_session_deployment():
-    caps = DuplexCapabilities.minicpmo45_native(max_sessions=1).as_dict()
+    caps = minicpmo45_native_capabilities(max_sessions=1).as_dict()
 
     assert caps["supports_multi_session"] is False
     assert caps["supports_multi_session_same_replica"] is False

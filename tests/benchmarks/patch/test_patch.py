@@ -20,7 +20,7 @@ from vllm_omni.benchmarks.patch.patch import (
     async_request_openai_chat_omni_completions,
     async_request_openai_realtime_duplex,
 )
-from vllm_omni.experimental.fullduplex.client import RealtimeEventCollector
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import RealtimeEventCollector
 
 pytestmark = [pytest.mark.core_model, pytest.mark.benchmark, pytest.mark.cpu]
 

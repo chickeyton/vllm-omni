@@ -11,42 +11,55 @@ import numpy as np
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
+# Import the OpenAI entrypoints package at collection time, before pytest
+# attaches its caplog handlers to the root logger. vllm's api_server
+# transitively imports model_hosting_container_standards, whose import-time
+# configure_root_logger() raises the level of every handler then attached to
+# the root logger to ERROR. The serving runtime under test reaches this chain
+# lazily (runtime_bridge -> entrypoints.openai.protocol.audio), so without
+# this eager import the side effect fires mid-test and silences caplog for
+# the remainder of the session. Before the capability predicate moved to
+# vllm_omni.entrypoints.duplex.capability, this file imported the package at
+# module scope implicitly.
+import vllm_omni.entrypoints.openai  # noqa: F401
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.experimental.fullduplex.engine.duplex_control_client import DuplexControlRequestError
-from vllm_omni.experimental.fullduplex.engine.duplex_runtime import duplex_resource_request_id
-from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseActivity
-from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence, DuplexSessionLifecycleMessage
-from vllm_omni.experimental.fullduplex.minicpmo45 import (
-    MiniCPMO45NativeDuplexServingAdapter,
-    MiniCPMO45PcmAppendBuffer,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.data_plane import (
-    MiniCPMO45DataPlaneContext,
-    MiniCPMO45DataPlaneSession,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.runtime import (
-    MiniCPMO45DuplexRuntimeExtension,
-)
-from vllm_omni.experimental.fullduplex.minicpmo45.session import (
-    MiniCPMO45ServingSessionState,
-)
-from vllm_omni.experimental.fullduplex.openai.protocol import (
-    DuplexCapabilities,
+from vllm_omni.engine.duplex.control_client import DuplexControlRequestError
+from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
+from vllm_omni.engine.duplex.messages import DuplexFence, DuplexSessionLifecycleMessage
+from vllm_omni.engine.duplex.runtime import duplex_resource_request_id
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexOverlapPolicy,
     DuplexPlaybackCommitPolicy,
     DuplexSession,
     DuplexSessionConfig,
     ResponseCreateOptions,
 )
-from vllm_omni.experimental.fullduplex.openai.realtime_session import NativeRealtimeSessionProtocol
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import ServingRuntimeConfigError
-from vllm_omni.experimental.fullduplex.openai.serving import (
+from vllm_omni.entrypoints.duplex.realtime_session import NativeRealtimeSessionProtocol
+from vllm_omni.entrypoints.duplex.runtime_adapter import ServingRuntimeConfigError
+from vllm_omni.entrypoints.duplex.serving import (
     OmniDuplexSessionHandler,
     should_enable_duplex_endpoint,
 )
-from vllm_omni.experimental.fullduplex.openai.websocket import DuplexWebSocketActor
-from vllm_omni.experimental.fullduplex.output import attach_duplex_output_decision
+from vllm_omni.entrypoints.duplex.websocket import DuplexWebSocketActor
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex import (
+    MiniCPMO45NativeDuplexServingAdapter,
+    MiniCPMO45PcmAppendBuffer,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
+    minicpmo45_native_capabilities,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.data_plane import (
+    MiniCPMO45DataPlaneContext,
+    MiniCPMO45DataPlaneSession,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.runtime import (
+    MiniCPMO45DuplexRuntimeExtension,
+)
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.session import (
+    MiniCPMO45ServingSessionState,
+)
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.outputs.duplex import attach_duplex_output_decision
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -55,7 +68,7 @@ def test_native_input_append_supports_explicit_session_opt_out():
     session = DuplexSession(
         "sid-explicit-tts",
         DuplexSessionConfig(model="test-model"),
-        capabilities=DuplexCapabilities.minicpmo45_native(),
+        capabilities=minicpmo45_native_capabilities(),
     )
 
     assert OmniDuplexSessionHandler._uses_native_input_append(session) is True
@@ -286,7 +299,7 @@ class FakeEngineClient:
 
 class FakeChatService:
     duplex_serving_adapter_path = (
-        "vllm_omni.experimental.fullduplex.minicpmo45.serving_adapter.MiniCPMO45ServingRuntimeAdapter"
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.serving_adapter.MiniCPMO45ServingRuntimeAdapter"
     )
 
     def __init__(self, engine_client: FakeEngineClient) -> None:
@@ -738,7 +751,7 @@ def test_native_response_options_ignore_private_runtime_config():
     session = DuplexSession(
         session_id="sid-response-private-config",
         config=DuplexSessionConfig(),
-        capabilities=DuplexCapabilities.minicpmo45_native(),
+        capabilities=minicpmo45_native_capabilities(),
     )
 
     handler = OmniDuplexSessionHandler(chat_service=FakeChatService(FakeEngineClient()))
@@ -772,7 +785,7 @@ def test_native_response_create_rejects_unwired_generation_options(payload):
     session = DuplexSession(
         session_id="sid-response-unwired-options",
         config=DuplexSessionConfig(),
-        capabilities=DuplexCapabilities.minicpmo45_native(),
+        capabilities=minicpmo45_native_capabilities(),
     )
 
     handler = OmniDuplexSessionHandler(chat_service=FakeChatService(FakeEngineClient()))
@@ -1388,7 +1401,7 @@ def _install_direct_silence_scheduler(
     handler: OmniDuplexSessionHandler,
     session: DuplexSession,
 ) -> None:
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
 
     async def _schedule(payload: object, **kwargs: Any) -> bool:
         if handler._native_silence_continuation_is_stale(
@@ -1759,11 +1772,11 @@ def test_auto_response_post_response_silence_remains_model_owned_input():
 @pytest.mark.asyncio
 async def test_auto_response_terminal_advances_open_realtime_input_without_commit():
     handler, session = _auto_response_context("sid-auto-realtime-open-input", playback_active=True)
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.active_response_id
     assert response_id is not None
 
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.input_since_commit = True
     native.speech_since_commit = True
     session.accumulate_overlap_speech(800)
@@ -1806,11 +1819,11 @@ async def test_auto_response_terminal_allows_next_model_unit_while_playback_drai
         "sid-auto-realtime-open-before-overlap",
         playback_active=True,
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.active_response_id
     assert response_id is not None
 
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.input_since_commit = True
     native.speech_since_commit = True
     session.end_response(commit_text=False, preserve_request=True)
@@ -1840,11 +1853,11 @@ async def test_auto_response_terminal_allows_next_model_unit_while_playback_drai
 @pytest.mark.asyncio
 async def test_realtime_committed_overlap_promotes_after_response_done():
     handler, session = _auto_response_context("sid-auto-realtime-committed-input", playback_active=True)
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.active_response_id
     assert response_id is not None
 
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.committed_audio_payload = _native_audio_payload()
     native.deferred_response_create = True
     session.accumulate_overlap_speech(1000)
@@ -2754,7 +2767,7 @@ async def test_native_append_propagates_current_turn_fence_to_engine():
         session_id="sid-fenced-append",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.turn_id = 2
     session.begin_response(turn_id=2)
     ws = TimedWebSocket()
@@ -2784,7 +2797,7 @@ async def test_minicpmo_auto_response_tts_segment_boundary_appends_silence_unit(
         session_id="sid-segment-boundary",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.begin_response(turn_id=0)
     session.turn_id = 1
     session.bind_request(request_id)
@@ -2833,7 +2846,7 @@ async def test_minicpmo_auto_response_pre_response_tts_boundary_continues_model_
         session_id="sid-pre-response-boundary",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
     _install_direct_silence_scheduler(handler, session)
     ws = TimedWebSocket()
@@ -2880,11 +2893,11 @@ async def test_minicpmo_pre_response_continuation_drops_after_model_turn_ends():
         session_id="sid-stale-pre-response-boundary",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
     model_turn_id = session.turn_id
 
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
 
     async def _stale_before_append(payload: object, **kwargs: Any) -> bool:
         session.complete_model_turn(model_turn_id)
@@ -2930,7 +2943,7 @@ async def test_minicpmo_auto_response_continuation_has_no_semantic_unit_cap():
         session_id="sid-long-response",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.begin_response(turn_id=0)
     session.turn_id = 1
     session.bind_request(request_id)
@@ -2960,7 +2973,7 @@ async def test_minicpmo_auto_response_pre_speak_listen_continues_same_response()
         session_id="sid-pre-speak-listen",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.begin_response(turn_id=0)
     session.turn_id = 1
     session.bind_request(request_id)
@@ -3000,7 +3013,7 @@ async def test_minicpmo_auto_response_listen_before_response_keeps_resumable_req
         session_id="sid-listen-before-response",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
     ws = TimedWebSocket()
 
@@ -3024,7 +3037,7 @@ async def test_minicpmo_auto_response_listen_before_response_keeps_resumable_req
     assert close_reason is None
     assert emitted is True
     assert session.active_request_id == request_id
-    assert not handler._minicpmo_data_plane.is_terminal(request_id)
+    assert not handler._serving_runtime_adapter.data_plane.is_terminal(request_id)
     assert ws.sent_types().count("response.listen") == 1
 
 
@@ -3208,7 +3221,7 @@ async def test_minicpmo_auto_response_post_speak_listen_continues_same_response(
         session_id="sid-post-speak-listen",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.begin_response(turn_id=0)
     session.turn_id = 1
     session.bind_request(request_id)
@@ -3249,7 +3262,7 @@ async def test_minicpmo_auto_response_turn_end_preserves_resumable_request():
         session_id="sid-turn-end-preserve-request",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.begin_response(turn_id=0)
     session.bind_request(request_id)
     ws = TimedWebSocket()
@@ -3288,7 +3301,7 @@ async def test_minicpmo_auto_response_empty_turn_end_emits_model_listen():
         session_id="sid-empty-turn-end",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
     ws = TimedWebSocket()
 
@@ -3331,7 +3344,7 @@ async def test_minicpmo_auto_response_drops_late_audio_from_completed_model_turn
         session_id="sid-late-completed-turn",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
     session.complete_model_turn(0)
     ws = TimedWebSocket()
@@ -3557,7 +3570,7 @@ async def test_duplex_auto_response_empty_terminal_does_not_create_empty_respons
     )
 
     native_results = list(
-        handler._minicpmo_data_plane.project(
+        handler._serving_runtime_adapter.data_plane.project(
             {"data_plane_outputs": [output]},
             context=_data_plane_context(session),
         )
@@ -3572,7 +3585,7 @@ async def test_duplex_auto_response_empty_terminal_does_not_create_empty_respons
     assert "response.created" not in [m.get("type") for m in sent]
     assert "response.done" not in [m.get("type") for m in sent]
     assert session.turn_id == 1
-    assert not handler._minicpmo_data_plane.is_terminal(request_id)
+    assert not handler._serving_runtime_adapter.data_plane.is_terminal(request_id)
 
 
 @pytest.mark.asyncio
@@ -3582,11 +3595,11 @@ async def test_minicpmo_native_duplex_session_close_cleans_auto_response_data_pl
     engine = FakeEngineClient()
     chat_service = FakeChatService(engine)
     handler = OmniDuplexSessionHandler(chat_service=chat_service, config_timeout_s=0.1, idle_timeout_s=1)
-    handler._minicpmo_data_plane.slice_cumulative_audio(request_id, np.zeros(24000, dtype=np.float32))
-    handler._minicpmo_data_plane.segment_text_delta(request_id, "hello")
-    handler._minicpmo_data_plane.mark_terminal(request_id)
+    handler._serving_runtime_adapter.data_plane.slice_cumulative_audio(request_id, np.zeros(24000, dtype=np.float32))
+    handler._serving_runtime_adapter.data_plane.segment_text_delta(request_id, "hello")
+    handler._serving_runtime_adapter.data_plane.mark_terminal(request_id)
     native = MiniCPMO45ServingSessionState()
-    handler._minicpmo_sessions[session_id] = native
+    handler._serving_runtime_adapter.session_states[session_id] = native
 
     event = _native_session_create(session_id)
     event["session"]["extra_body"]["auto_response"] = True
@@ -3596,8 +3609,8 @@ async def test_minicpmo_native_duplex_session_close_cleans_auto_response_data_pl
 
     await handler.handle_session(ws)
 
-    assert not handler._minicpmo_data_plane.has_request(request_id)
-    assert session_id not in handler._minicpmo_sessions
+    assert not handler._serving_runtime_adapter.data_plane.has_request(request_id)
+    assert session_id not in handler._serving_runtime_adapter.session_states
 
 
 @pytest.mark.asyncio
@@ -4037,7 +4050,7 @@ async def test_realtime_disconnect_detaches_resumable_session_without_runtime_cl
         ("sid-resumable-disconnect", DuplexLeaseActivity.DETACH),
     ]
     assert handler._registry.get("sid-resumable-disconnect") is not None
-    assert "sid-resumable-disconnect" in handler._minicpmo_sessions
+    assert "sid-resumable-disconnect" in handler._serving_runtime_adapter.session_states
 
 
 @pytest.mark.asyncio
@@ -4061,7 +4074,7 @@ async def test_realtime_initial_resume_token_delivery_failure_closes_unrecoverab
 
     assert engine.closed == [("sid-created-delivery-failure", "disconnect")]
     assert handler._registry.get("sid-created-delivery-failure") is None
-    assert "sid-created-delivery-failure" not in handler._minicpmo_sessions
+    assert "sid-created-delivery-failure" not in handler._serving_runtime_adapter.session_states
 
 
 @pytest.mark.asyncio
@@ -4097,7 +4110,7 @@ async def test_realtime_send_after_created_disconnect_preserves_resumable_sessio
         ("sid-created-then-disconnected", DuplexLeaseActivity.DETACH),
     ]
     assert handler._registry.get("sid-created-then-disconnected") is not None
-    assert "sid-created-then-disconnected" in handler._minicpmo_sessions
+    assert "sid-created-then-disconnected" in handler._serving_runtime_adapter.session_states
 
 
 @pytest.mark.asyncio
@@ -4196,7 +4209,7 @@ async def test_realtime_resume_preserves_append_tail_order_across_connections():
         pytest.fail("resumable session did not open")
     session = handler._registry.get("sid-resume-append-order")
     assert session is not None
-    native_state = handler._minicpmo_session_state(session)
+    native_state = handler._runtime_session_state(session)
     first_scheduler = native_state.silence_continuation_scheduler
     assert first_scheduler is not None
     first.put(
@@ -4513,7 +4526,7 @@ async def test_realtime_disconnect_grace_cancels_only_orphan_response():
     assert engine.aborted == ["orphan-request"]
     assert orphan_task.cancelled()
     assert session.active_response_id is None
-    assert "sid-grace-response" in handler._minicpmo_sessions
+    assert "sid-grace-response" in handler._serving_runtime_adapter.session_states
 
 
 @pytest.mark.asyncio
@@ -4564,7 +4577,7 @@ async def test_realtime_idle_ttl_lifecycle_removes_detached_serving_projection()
     await asyncio.sleep(0.05)
 
     assert handler._registry.get("sid-idle-expired") is None
-    assert "sid-idle-expired" not in handler._minicpmo_sessions
+    assert "sid-idle-expired" not in handler._serving_runtime_adapter.session_states
     assert "sid-idle-expired" not in handler._session_tasks
     assert engine.closed == []
 
@@ -5512,7 +5525,7 @@ async def test_minicpmo_native_duplex_separates_public_and_runtime_config(monkey
         return [0.25] * 1600, 16000
 
     monkeypatch.setattr(
-        "vllm_omni.experimental.fullduplex.minicpmo45.MiniCPMO45NativeDuplexServingAdapter.resolve_ref_audio",
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.MiniCPMO45NativeDuplexServingAdapter.resolve_ref_audio",
         fake_resolve_ref_audio,
     )
     event = _native_session_create("sid-native-ref-audio", modalities=["text", "audio"])
@@ -5635,7 +5648,7 @@ async def test_minicpmo_native_duplex_preserves_ref_audio_channels_until_normali
             return np.tile(np.array([[0.25, -0.25], [0.5, -0.5]], dtype=np.float32), (800, 1)), 16000
 
     monkeypatch.setattr(
-        "vllm_omni.experimental.fullduplex.minicpmo45.adapter.MediaConnector",
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.adapter.MediaConnector",
         FakeMediaConnector,
     )
 
@@ -5684,7 +5697,7 @@ def test_minicpmo_native_duplex_explicit_barge_in_request_is_deferred_as_listen(
     session = DuplexSession(
         session_id="sid-native-explicit-barge-disabled",
         config=DuplexSessionConfig(overlap_policy=DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value),
-        capabilities=DuplexCapabilities.minicpmo45_native(),
+        capabilities=minicpmo45_native_capabilities(),
     )
     payload = {
         "type": "audio",
@@ -5851,9 +5864,9 @@ async def test_minicpmo_auto_response_restarts_drain_when_append_races_idle_exit
         session_id="sid-native-late-output",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     session.bind_request(request_id)
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     projected_batches: list[object] = []
     projected = asyncio.Event()
 
@@ -6605,7 +6618,7 @@ async def test_minicpmo_native_auto_response_preserves_silence_continuations_acr
     session.capabilities.chunk_period_ms = 50
     session.bind_request(request_id)
     response_id = session.begin_response(turn_id=session.turn_id)
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     scheduler = native.silence_continuation_scheduler
     assert scheduler is not None
 
@@ -6682,7 +6695,7 @@ async def test_minicpmo_native_duplex_uses_segment_text_metadata_for_transcript_
 
     async def emit(output: object) -> None:
         result = {"data_plane_outputs": [output]}
-        for native_result in handler._minicpmo_data_plane.project(
+        for native_result in handler._serving_runtime_adapter.data_plane.project(
             result,
             context=_data_plane_context(session),
         ):
@@ -6766,7 +6779,7 @@ async def test_minicpmo_native_duplex_continuous_speak_reuses_active_response_un
 
     async def emit(output: object) -> None:
         result = {"data_plane_outputs": [output]}
-        for native_result in handler._minicpmo_data_plane.project(
+        for native_result in handler._serving_runtime_adapter.data_plane.project(
             result,
             context=_data_plane_context(session),
         ):
@@ -7016,7 +7029,7 @@ async def test_minicpmo_auto_response_segment_complete_continues_until_model_lis
         session_id="sid-native-segment-complete",
         config=DuplexSessionConfig(extra_body={"auto_response": True}),
     )
-    session.capabilities = DuplexCapabilities.minicpmo45_native()
+    session.capabilities = minicpmo45_native_capabilities()
     response_id = session.begin_response()
     request_id = "duplex-sid-native-segment-complete-stage0"
     session.bind_request(request_id)
@@ -7052,7 +7065,7 @@ async def test_minicpmo_auto_response_segment_complete_continues_until_model_lis
     assert emitted is False
     assert session.active_response_id == response_id
     assert session.active_request_id == request_id
-    assert not handler._minicpmo_data_plane.is_terminal(request_id)
+    assert not handler._serving_runtime_adapter.data_plane.is_terminal(request_id)
     assert sent == []
     assert len(engine.appended) == 1
     _, mode, payload, final = engine.appended[0]

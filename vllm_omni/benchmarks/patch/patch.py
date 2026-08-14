@@ -56,13 +56,13 @@ from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
 )
 from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
 from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
-from vllm_omni.experimental.fullduplex.client import (
+from vllm_omni.metrics import definitions as defs
+from vllm_omni.metrics.utils import coerce_positive_int_scalar
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
     RealtimeDuplexClient,
     summarize_session_request_metrics,
     wait_for,
 )
-from vllm_omni.metrics import definitions as defs
-from vllm_omni.metrics.utils import coerce_positive_int_scalar
 
 logger = init_logger(__name__)
 

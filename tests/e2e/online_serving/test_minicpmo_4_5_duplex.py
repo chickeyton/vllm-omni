@@ -26,7 +26,9 @@ from tests.e2e.online_serving.run_minicpmo_realtime_duplex_multi_session import 
     run_multi_session,
 )
 from tests.helpers.mark import hardware_test
-from vllm_omni.experimental.fullduplex.client import build_realtime_url
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
+    build_realtime_url,
+)
 
 pytestmark = pytest.mark.omni
 
