@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_omni.experimental.fullduplex.personaplex.policy import (
+from vllm_omni.model_executor.models.personaplex.duplex.policy import (
     SILENCE_TOKENS,
     SINE_TOKENS,
 )
-from vllm_omni.experimental.fullduplex.personaplex.stage0 import (
+from vllm_omni.model_executor.models.personaplex.duplex.stage0 import (
     PersonaPlexStage0DuplexRuntime,
 )
 from vllm_omni.model_executor.models.personaplex.personaplex_talker import (

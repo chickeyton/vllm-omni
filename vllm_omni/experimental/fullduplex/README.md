@@ -1,40 +1,35 @@
-# Experimental Full-Duplex
+# Experimental Full-Duplex (JoyVL)
 
-This package contains two experimental integrations:
+This package now contains only the JoyVL framework and its example
+integration:
 
 ```text
-core/        generic duplex scaffold (adapter, session, turn runtime)
-joyvl/       JoyVL model-specific integration
-personaplex/ PersonaPlex lockstep engine, model-owned runtime, and serving
+core/   generic duplex scaffold used by the JoyVL adapter
+joyvl/  JoyVL model-specific integration
 ```
 
 To run JoyVL, see
 [`recipes/JD/JoyAI-VL-Interaction.md`](../../../recipes/JD/JoyAI-VL-Interaction.md).
 
-`personaplex/` is a Moshi-class, pure-lockstep speech-to-speech model on the
-`core/` contracts. It keeps `core/` untouched: the lockstep lifecycle (ONE
-eternal, frame-clocked response that drains on close, instead of the turn-style
-start/cancel-per-trigger one) is model policy and lives in the model package as
-`PersonaPlexDuplexRuntime`, mirroring the model-owned runtime shape of the
-MiniCPM-o duplex work. Its runnable serving path is `personaplex/serving/`
-(single-session lease or `--batch-size` elastic slots) over
-`personaplex/session.py` (lockstep driver). See also
-`recipes/NVIDIA/PersonaPlex.md`.
-
-The MiniCPM-o 4.5 native full-duplex runtime graduated out of this package.
-It now lives in the stable tree:
+The MiniCPM-o 4.5 and PersonaPlex native full-duplex runtimes graduated out
+of this package. They now live in the stable tree:
 
 ```text
 vllm_omni/engine/duplex/                       engine control plane, sessions, leases
 vllm_omni/entrypoints/duplex/           WebSocket serving and Realtime projection
 vllm_omni/entrypoints/duplex_request_client.py request/output lifecycle
 vllm_omni/model_executor/models/minicpmo_4_5/duplex/  MiniCPM adapter
+vllm_omni/model_executor/models/personaplex/duplex/   PersonaPlex adapter
 vllm_omni/model_executor/duplex_sampling.py    AR-runner sampling hook helper
 vllm_omni/outputs/duplex.py                    typed output decision envelope
 ```
 
-For its architecture and validation scope, see
-[`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md).
+For their architecture and validation scope, see
+[`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md) and
+[`docs/design/fullduplex-personaplex.md`](../../../docs/design/fullduplex-personaplex.md).
+PersonaPlex's single-process demo tier (browser client, standalone Moshi-web
+server, `core/`-scaffold adapter) was demo-only and was removed rather than
+graduated; the production path serves through the generic `/v1/duplex` stack.
 
 ## Adding a full-duplex model on the core contracts
 
@@ -46,7 +41,10 @@ only model policy.
    model-specific code there and do not touch `core/`.
 2. Implement one `DuplexAdapter` (`capabilities` / `on_input` / `respond`; the
    rest have defaults). Turn-based models run through `core.DuplexRuntime`
-   unchanged; a model needing a different lifecycle carries its own runtime in
-   its package (see `personaplex/adapter.py::PersonaPlexDuplexRuntime`).
+   unchanged.
 3. Promote a helper from a model package up into `core/` only once a second
    model actually needs it.
+
+For production serving, prefer the stable plugin seams instead
+(`duplex_serving_adapter` / `duplex_runtime_extension` dotted strings in the
+model's `pipeline.py`), as MiniCPM-o 4.5 and PersonaPlex do.

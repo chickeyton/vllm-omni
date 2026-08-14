@@ -68,6 +68,7 @@ if missing:
 forbidden_prefixes = (
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex.client",
+    "vllm_omni.model_executor.models.personaplex.duplex",
 )
 loaded = sorted(
     name
@@ -149,4 +150,6 @@ def test_engine_duplex_uses_canonical_contract_module_names() -> None:
     # __pycache__ leftovers may exist, so assert on source files, not the dir
     old_engine_dir = REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "engine"
     assert not list(old_engine_dir.glob("*.py"))
+    old_personaplex_dir = REPO_ROOT / "vllm_omni" / "experimental" / "fullduplex" / "personaplex"
+    assert not list(old_personaplex_dir.glob("**/*.py"))
     assert not (core_dir / "identity.py").exists()

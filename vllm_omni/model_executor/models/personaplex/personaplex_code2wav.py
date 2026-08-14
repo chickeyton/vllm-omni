@@ -23,7 +23,7 @@ Layout contract (mirrors ``Qwen3TTSCode2Wav``):
 The Mimi decoder is the transformers ``MimiModel`` (kyutai/mimi weights), not
 in vLLM's safetensors loader, so they are loaded eagerly in ``load_weights``
 part of the vLLM weights iterator (the codec owns its own checkpoint; see the
-experimental fullduplex package for the same pattern).
+``duplex`` subpackage of this model folder for the same pattern).
 """
 
 from __future__ import annotations
