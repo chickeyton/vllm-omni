@@ -26,9 +26,7 @@ from tests.e2e.online_serving.run_minicpmo_realtime_duplex_multi_session import 
     run_multi_session,
 )
 from tests.helpers.mark import hardware_test
-from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
-    build_realtime_url,
-)
+from vllm_omni.clients.duplex import build_realtime_url
 
 pytestmark = pytest.mark.omni
 
@@ -80,7 +78,13 @@ async def _receive_protocol_events(ws, required_types: set[str], *, timeout_s: f
 
 async def _run_protocol_smoke(*, url: str, model: str, ref_audio: Path) -> list[dict[str, object]]:
     session_id = f"duplex-ci-protocol-{uuid.uuid4().hex}"
-    websocket_url = build_realtime_url(url, model, autostart=False, session_id=session_id)
+    websocket_url = build_realtime_url(
+        url,
+        model,
+        autostart=False,
+        session_id=session_id,
+        extra_query={"minicpmo45_native_duplex": "1"},
+    )
     async with websockets.connect(websocket_url, max_size=64 * 1024 * 1024) as ws:
         await ws.send(
             json.dumps(

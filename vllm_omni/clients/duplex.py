@@ -43,6 +43,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 __all__ = [
+    "PCM16_BYTES_PER_SAMPLE",
+    "PCM16_SAMPLE_RATE",
     "AudioFormat",
     "AudioDelta",
     "ConnectionResumed",
@@ -65,11 +67,20 @@ __all__ = [
     "WebSocketTransport",
     "TextDelta",
     "TranscriptDelta",
+    "acknowledge_collected_playback",
     "audio_data_url",
+    "build_realtime_url",
     "image_data_url",
     "read_pcm16_wav",
+    "summarize_session_request_metrics",
+    "wait_for_condition",
     "write_pcm16_wav",
 ]
+
+# The default duplex input wire format (16 kHz mono PCM16), kept as plain
+# constants for callers doing byte/duration arithmetic outside AudioFormat.
+PCM16_SAMPLE_RATE = 16_000
+PCM16_BYTES_PER_SAMPLE = 2
 
 
 # ---------------------------------------------------------------------------
@@ -1176,6 +1187,11 @@ class EventCollector:
         except DuplexSessionClosedError:
             pass
 
+    @staticmethod
+    def response_id(event: dict[str, object]) -> str | None:
+        """Response identity of one raw event (``response_id`` or ``response.id``)."""
+        return wrap_event(event).response_id
+
     def add(self, event: dict[str, object] | DuplexEvent, *, received_at_s: float | None = None) -> None:
         raw = event.raw if isinstance(event, DuplexEvent) else event
         received_at = time.monotonic() if received_at_s is None else float(received_at_s)
@@ -1230,10 +1246,12 @@ class EventCollector:
         after_s: float,
         input_committed_at_s: float | None = None,
         response_id: str | None = None,
+        measurement_origin: dict[str, str] | None = None,
     ) -> dict[str, object]:
         """Summarize engine token metrics and client-observed audio cadence."""
         stage0_metrics: dict[str, object] | None = None
         response_created_at_s: float | None = None
+        first_text_received_at_s: float | None = None
         audio_received_at_s: list[float] = []
         cumulative_audio_ms: list[float] = []
         for event, received_at_s in zip(self.events, self.event_received_at_s, strict=True):
@@ -1244,6 +1262,18 @@ class EventCollector:
                 continue
             if event.get("type") == "response.created" and response_created_at_s is None:
                 response_created_at_s = received_at_s
+            if (
+                event.get("type")
+                in {
+                    "response.audio_transcript.delta",
+                    "response.output_text.delta",
+                    "response.text.delta",
+                }
+                and isinstance(event.get("delta"), str)
+                and bool(event["delta"])
+                and first_text_received_at_s is None
+            ):
+                first_text_received_at_s = received_at_s
 
             stage_metrics = _event_stage_metrics(event)
             stage0 = stage_metrics.get("0") if isinstance(stage_metrics, dict) else None
@@ -1306,7 +1336,51 @@ class EventCollector:
                 "chunk_duration_ms": _interval_summary(chunk_durations_ms),
                 "max_chunk_gap_ms": interval_summary["max"],
             }
+            request_started_at_s = input_committed_at_s if input_committed_at_s is not None else response_created_at_s
+            if request_started_at_s is not None:
+                # Lazily import so this module stays importable without the
+                # vllm_omni metrics stack (the client is otherwise standalone).
+                from vllm_omni.metrics.definitions import compute_audio_rtf
+
+                audio_duration_ms = (
+                    max(cumulative_audio_ms)
+                    if cumulative_audio_ms
+                    else self._format_for_bytes().duration_ms(len(self.audio_bytes(response_id)))
+                )
+                audio_generation_ms = max(
+                    0.0,
+                    (audio_received_at_s[-1] - request_started_at_s) * 1000.0,
+                )
+                result["request_metrics"] = {
+                    "source": "client_monotonic_receive",
+                    "measurement_origin": measurement_origin
+                    or {
+                        "ttft": "input_audio_buffer.commit client send to first non-empty text delta",
+                        "ttfp": "input_audio_buffer.commit client send to first audio packet",
+                        "rtf": "commit-to-last-audio receive time divided by emitted audio duration",
+                    },
+                    "ttft_ms": (
+                        _rounded_ms((first_text_received_at_s - request_started_at_s) * 1000.0)
+                        if first_text_received_at_s is not None
+                        else None
+                    ),
+                    "ttfp_ms": _rounded_ms((audio_received_at_s[0] - request_started_at_s) * 1000.0),
+                    "rtf": round(
+                        compute_audio_rtf(
+                            audio_generation_ms / 1000.0,
+                            audio_duration_ms / 1000.0,
+                        ),
+                        6,
+                    )
+                    if audio_duration_ms > 0
+                    else None,
+                    "audio_generation_ms": _rounded_ms(audio_generation_ms),
+                    "audio_duration_ms": _rounded_ms(audio_duration_ms),
+                }
         return result
+
+    def _format_for_bytes(self) -> AudioFormat:
+        return AudioFormat("pcm16", self.output_sample_rate_hz)
 
 
 # ---------------------------------------------------------------------------
@@ -1346,3 +1420,88 @@ def write_pcm16_wav(path: Path, pcm16: bytes, *, sample_rate_hz: int) -> None:
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate_hz)
         wav_file.writeframes(pcm16)
+
+
+# ---------------------------------------------------------------------------
+# Probe/benchmark helpers
+
+
+def build_realtime_url(
+    url: str,
+    model: str,
+    *,
+    autostart: bool | None = None,
+    session_id: str | None = None,
+    extra_query: dict[str, str] | None = None,
+) -> str:
+    """Add explicit duplex query parameters to a Realtime URL.
+
+    :class:`DuplexClient` builds its own URL; this helper is for drivers that
+    speak the wire protocol directly. Model-specific query flags (e.g.
+    MiniCPM-o's ``minicpmo45_native_duplex``) ride in ``extra_query``.
+    """
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("duplex", "1")
+    query.setdefault("model", model)
+    for key, value in (extra_query or {}).items():
+        query.setdefault(key, value)
+    if autostart is not None:
+        query.setdefault("autostart", "1" if autostart else "0")
+    if session_id:
+        query.setdefault("session_id", session_id)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+async def wait_for_condition(
+    predicate: Callable[[], bool],
+    *,
+    timeout_s: float,
+    label: str,
+) -> None:
+    """Poll a collector predicate without coupling to a scenario runner."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise TimeoutError(f"Timed out waiting for {label}")
+
+
+def summarize_session_request_metrics(
+    request_metrics: list[dict[str, object]],
+    *,
+    session_id: str | None,
+) -> dict[str, object]:
+    """Average client-observed metrics across turns that emitted audio."""
+
+    def mean(metric: str, *, digits: int = 3) -> float | None:
+        values = [
+            float(request[metric])
+            for request in request_metrics
+            if isinstance(request.get(metric), int | float) and math.isfinite(float(request[metric]))
+        ]
+        return round(sum(values) / len(values), digits) if values else None
+
+    return {
+        "session_id": session_id,
+        "audio_turn_count": len(request_metrics),
+        "mean_ttft_ms": mean("ttft_ms"),
+        "mean_ttfp_ms": mean("ttfp_ms"),
+        "mean_rtf": mean("rtf", digits=6),
+    }
+
+
+async def acknowledge_collected_playback(client: DuplexClient, collector: EventCollector) -> None:
+    """Ack full playback of every collected response's audio (probe shorthand)."""
+    output_format = AudioFormat("pcm16", collector.output_sample_rate_hz)
+    for response_id in collector.response_ids:
+        pcm16 = collector.audio_bytes(response_id)
+        if not pcm16:
+            continue
+        played_ms = output_format.duration_ms(len(pcm16))
+        await client.ack_playback(
+            played_ms,
+            response_id=response_id,
+            item_id=f"item_{response_id}",
+        )

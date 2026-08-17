@@ -47,16 +47,27 @@ try:
 except ImportError as exc:  # pragma: no cover - demo dependency.
     raise SystemExit("Install websockets first: pip install websockets") from exc
 
-from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (  # noqa: E402
+from vllm_omni.clients.duplex import (  # noqa: E402
     PCM16_BYTES_PER_SAMPLE,
     PCM16_SAMPLE_RATE,
-    RealtimeEventCollector,
+    EventCollector,
     build_realtime_url,
     read_pcm16_wav,
     summarize_session_request_metrics,
 )
 
-_url_with_model = build_realtime_url
+
+def _url_with_model(url, model, *, autostart=None, session_id=None):
+    # This driver speaks the MiniCPM-o native duplex wire contract.
+    return build_realtime_url(
+        url,
+        model,
+        autostart=autostart,
+        session_id=session_id,
+        extra_query={"minicpmo45_native_duplex": "1"},
+    )
+
+
 _read_wav_pcm16 = read_pcm16_wav
 
 
@@ -70,7 +81,7 @@ def _ref_audio_data_url(path: str | None) -> str | None:
 @dataclass
 class DemoState:
     events: list[dict[str, object]] = field(default_factory=list)
-    timing_events: RealtimeEventCollector = field(default_factory=RealtimeEventCollector)
+    timing_events: EventCollector = field(default_factory=EventCollector)
     audio_deltas: list[bytes] = field(default_factory=list)
     response_audio_deltas: dict[str, list[bytes]] = field(default_factory=dict)
     response_ids: list[str] = field(default_factory=list)

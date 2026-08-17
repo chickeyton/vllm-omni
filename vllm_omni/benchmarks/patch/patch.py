@@ -56,13 +56,17 @@ from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
 )
 from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
 from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
+from vllm_omni.clients.duplex import (
+    AudioFormat,
+    DuplexClient,
+    EventCollector,
+    SessionConfig,
+    acknowledge_collected_playback,
+    summarize_session_request_metrics,
+    wait_for_condition,
+)
 from vllm_omni.metrics import definitions as defs
 from vllm_omni.metrics.utils import coerce_positive_int_scalar
-from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import (
-    RealtimeDuplexClient,
-    summarize_session_request_metrics,
-    wait_for,
-)
 
 logger = init_logger(__name__)
 
@@ -1320,6 +1324,80 @@ def _realtime_websocket_url(api_url: str) -> str:
     return urlunsplit((scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
+class _RealtimeTTSProbe:
+    """Explicit-session Realtime TTS driver over the public duplex client.
+
+    Owns an :class:`EventCollector` (``.events``) so turn metrics can be read
+    with controlled timestamps; the session handshake happens in
+    :meth:`configure` because the benchmark decides the session shape at
+    request time.
+    """
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self.events = EventCollector()
+        self._client: DuplexClient | None = None
+        self._consume_task: asyncio.Task[None] | None = None
+
+    async def __aenter__(self) -> "_RealtimeTTSProbe":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._client is not None:
+            await self._client.__aexit__(exc_type, exc, tb)
+        if self._consume_task is not None:
+            try:
+                await asyncio.wait_for(self._consume_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._consume_task.cancel()
+
+    async def configure(
+        self,
+        model: str,
+        *,
+        output_audio_format: str = "pcm16",
+        instructions: str | None = None,
+        native_duplex: bool = False,
+        auto_response: bool = False,
+        extra_body: dict[str, object] | None = None,
+        session_id: str | None = None,
+        timeout_s: float = 120.0,
+    ) -> None:
+        session_extra_body: dict[str, object] = dict(extra_body or {})
+        session_extra_body["minicpmo45_native_duplex"] = bool(native_duplex)
+        config = SessionConfig(
+            output_audio=AudioFormat(output_audio_format, 24_000),
+            instructions=instructions,
+            auto_response=auto_response,
+            overlap_policy="listen_only",
+            playback_commit_policy="ack_only",
+            extra_body=session_extra_body,
+        )
+        self._client = DuplexClient(
+            self._url,
+            model=model,
+            config=config,
+            session_id=session_id,
+            reconnect=None,
+            heartbeat_interval_s=None,
+            handshake_timeout_s=timeout_s,
+        )
+        await self._client.__aenter__()
+        self._consume_task = asyncio.create_task(self.events.consume(self._client))
+
+    async def send(self, event: dict[str, object]) -> None:
+        assert self._client is not None
+        await self._client.send(event)
+
+    async def acknowledge_playback(self) -> None:
+        assert self._client is not None
+        await acknowledge_collected_playback(self._client, self.events)
+
+    async def close_session(self, *, timeout_s: float = 20.0) -> None:
+        assert self._client is not None
+        await self._client.close(timeout_s=timeout_s)
+
+
 async def async_request_openai_realtime_duplex(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -1346,7 +1424,7 @@ async def async_request_openai_realtime_duplex(
         turn_prompts = [("", request_func_input.prompt)]
     session_id = f"seed-tts-{request_func_input.request_id or uuid.uuid4().hex}"
     try:
-        async with RealtimeDuplexClient(_realtime_websocket_url(request_func_input.api_url)) as client:
+        async with _RealtimeTTSProbe(_realtime_websocket_url(request_func_input.api_url)) as client:
             await client.configure(
                 request_func_input.model_name or request_func_input.model,
                 output_audio_format="pcm16",
@@ -1386,7 +1464,7 @@ async def async_request_openai_realtime_duplex(
                     }
                 )
                 await client.send({"type": "response.create"})
-                await wait_for(
+                await wait_for_condition(
                     lambda: client.events.count("response.done") > done_before
                     or len(client.events.errors()) > errors_before,
                     timeout_s=180.0,

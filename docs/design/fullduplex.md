@@ -395,9 +395,9 @@ Stable engine and entrypoint modules import the duplex kernel eagerly at
 module load (top-of-file imports). Duplex behavior remains opt-in: the
 ControlPlane, ControlClient, and request client are *constructed* only on
 duplex-enabled deployments, and the model runtime extension still loads only
-through the dotted-string plugin path. The websockets demo client
-(`model_executor/models/minicpmo_4_5/duplex/client.py`) is never imported by
-runtime code.
+through the dotted-string plugin path. The client-side package
+(`vllm_omni/clients/`, home of the public `DuplexClient`) is never imported
+by runtime code.
 
 `PipelineConfig.duplex_control_enabled` enables the generic mechanism, while
 `PipelineConfig.duplex_runtime_extension` separately selects the model adapter.

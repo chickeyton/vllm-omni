@@ -46,8 +46,8 @@ def test_isolated_import_ignores_conflicting_gpu_visibility(monkeypatch: pytest.
 def test_stable_engine_imports_load_duplex_kernel_eagerly() -> None:
     # The duplex kernel is imported eagerly by the stable engine modules.
     # Model-specific duplex adapters must still load only via the
-    # dotted-string plugin paths, and the websockets demo client must never
-    # be imported (it exits at import time when websockets is missing).
+    # dotted-string plugin paths, and the client-side vllm_omni.clients
+    # package must never enter the stable runtime import graph.
     _assert_isolated_import_succeeds("""
 import sys
 
@@ -68,7 +68,6 @@ if missing:
 forbidden_prefixes = (
     "vllm_omni.clients",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
-    "vllm_omni.model_executor.models.minicpmo_4_5.duplex.client",
     "vllm_omni.model_executor.models.personaplex.duplex",
 )
 loaded = sorted(

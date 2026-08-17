@@ -20,7 +20,7 @@ from vllm_omni.benchmarks.patch.patch import (
     async_request_openai_chat_omni_completions,
     async_request_openai_realtime_duplex,
 )
-from vllm_omni.model_executor.models.minicpmo_4_5.duplex.client import RealtimeEventCollector
+from vllm_omni.clients.duplex import EventCollector
 
 pytestmark = [pytest.mark.core_model, pytest.mark.benchmark, pytest.mark.cpu]
 
@@ -55,7 +55,7 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
 
         def __init__(self, url):
             assert url == "ws://localhost:8000/v1/realtime?duplex=1"
-            self.events = RealtimeEventCollector()
+            self.events = EventCollector()
             self.configure_kwargs = None
             self.sent = []
             self.response_count = 0
@@ -113,7 +113,7 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
             return None
 
     monkeypatch.setattr(
-        "vllm_omni.benchmarks.patch.patch.RealtimeDuplexClient",
+        "vllm_omni.benchmarks.patch.patch._RealtimeTTSProbe",
         FakeRealtimeClient,
     )
     request_input = RequestFuncInput(
