@@ -23,11 +23,13 @@ from vllm_omni.clients.duplex import (  # noqa: E402
     PCM16_SAMPLE_RATE,
     DuplexClient,
     EventCollector,
-    SessionConfig,
     acknowledge_collected_playback,
     read_pcm16_wav,
     wait_for_condition,
     write_pcm16_wav,
+)
+from vllm_omni.clients.minicpmo_4_5 import (  # noqa: E402
+    create_duplex_session_config,
 )
 
 
@@ -188,7 +190,7 @@ async def run_demo(args: argparse.Namespace) -> dict[str, object]:
     client = DuplexClient(
         args.url,
         model=args.model,
-        config=SessionConfig.for_minicpmo45(
+        config=create_duplex_session_config(
             ref_audio=_ref_audio_data_url(args.ref_audio),
             temperature=args.temperature,
         ),

@@ -14,20 +14,20 @@ stack through the standard plugin seams (``duplex_serving_adapter`` /
 - :class:`PersonaPlexPcmAppendBuffer`  PCM input framing
 """
 
-from vllm_omni.model_executor.models.personaplex.duplex.config import (
+from .config import (
     PersonaPlexConfig,
 )
-from vllm_omni.model_executor.models.personaplex.duplex.input import (
+from .input import (
     PersonaPlexPcmAppendBuffer,
 )
-from vllm_omni.model_executor.models.personaplex.duplex.policy import PrefillStep
-from vllm_omni.model_executor.models.personaplex.duplex.runtime_extension import (
+from .policy import PrefillStep
+from .runtime_extension import (
     PersonaPlexDuplexRuntimeExtension,
 )
-from vllm_omni.model_executor.models.personaplex.duplex.serving_adapter import (
+from .serving_adapter import (
     PersonaPlexServingRuntimeAdapter,
 )
-from vllm_omni.model_executor.models.personaplex.duplex.stage0 import (
+from .stage0 import (
     PersonaPlexStage0DuplexRuntime,
 )
 

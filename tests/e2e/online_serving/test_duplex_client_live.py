@@ -28,10 +28,10 @@ from vllm_omni.clients.duplex import (
     DuplexClient,
     EventCollector,
     ReconnectPolicy,
-    SessionConfig,
     audio_data_url,
     read_pcm16_wav,
 )
+from vllm_omni.clients.minicpmo_4_5 import create_duplex_session_config
 
 pytestmark = pytest.mark.omni
 
@@ -42,7 +42,7 @@ _MAX_LISTEN_ROUNDS = 30
 async def _run_live_session(*, url: str, model: str, ref_audio: Path, input_wav: Path) -> dict[str, object]:
     # temperature 0.0 keeps the response-required reply short and
     # deterministic (same as the validated demo driver).
-    config = SessionConfig.for_minicpmo45(ref_audio=audio_data_url(ref_audio), temperature=0.0)
+    config = create_duplex_session_config(ref_audio=audio_data_url(ref_audio), temperature=0.0)
     client = DuplexClient(
         url,
         model=model,

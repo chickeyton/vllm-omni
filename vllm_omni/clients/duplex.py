@@ -8,9 +8,10 @@ barge-in, and transparent session resume on transport drops.
 
 Example::
 
-    from vllm_omni.clients.duplex import DuplexClient, SessionConfig
+    from vllm_omni.clients.duplex import DuplexClient
+    from vllm_omni.clients.minicpmo_4_5 import create_duplex_session_config
 
-    cfg = SessionConfig.for_minicpmo45(ref_audio=audio_data_url(wav_bytes))
+    cfg = create_duplex_session_config(ref_audio=audio_data_url(wav_bytes))
     async with DuplexClient("ws://localhost:8099", model=model, config=cfg) as client:
         await client.stream_pcm(pcm16)
         await client.commit()
@@ -36,7 +37,7 @@ import random
 import time
 import wave
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -152,8 +153,10 @@ class AudioFormat:
 class SessionConfig:
     """Model-agnostic duplex session configuration.
 
-    Model-specific knobs ride in ``extra_body`` (or the per-model classmethod
-    presets, which are data only — the client itself stays model-neutral).
+    Model-specific knobs ride in ``extra_body``; each duplex model ships a
+    ``create_duplex_session_config`` preset in its client module (e.g.
+    ``vllm_omni.clients.minicpmo_4_5``), so the client itself stays
+    model-neutral.
     """
 
     modalities: tuple[str, ...] = ("audio", "text")
@@ -195,30 +198,6 @@ class SessionConfig:
         extra_body.update(self.extra_body)
         payload["extra_body"] = extra_body
         return payload
-
-    @classmethod
-    def for_minicpmo45(cls, *, ref_audio: str | None = None, **overrides: object) -> SessionConfig:
-        """Preset matching the MiniCPM-o 4.5 native duplex deployment."""
-        extra_body = {"minicpmo45_native_duplex": True, "force_listen_count": 0}
-        extra_body.update(overrides.pop("extra_body", {}))
-        config = cls(
-            ref_audio=ref_audio,
-            overlap_policy="listen_only",
-            playback_commit_policy="ack_only",
-            extra_body=extra_body,
-        )
-        return replace(config, **overrides) if overrides else config
-
-    @classmethod
-    def for_personaplex(cls, *, voice: str = "NATF2.pt", persona: str = "", **overrides: object) -> SessionConfig:
-        """Preset matching the PersonaPlex duplex deployment (24 kHz float32 in)."""
-        config = cls(
-            input_audio=AudioFormat("pcm_f32le", 24_000),
-            output_audio=AudioFormat("pcm16", 24_000),
-            voice=voice,
-            instructions=persona,
-        )
-        return replace(config, **overrides) if overrides else config
 
 
 @dataclass(frozen=True)

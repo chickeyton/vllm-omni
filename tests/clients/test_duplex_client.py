@@ -101,26 +101,6 @@ def test_session_config_payload_defaults():
     assert "ref_audio" not in payload
 
 
-def test_session_config_minicpmo_preset():
-    config = SessionConfig.for_minicpmo45(ref_audio="data:audio/wav;base64,AAA=", temperature=0.0)
-    payload = config.to_session_payload(model="openbmb/MiniCPM-o-4_5")
-    assert payload["ref_audio"] == "data:audio/wav;base64,AAA="
-    assert payload["overlap_policy"] == "listen_only"
-    assert payload["playback_commit_policy"] == "ack_only"
-    assert payload["extra_body"]["minicpmo45_native_duplex"] is True
-    assert payload["extra_body"]["auto_response"] is True
-    assert payload["temperature"] == 0.0
-
-
-def test_session_config_personaplex_preset():
-    config = SessionConfig.for_personaplex(voice="NATF2.pt", persona="You are calm.")
-    assert config.input_audio == AudioFormat("pcm_f32le", 24_000)
-    payload = config.to_session_payload(model="nvidia/personaplex-7b-v1")
-    assert payload["input_audio_format"] == "pcm_f32le"
-    assert payload["voice"] == "NATF2.pt"
-    assert payload["instructions"] == "You are calm."
-
-
 def test_audio_format_math():
     fmt = AudioFormat("pcm16", 16_000)
     assert fmt.byte_count(100) == 3200
