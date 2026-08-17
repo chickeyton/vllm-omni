@@ -190,25 +190,15 @@ async def test_stream_pcm_chunking():
         sock.feed(SESSION_CLOSED)
 
 
-async def test_barge_in_composes_documented_events():
+async def test_interruption_primitives_send_documented_events():
     sock = FakeSocket()
     sock.feed(SESSION_CREATED)
     client, _ = make_client(sock)
     async with client:
-        await client.barge_in()
+        await client.cancel_response()
+        await client.clear_input()
         types = sock.sent_types()
         assert types.index("response.cancel") < types.index("input_audio_buffer.clear")
-        sock.feed(SESSION_CLOSED)
-
-
-async def test_append_text_uses_conversation_item():
-    sock = FakeSocket()
-    sock.feed(SESSION_CREATED)
-    client, _ = make_client(sock)
-    async with client:
-        await client.append_text("hello")
-        item_events = [event for event in sock.sent if event.get("type") == "conversation.item.create"]
-        assert item_events[0]["item"]["content"] == [{"type": "input_text", "text": "hello"}]
         sock.feed(SESSION_CLOSED)
 
 

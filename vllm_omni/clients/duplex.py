@@ -3,8 +3,8 @@
 """Public asynchronous client for the vLLM-Omni full-duplex Realtime API.
 
 Connects to ``/v1/realtime?duplex=1`` (the normative duplex contract) and
-provides typed events, response demultiplexing, incremental playback acking,
-barge-in, and transparent session resume on transport drops.
+provides typed events, response demultiplexing, incremental playback
+acking, and transparent session resume on transport drops.
 
 Example::
 
@@ -82,6 +82,11 @@ __all__ = [
 # constants for callers doing byte/duration arithmetic outside AudioFormat.
 PCM16_SAMPLE_RATE = 16_000
 PCM16_BYTES_PER_SAMPLE = 2
+
+# Internal transport/backpressure bounds (promote to constructor parameters
+# only if a real consumer needs to tune them).
+_MAX_BUFFERED_EVENTS = 1024
+_MAX_FRAME_BYTES = 64 << 20
 
 
 # ---------------------------------------------------------------------------
@@ -318,14 +323,6 @@ class SessionExpired(DuplexEvent):
     pass
 
 
-class ResyncRequired(DuplexEvent):
-    pass
-
-
-class HeartbeatAck(DuplexEvent):
-    pass
-
-
 class ResponseCreated(DuplexEvent):
     pass
 
@@ -400,8 +397,6 @@ _EVENT_TYPES: dict[str, type[DuplexEvent]] = {
     "session.resumed": SessionResumed,
     "session.closed": SessionClosed,
     "session.expired": SessionExpired,
-    "session.resync_required": ResyncRequired,
-    "session.heartbeat_ack": HeartbeatAck,
     "response.created": ResponseCreated,
     "response.done": ResponseDone,
     "response.audio.delta": AudioDelta,
@@ -469,7 +464,7 @@ class ResponseHandle:
         self.created_event = created_event
         self.done_event: DuplexEvent | None = None
         self._output_format = output_format
-        self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=max_buffered_events)
+        self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=_MAX_BUFFERED_EVENTS)
         self._done = asyncio.Event()
 
     @property
@@ -559,11 +554,8 @@ class DuplexClient:
         config: SessionConfig | None = None,
         session_id: str | None = None,
         reconnect: ReconnectPolicy | None = ReconnectPolicy(),
-        max_buffered_events: int = 1024,
-        max_frame_bytes: int = 64 << 20,
         heartbeat_interval_s: float | None = 30.0,
         handshake_timeout_s: float = 30.0,
-        auto_ack: bool = True,
         connect: ConnectFn | None = None,
     ) -> None:
         self.url = url
@@ -574,17 +566,16 @@ class DuplexClient:
         self.incarnation = 0
         self.resume_token: str | None = None
         self._reconnect = reconnect
-        self._max_buffered_events = max_buffered_events
-        self._max_frame_bytes = max_frame_bytes
         self._heartbeat_interval_s = heartbeat_interval_s
         self._handshake_timeout_s = handshake_timeout_s
-        self._auto_ack = auto_ack
         self._connect_fn: ConnectFn = connect or self._default_connect
         self._ws: WebSocketTransport | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._subscribers: list[asyncio.Queue[DuplexEvent | _ClosedMarker]] = []
-        self._response_queue: asyncio.Queue[ResponseHandle | _ClosedMarker] = asyncio.Queue(maxsize=max_buffered_events)
+        self._response_queue: asyncio.Queue[ResponseHandle | _ClosedMarker] = asyncio.Queue(
+            maxsize=_MAX_BUFFERED_EVENTS
+        )
         self._responses: dict[str, ResponseHandle] = {}
         self._last_server_event_seq: int | None = None
         self._input_audio_end_ms = 0.0
@@ -643,15 +634,6 @@ class DuplexClient:
         except asyncio.TimeoutError:
             self._finalize("close timed out", expected=True)
 
-    async def update_session(self, config: SessionConfig) -> None:
-        self.config = config
-        await self.send(
-            {
-                "type": "session.update",
-                "session": config.to_session_payload(model=self.model, session_id=self.session_id),
-            }
-        )
-
     # -- input ----------------------------------------------------------------
 
     async def append_audio(
@@ -703,30 +685,22 @@ class DuplexClient:
             if realtime:
                 await asyncio.sleep(input_format.duration_ms(len(chunk)) / 1000.0)
 
-    async def append_text(self, text: str) -> None:
-        await self.send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}],
-                },
-            }
-        )
-
     async def commit(self, *, final: bool = True, create_response: bool | None = None) -> None:
         event: dict[str, object] = {"type": "input_audio_buffer.commit", "final": final}
         if create_response is not None:
             event["response_create"] = create_response
         await self.send(event)
 
-    async def create_response(self, **overrides: object) -> None:
-        await self.send({"type": "response.create", "response": overrides})
-
     # -- interruption ---------------------------------------------------------
 
     async def cancel_response(self, response_id: str | None = None) -> None:
+        """Cancel the active (or a specific) response.
+
+        Together with :meth:`clear_input` this composes a client-forced
+        barge-in for sessions whose capabilities advertise
+        ``supports_barge_in``; the currently bundled duplex models do not,
+        so their overlap handling is model-owned.
+        """
         event: dict[str, object] = {"type": "response.cancel"}
         if response_id is not None:
             event["response_id"] = response_id
@@ -734,19 +708,6 @@ class DuplexClient:
 
     async def clear_input(self) -> None:
         await self.send({"type": "input_audio_buffer.clear"})
-
-    async def clear_output(self) -> None:
-        await self.send({"type": "output_audio_buffer.clear"})
-
-    async def barge_in(self) -> None:
-        """Interrupt the assistant: cancel the active response, drop pending input.
-
-        Composed from normative Realtime events (``response.cancel`` +
-        ``input_audio_buffer.clear``). Report playback truncation separately
-        via :meth:`ack_playback` with the milliseconds actually played.
-        """
-        await self.cancel_response()
-        await self.clear_input()
 
     # -- playback contract ------------------------------------------------------
 
@@ -848,7 +809,7 @@ class DuplexClient:
         except ImportError as exc:  # pragma: no cover - websockets is a pinned dep
             raise DuplexConnectionError("The duplex client requires the 'websockets' package") from exc
         try:
-            return await websockets.connect(url, max_size=self._max_frame_bytes)
+            return await websockets.connect(url, max_size=_MAX_FRAME_BYTES)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -864,7 +825,7 @@ class DuplexClient:
             self.resume_token = event.resume_token
 
     def _add_subscriber(self) -> asyncio.Queue[DuplexEvent | _ClosedMarker]:
-        queue: asyncio.Queue[DuplexEvent | _ClosedMarker] = asyncio.Queue(maxsize=self._max_buffered_events)
+        queue: asyncio.Queue[DuplexEvent | _ClosedMarker] = asyncio.Queue(maxsize=_MAX_BUFFERED_EVENTS)
         if self._closed.is_set() and self._closed_marker is not None:
             queue.put_nowait(self._closed_marker)
         else:
@@ -939,7 +900,7 @@ class DuplexClient:
                 handle = ResponseHandle(
                     response_id=response_id,
                     output_format=self.config.output_audio,
-                    max_buffered_events=self._max_buffered_events,
+                    max_buffered_events=_MAX_BUFFERED_EVENTS,
                     created_event=event,
                 )
                 self._responses[response_id] = handle
@@ -958,7 +919,7 @@ class DuplexClient:
                 listen_handle = ResponseHandle(
                     response_id=event.response_id,
                     output_format=self.config.output_audio,
-                    max_buffered_events=self._max_buffered_events,
+                    max_buffered_events=_MAX_BUFFERED_EVENTS,
                     decision="listen",
                 )
                 listen_handle._finish(event)
@@ -979,7 +940,7 @@ class DuplexClient:
             reason = data.get("reason")
             self._finalize(f"expired: {reason}" if reason else "expired", expected=False)
 
-        if isinstance(seq, int) and self._auto_ack and not self._closed.is_set():
+        if isinstance(seq, int) and not self._closed.is_set():
             try:
                 await self._ws.send(json.dumps({"type": "session.event_ack", "server_event_seq": seq}))
             except asyncio.CancelledError:
