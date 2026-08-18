@@ -20,7 +20,9 @@ def _imports_clients_package(path: Path) -> bool:
     module = ast.parse(path.read_text(encoding="utf-8"))
     for node in module.body:
         if isinstance(node, ast.Import):
-            if any(alias.name == _CLIENTS_PACKAGE or alias.name.startswith(_CLIENTS_PACKAGE + ".") for alias in node.names):
+            if any(
+                alias.name == _CLIENTS_PACKAGE or alias.name.startswith(_CLIENTS_PACKAGE + ".") for alias in node.names
+            ):
                 return True
         elif isinstance(node, ast.ImportFrom):
             if node.module and (node.module == _CLIENTS_PACKAGE or node.module.startswith(_CLIENTS_PACKAGE + ".")):

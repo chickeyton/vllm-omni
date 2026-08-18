@@ -395,6 +395,7 @@ async def _drain(predicate, *, timeout_s: float = 2.0) -> None:
             raise AssertionError("condition not reached")
         await asyncio.sleep(0.01)
 
+
 # ---------------------------------------------------------------------------
 # Probe/benchmark helpers (ported from the retired MiniCPM demo client tests)
 
@@ -624,4 +625,3 @@ def test_pcm16_wav_round_trip(tmp_path):
         assert wav_file.getnchannels() == 1
         assert wav_file.getframerate() == 16_000
     assert read_pcm16_wav(path) == pcm16
-

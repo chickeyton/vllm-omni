@@ -158,10 +158,7 @@ async def run(args: argparse.Namespace) -> int:
 
         # ANSWER AGAIN: wait for the answer to the interruption to finish.
         await wait_for_condition(
-            lambda: any(
-                event.get("type") == "response.done"
-                for event in collector.events[events_before_interrupt:]
-            ),
+            lambda: any(event.get("type") == "response.done" for event in collector.events[events_before_interrupt:]),
             timeout_s=args.timeout_s,
             label="response.done after interruption",
         )
