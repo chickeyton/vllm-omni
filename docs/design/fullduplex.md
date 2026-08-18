@@ -476,6 +476,25 @@ Deploy profiles may lower or raise these values to match scheduler capacity,
 but clients cannot override them. The engine remains authoritative for
 admission and cleanup ownership even when the API performs an early check.
 
+### Client-side companion package
+
+The public client surface ships under `vllm_omni/clients/` and stays on the
+consumer side of the boundary above: `vllm_omni.clients.duplex` provides the
+model-agnostic `DuplexClient` (typed events, per-response demux via
+`ResponseHandle`, `session.resume` with acknowledgement-based replay dedup)
+and the `EventCollector` helper used for timing and request-metric summaries.
+Model-specific session defaults live in thin per-model preset modules —
+`vllm_omni.clients.minicpmo_4_5.create_duplex_session_config()` and
+`vllm_omni.clients.personaplex.create_duplex_session_config()` — so the core
+client never imports model packages and the model duplex plugin packages
+never import the client (both directions are enforced by tests:
+`tests/engine/test_duplex_import_boundary.py`,
+`tests/entrypoints/openai_api/test_duplex_capability.py`, and the subprocess
+purity guards in `tests/clients/test_model_session_configs.py`).
+`examples/online_serving/barge_in_client.py` (with its flow companion
+`barge_in_client_flow.md`) is the runnable reference for the client library
+against a live duplex deployment.
+
 ## Generic-Path Cleanup
 
 Model-specific `MINICPMO45_PROFILE_LOGS` probes were removed from:
@@ -523,8 +542,10 @@ deployments do not create its registries and background state.
 For an enabled deployment, the client still selects the Realtime duplex route
 with `?duplex=1` (or an equivalent explicit true value). Model-name matching is
 not used for routing or native-runtime activation. MiniCPM clients explicitly
-set `extra_body.minicpmo45_native_duplex=true`; repository demos do so in their
-session payloads.
+set `extra_body.minicpmo45_native_duplex=true`; the canonical way to do so is
+the `vllm_omni.clients.minicpmo_4_5.create_duplex_session_config()` preset,
+which the repository's barge-in example
+(`examples/online_serving/barge_in_client.py`) uses in its session payload.
 
 `DuplexRequestClient` derives the data-plane request identity from the accepted
 fence and preregisters a resumable `ClientRequestState` before the append crosses

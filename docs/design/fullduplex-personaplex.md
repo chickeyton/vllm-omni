@@ -59,6 +59,10 @@ The unified implementation supports:
 - bundled `.pt` voice prompts and a session persona;
 - greedy text and depformer sampling, matching the current PersonaPlex port;
 - `/v1/realtime?duplex=1`;
+- the public client preset
+  `vllm_omni.clients.personaplex.create_duplex_session_config()` (24 kHz
+  `pcm_f32le` input format, voice prompt, persona) as the canonical
+  session-config source for `DuplexClient` consumers;
 - engine lease close, disconnect cleanup, reconnect after cleanup, and explicit
   response cancellation without cross-session state reuse.
 
