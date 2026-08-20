@@ -464,7 +464,7 @@ class ResponseHandle:
         self.created_event = created_event
         self.done_event: DuplexEvent | None = None
         self._output_format = output_format
-        self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=_MAX_BUFFERED_EVENTS)
+        self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=max_buffered_events)
         self._done = asyncio.Event()
 
     @property
@@ -939,6 +939,12 @@ class DuplexClient:
         elif isinstance(event, SessionExpired):
             reason = data.get("reason")
             self._finalize(f"expired: {reason}" if reason else "expired", expected=False)
+        elif event.type == "session.resync_required":
+            # The server stopped journaling this session's events, so any
+            # retained resume credential will be refused on the next
+            # session.resume. Drop it now: a later transport failure then
+            # finalizes immediately instead of burning reconnect attempts.
+            self.resume_token = None
 
         if isinstance(seq, int) and not self._closed.is_set():
             try:

@@ -155,6 +155,27 @@ async def test_session_expired_raises_from_event_stream():
         assert "lease_expired" in excinfo.value.reason
 
 
+async def test_resync_required_drops_resume_credential():
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, calls = make_client(sock, reconnect=ReconnectPolicy(max_attempts=2, backoff_s=(0.0, 0.0)))
+    async with client:
+        assert client.resume_token == "tok-1"
+        stream = client.events()
+        sock.feed({"type": "session.resync_required", "session_id": "sess-1", "server_event_seq": 2})
+        async for event in stream:
+            if event.type == "session.resync_required":
+                break
+        assert client.resume_token is None
+        # With the credential gone, a transport drop must finalize instead of
+        # attempting session.resume against a server that stopped journaling.
+        sock.feed(RuntimeError("transport dropped"))
+        with pytest.raises(DuplexSessionClosedError):
+            async for _ in stream:
+                pass
+        assert len(calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # Input events
 
