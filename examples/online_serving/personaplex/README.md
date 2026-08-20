@@ -16,7 +16,7 @@ full-duplex control plane (`session_mode: duplex`):
 HF_TOKEN=... CUDA_VISIBLE_DEVICES=0 python -m vllm_omni.entrypoints.cli.main serve \
   /path/to/personaplex-7b-v1 \
   --omni \
-  --stage-configs-path vllm_omni/deploy/personaplex.yaml
+  --deploy-config vllm_omni/deploy/personaplex.yaml
 ```
 
 This exposes:
