@@ -34,6 +34,7 @@ import {module_name}
 
 model_duplex_prefixes = (
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
+    "vllm_omni.model_executor.models.nemotron_voicechat.duplex",
     "vllm_omni.model_executor.models.personaplex.duplex",
 )
 loaded = sorted(

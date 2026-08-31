@@ -1,11 +1,16 @@
 # Experimental Full-Duplex (JoyVL)
 
-This package now contains only the JoyVL framework and its example
-integration:
+This package now contains the JoyVL framework and its example integration,
+plus two client-side helpers kept for the benchmark and e2e drivers:
 
 ```text
-core/   generic duplex scaffold used by the JoyVL adapter
-joyvl/  JoyVL model-specific integration
+core/              generic duplex scaffold used by the JoyVL adapter
+joyvl/             JoyVL model-specific integration
+client.py          legacy Realtime probe client (RealtimeDuplexClient) used by
+                   the omniinteract / omni-duplex-eval benchmarks and the
+                   server-VAD and Nemotron e2e drivers; applications should use
+                   vllm_omni.clients.duplex.DuplexClient instead
+video_stacking.py  camera-frame tiling for omni duplex video input
 ```
 
 To run JoyVL, see
@@ -20,6 +25,7 @@ vllm_omni/entrypoints/duplex/           WebSocket serving and Realtime projectio
 vllm_omni/entrypoints/duplex_request_client.py request/output lifecycle
 vllm_omni/model_executor/models/minicpmo_4_5/duplex/  MiniCPM adapter
 vllm_omni/model_executor/models/personaplex/duplex/   PersonaPlex adapter
+vllm_omni/model_executor/models/nemotron_voicechat/duplex/  Nemotron VoiceChat adapter
 vllm_omni/model_executor/duplex_sampling.py    AR-runner sampling hook helper
 vllm_omni/outputs/duplex.py                    typed output decision envelope
 ```

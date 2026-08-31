@@ -30,20 +30,23 @@ module moves bytes and events.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import math
 import random
 import time
 import wave
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
+import pybase64 as base64
+
 __all__ = [
+    "DUPLEX_FIRST_UNIT_MS",
+    "DUPLEX_UNIT_MS",
     "PCM16_BYTES_PER_SAMPLE",
     "PCM16_SAMPLE_RATE",
     "AudioFormat",
@@ -71,8 +74,12 @@ __all__ = [
     "acknowledge_collected_playback",
     "audio_data_url",
     "build_realtime_url",
+    "chunk_period_ms",
+    "duplex_unit_boundary_ms",
+    "has_residual_model_unit",
     "image_data_url",
     "read_pcm16_wav",
+    "reference_audio_data_url",
     "summarize_session_request_metrics",
     "wait_for_condition",
     "write_pcm16_wav",
@@ -82,6 +89,21 @@ __all__ = [
 # constants for callers doing byte/duration arithmetic outside AudioFormat.
 PCM16_SAMPLE_RATE = 16_000
 PCM16_BYTES_PER_SAMPLE = 2
+
+# Server-side model unit boundaries, in cumulative appended audio.
+# Stage0 configures the streaming mel processor with first_chunk_ms=1035 and
+# chunk_ms=1000; the processor aligns the first chunk down to a hop_length (160
+# samples) multiple, so unit 0 closes at 16480 samples and every later unit
+# closes 16000 samples after it. Camera frames must ride the append that closes
+# a unit, otherwise Stage0 cannot bind them to that unit's audio.
+DUPLEX_FIRST_UNIT_MS = 1030
+DUPLEX_UNIT_MS = 1000
+
+
+def duplex_unit_boundary_ms(unit_index: int) -> int:
+    """Cumulative appended audio, in ms, that closes model unit ``unit_index``."""
+    return DUPLEX_FIRST_UNIT_MS + max(0, int(unit_index)) * DUPLEX_UNIT_MS
+
 
 # Internal transport/backpressure bounds (promote to constructor parameters
 # only if a real consumer needs to tune them).
@@ -675,15 +697,62 @@ class DuplexClient:
         chunk_ms: int = 200,
         realtime: bool = True,
         is_speech: bool | None = None,
-    ) -> None:
-        """Convenience: slice ``pcm`` into ``chunk_ms`` chunks, pace, append."""
+        video_frames: Sequence[str] | None = None,
+        stacked_video_frames: Sequence[str | None] | None = None,
+    ) -> int:
+        """Slice ``pcm`` into ``chunk_ms`` chunks, pace, append; interleave frames.
+
+        ``video_frames`` holds base64/data-URL JPEG frames in capture order,
+        one per second of the clip. Frame ``k`` rides the append that closes
+        model unit ``k`` (see :func:`duplex_unit_boundary_ms`), which
+        reproduces the official ``streaming_prefill(audio_waveform=<1 s>,
+        frame_list=[frame])`` pairing: a second of audio and the picture
+        captured during it enter the same unit. Sending on whole-second
+        boundaries instead would strand frame 0 on an append that cannot
+        close a unit yet, and shift every later frame one unit ahead of its
+        audio.
+
+        ``stacked_video_frames`` is the optional parallel track of composites
+        (see ``vllm_omni.experimental.fullduplex.video_stacking``): entry ``k``
+        tiles the sub-frames captured *inside* unit ``k`` and rides the same
+        append right after the base frame. ``None`` entries send the base
+        frame alone.
+
+        Returns the number of base frames actually sent (a clip shorter than
+        the frame list leaves the tail unsent).
+        """
         input_format = self.config.input_audio
         chunk_bytes = max(input_format.byte_count(chunk_ms), input_format.bytes_per_sample)
-        for offset in range(0, len(pcm), chunk_bytes):
-            chunk = pcm[offset : offset + chunk_bytes]
-            await self.append_audio(chunk, is_speech=is_speech)
+        frames = list(video_frames or [])
+        stacked = list(stacked_video_frames or [])
+
+        def units() -> Iterator[tuple[bytes, list[str] | None]]:
+            audio_end_ms = 0.0
+            frames_sent = 0
+            for offset in range(0, len(pcm), chunk_bytes):
+                chunk = pcm[offset : offset + chunk_bytes]
+                audio_end_ms += input_format.duration_ms(len(chunk))
+                if not frames or audio_end_ms < duplex_unit_boundary_ms(frames_sent):
+                    yield chunk, None
+                    continue
+                # A video advances one frame per unit and holds its last frame
+                # when the audio outlives the clip; a still image is a
+                # one-element list and therefore repeats.
+                index = min(frames_sent, len(frames) - 1)
+                composite = stacked[index] if index < len(stacked) else None
+                frames_sent += 1
+                yield chunk, [frames[index]] if composite is None else [frames[index], composite]
+
+        frames_sent = 0
+        for chunk, unit_frames in units():
+            if not chunk:
+                continue
+            await self.append_audio(chunk, is_speech=is_speech, video_frames=unit_frames)
+            if unit_frames:
+                frames_sent += 1
             if realtime:
                 await asyncio.sleep(input_format.duration_ms(len(chunk)) / 1000.0)
+        return frames_sent
 
     async def commit(self, *, final: bool = True, create_response: bool | None = None) -> None:
         event: dict[str, object] = {"type": "input_audio_buffer.commit", "final": final}
@@ -1345,6 +1414,33 @@ def image_data_url(data: bytes | Path, *, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64," + base64.b64encode(payload).decode("ascii")
 
 
+def reference_audio_data_url(path: str | None) -> str | None:
+    """Encode a local reference WAV for a Realtime session update."""
+    if path is None:
+        return None
+    audio = Path(path).expanduser().resolve()
+    if not audio.is_file():
+        raise FileNotFoundError(f"Reference audio does not exist: {audio}")
+    return audio_data_url(audio)
+
+
+def chunk_period_ms(events: Sequence[dict[str, object]], *, default: int = 1000) -> int:
+    """Read the negotiated native-duplex model-unit duration from session events."""
+    for event in reversed(events):
+        session = event.get("session")
+        capabilities = session.get("capabilities") if isinstance(session, dict) else None
+        value = capabilities.get("chunk_period_ms") if isinstance(capabilities, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return default
+
+
+def has_residual_model_unit(pcm16: bytes, *, chunk_period_ms: int) -> bool:
+    """True when ``pcm16`` (16 kHz mono) does not end on a model-unit boundary."""
+    unit_bytes = PCM16_SAMPLE_RATE * PCM16_BYTES_PER_SAMPLE * chunk_period_ms // 1000
+    return bool(unit_bytes and len(pcm16) % unit_bytes)
+
+
 def read_pcm16_wav(path: Path, *, sample_rate_hz: int = 16_000) -> bytes:
     """Read a mono, uncompressed PCM16 WAV file at the expected rate."""
     with wave.open(str(path), "rb") as wav_file:
@@ -1374,9 +1470,10 @@ def write_pcm16_wav(path: Path, pcm16: bytes, *, sample_rate_hz: int) -> None:
 
 def build_realtime_url(
     url: str,
-    model: str,
+    model: str | None,
     *,
     autostart: bool | None = None,
+    native_duplex: bool | None = None,
     session_id: str | None = None,
     extra_query: dict[str, str] | None = None,
 ) -> str:
@@ -1384,12 +1481,21 @@ def build_realtime_url(
 
     :class:`DuplexClient` builds its own URL; this helper is for drivers that
     speak the wire protocol directly. Model-specific query flags (e.g.
-    MiniCPM-o's ``minicpmo45_native_duplex``) ride in ``extra_query``.
+    MiniCPM-o's ``minicpmo45_native_duplex``) ride in ``extra_query``;
+    ``native_duplex`` is a shorthand for that MiniCPM-o flag. ``http(s)``
+    URLs are rewritten to ``ws(s)``.
     """
     parts = urlsplit(url)
+    if parts.scheme in {"http", "https"}:
+        parts = parts._replace(scheme="ws" if parts.scheme == "http" else "wss")
+    if parts.scheme not in {"ws", "wss"} or not parts.netloc:
+        raise ValueError(f"Unsupported Realtime URL: {url!r}")
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query.setdefault("duplex", "1")
-    query.setdefault("model", model)
+    if model:
+        query.setdefault("model", model)
+    if native_duplex is not None:
+        query["minicpmo45_native_duplex"] = "1" if native_duplex else "0"
     for key, value in (extra_query or {}).items():
         query.setdefault(key, value)
     if autostart is not None:

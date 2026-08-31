@@ -11,7 +11,7 @@ def minicpmo45_native_capabilities(*, max_sessions: int = 1) -> DuplexCapabiliti
     supports_multi_session = max_sessions > 1
     return DuplexCapabilities(
         supports_model_native_turn_policy=True,
-        supports_barge_in=False,
+        supports_barge_in=True,
         supports_input_append=True,
         supports_replace_latest_chunk=False,
         supports_reencode_context=False,
@@ -39,6 +39,8 @@ def minicpmo45_native_capabilities(*, max_sessions: int = 1) -> DuplexCapabiliti
         signal_sources=["model_native", "client_event", "server_policy"],
         stage_handoff_transport="scheduler_data_plane",
         chunk_period_ms=1000,
+        # Barge-in latency depends on client chunking and lacks hardware E2E
+        # measurement, so do not advertise an invented target.
         target_barge_in_latency_ms=None,
     )
 

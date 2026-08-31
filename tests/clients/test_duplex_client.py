@@ -23,7 +23,11 @@ from vllm_omni.clients.duplex import (
     SessionConfig,
     SessionResumed,
     build_realtime_url,
+    chunk_period_ms,
+    duplex_unit_boundary_ms,
+    has_residual_model_unit,
     read_pcm16_wav,
+    reference_audio_data_url,
     summarize_session_request_metrics,
     write_pcm16_wav,
 )
@@ -646,3 +650,63 @@ def test_pcm16_wav_round_trip(tmp_path):
         assert wav_file.getnchannels() == 1
         assert wav_file.getframerate() == 16_000
     assert read_pcm16_wav(path) == pcm16
+
+
+# ---------------------------------------------------------------------------
+# Model-unit helpers and camera-frame interleaving
+
+
+def test_duplex_unit_boundary_and_residual_math():
+    assert duplex_unit_boundary_ms(0) == 1030
+    assert duplex_unit_boundary_ms(2) == 3030
+    assert has_residual_model_unit(b"\x00" * 32_000, chunk_period_ms=1000) is False
+    assert has_residual_model_unit(b"\x00" * 32_002, chunk_period_ms=1000) is True
+    created = {"type": "session.created", "session": {"capabilities": {"chunk_period_ms": 500}}}
+    assert chunk_period_ms([created]) == 500
+    assert chunk_period_ms([{"type": "session.created", "session": {}}]) == 1000
+
+
+async def test_stream_pcm_sends_each_units_composite_beside_its_base_frame():
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, _ = make_client(sock)
+    async with client:
+        frames_sent = await client.stream_pcm(
+            b"\x01\x00" * (16_000 * 3),
+            chunk_ms=200,
+            realtime=False,
+            video_frames=["f0", "f1"],
+            stacked_video_frames=["s0", None],
+        )
+        appends = [event for event in sock.sent if event.get("type") == "input_audio_buffer.append"]
+        # A composite belongs to the unit it was captured in, so it rides the
+        # same append as that unit's base frame; a unit without one sends the
+        # base alone. Frame k rides the append that closes model unit k.
+        assert [event["video_frames"] for event in appends if "video_frames" in event] == [["f0", "s0"], ["f1"]]
+        assert [event["audio_end_ms"] for event in appends if "video_frames" in event] == [1200, 2200]
+        assert frames_sent == 2
+        sock.feed(SESSION_CLOSED)
+
+
+def test_build_realtime_url_native_duplex_flag_and_http_scheme():
+    url = build_realtime_url("http://localhost:8099/v1/realtime", None, native_duplex=None)
+    parts = urlsplit(url)
+    assert parts.scheme == "ws"
+    assert parse_qs(parts.query) == {"duplex": ["1"]}
+
+    url = build_realtime_url("https://host/v1/realtime", "m", native_duplex=False)
+    parts = urlsplit(url)
+    assert parts.scheme == "wss"
+    assert parse_qs(parts.query)["minicpmo45_native_duplex"] == ["0"]
+
+    with pytest.raises(ValueError):
+        build_realtime_url("ftp://host/v1/realtime", "m")
+
+
+def test_reference_audio_data_url(tmp_path):
+    assert reference_audio_data_url(None) is None
+    path = tmp_path / "ref.wav"
+    path.write_bytes(b"RIFF")
+    assert reference_audio_data_url(str(path)) == "data:audio/wav;base64," + base64.b64encode(b"RIFF").decode("ascii")
+    with pytest.raises(FileNotFoundError):
+        reference_audio_data_url(str(tmp_path / "missing.wav"))
