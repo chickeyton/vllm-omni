@@ -231,7 +231,7 @@ Start the duplex generation server:
 
 ```bash
 vllm serve openbmb/MiniCPM-o-4_5 --omni --trust-remote-code \
-    --deploy-config vllm_omni/deploy/minicpmo_4_5_duplex.yaml \
+    --deploy-config vllm_omni/deploy/minicpmo_4_5.yaml \
     --served-model-name openbmb/MiniCPM-o-4_5 \
     --host 0.0.0.0 --port 8099
 ```

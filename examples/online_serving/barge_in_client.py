@@ -20,7 +20,7 @@ per-model presets under ``vllm_omni.clients.<model>`` selected with
 its own — no VAD).
 
 Run the server first (for MiniCPM-o 4.5: ``bash minicpmo/barge_in_serve.sh``, which
-starts the duplex deploy profile ``vllm_omni/deploy/minicpmo_4_5_duplex.yaml``),
+starts the ``vllm_omni/deploy/minicpmo_4_5.yaml`` profile with ``session_mode: duplex``),
 then:
 
     python barge_in_client.py \
