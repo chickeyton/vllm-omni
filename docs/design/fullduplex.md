@@ -461,7 +461,7 @@ sampling generation unchanged.
 `extra_body` or session payloads:
 
 | Field | Default | Owner | Lifecycle or resource effect |
-|---|---:|---|---|
+| --- | ---: | --- | --- |
 | `idle_ttl_s` | `300.0` | Engine lease manager | Expires an attached or detached session after inactivity; `null` disables only idle expiry. |
 | `disconnect_grace_s` | `30.0` | Engine lease manager and API attachment registry | Bounds how long a detached session may retain engine resources before cleanup. |
 | `reaper_interval_s` | `5.0` | Orchestrator | Sets the cadence for lease expiry and pending cleanup retries. |
@@ -493,7 +493,12 @@ never import the client (both directions are enforced by tests:
 purity guards in `tests/clients/test_model_session_configs.py`).
 `examples/online_serving/barge_in_client.py` (with its flow companion
 `barge_in_client_flow.md`) is the runnable reference for the client library
-against a live duplex deployment.
+against a live duplex deployment. The wire vocabulary the client speaks —
+every `/v1/realtime?duplex=1` event with its OpenAI-compatibility tier and a
+JSON example, plus the native-to-Realtime name map — is catalogued in
+[Full-Duplex Realtime Wire Protocol](fullduplex-realtime-protocol.md); that
+document derives from the normative contract table above and must be updated
+with it.
 
 ## Generic-Path Cleanup
 
@@ -653,7 +658,7 @@ continues to return `input_audio_buffer_empty`.
 The commit-to-response contract is:
 
 | Session state at `input_audio_buffer.commit` | Runtime action | Required event outcome |
-|---|---|---|
+| --- | --- | --- |
 | Auto-response disabled, valid idle input | Commit and retain the input item. | Emit `input_audio_buffer.committed`; emit no response until an explicit `response.create`. |
 | Auto-response enabled, valid idle speech | Submit the final native append for the current model turn. | Emit `input_audio_buffer.committed` before model output. Create a response only on the first visible text/audio output; a model listen decision may end with `response.listen` and no response. |
 | Auto-response enabled, short overlap during an active response | Discard the short overlap as an acknowledgement. | Emit the committed/no-response acknowledgement; do not create or defer a response. |
