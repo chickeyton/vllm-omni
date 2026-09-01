@@ -24,7 +24,8 @@ This exposes:
 - `WS /v1/duplex` — the native duplex session dialect
   (`session.create` / `input_audio_buffer.append` / `response.output_audio.delta` ...);
 - `WS /v1/realtime?duplex=1` — the same sessions projected onto the
-  OpenAI Realtime event vocabulary.
+  OpenAI Realtime event vocabulary (client API and wire protocol:
+  [`docs/serving/realtime_duplex_api.md`](../../../docs/serving/realtime_duplex_api.md)).
 
 PersonaPlex is a pure-lockstep model: every session on a PersonaPlex deployment is
 native duplex (`is_enabled()` is unconditionally true), audio flows continuously in

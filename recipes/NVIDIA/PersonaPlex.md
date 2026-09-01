@@ -51,7 +51,7 @@ package at `vllm_omni/model_executor/models/personaplex/duplex/`.
 ## Why it is different from MiniCPM-o / JoyVL duplex
 
 | | MiniCPM-o 4.5 (#3907) | JoyVL | **PersonaPlex (this)** |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Cadence | 1 s chunk groups | ~1 fps frames | **80 ms lockstep (12.5 Hz)** |
 | Turn control | learned `⟨listen⟩`/`⟨speak⟩` | `</silence>`/`</response>` | **none, pure lockstep** |
 | Per step | variable-length token group | text decision | **1 user frame in -> 1 agent frame + 1 text token** |
@@ -115,8 +115,9 @@ HF_TOKEN=... CUDA_VISIBLE_DEVICES=0 python -m vllm_omni.entrypoints.cli.main ser
 ```
 
 This exposes `WS /v1/duplex` (native duplex dialect) and
-`WS /v1/realtime?duplex=1` (OpenAI Realtime projection). Voice and persona are
-set per session via `extra_body`.
+`WS /v1/realtime?duplex=1` (OpenAI Realtime projection; client API and wire
+protocol in [`docs/serving/realtime_duplex_api.md`](../../docs/serving/realtime_duplex_api.md)).
+Voice and persona are set per session via `extra_body`.
 
 #### Verification
 

@@ -28,12 +28,15 @@ primary_code_paths:
   - vllm_omni/entrypoints/utils.py
   - vllm_omni/entrypoints/duplex/**
   - vllm_omni/entrypoints/duplex_request_client.py
+  - vllm_omni/clients/**
 primary_path_exceptions:
   - path: vllm_omni/entrypoints/openai/errors.py
     owner: error_contracts.md
   - path: vllm_omni/entrypoints/duplex/**
     owner: ../fullduplex.md
   - path: vllm_omni/entrypoints/duplex_request_client.py
+    owner: ../fullduplex.md
+  - path: vllm_omni/clients/**
     owner: ../fullduplex.md
 related_code_paths:
   - vllm_omni/errors.py

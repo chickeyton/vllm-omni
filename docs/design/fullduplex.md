@@ -75,7 +75,9 @@ The checkpoint does not claim:
 - an acoustic-onset-to-cancel latency target across arbitrary client chunk sizes;
 - production multi-session admission, fairness, capacity, or failure recovery;
 - bounded long-session KV;
-- video input or audio/video synchronization.
+- audio/video synchronization beyond one camera frame per model unit (camera
+  frames ride the audio appends as `video_frames`; the wire contract is in the
+  [Realtime Duplex API](../serving/realtime_duplex_api.md) guide).
 
 ## Active Runtime Path
 
@@ -805,9 +807,12 @@ Graph capture. This is a model execution constraint, not an E2E-only override.
 
 ### Resource capabilities
 
-The checked-in MiniCPM duplex deploy profile sets Stage0 and Stage1
-`max_num_seqs` to two and configures the engine runtime manager with
-`max_sessions=2`. The Realtime capability response therefore advertises
+At the time of this snapshot the checked-in MiniCPM duplex deploy profile set
+Stage0 and Stage1 `max_num_seqs` to two and configured the engine runtime
+manager with `max_sessions=2`; the duplex settings have since been folded into
+`vllm_omni/deploy/minicpmo_4_5.yaml`, which admits four sessions
+(`duplex_session.max_sessions: 4`, matching its stage `max_num_seqs`). The
+Realtime capability response advertises
 multi-session and same-replica multi-session support with
 `session_admission_mode="engine_managed"`. Client session fields cannot raise
 this server-owned limit. Fresh E2E evidence covers two concurrent sessions in
@@ -1060,4 +1065,6 @@ Passing this checkpoint supports the statement:
 
 It does not support claims for an acoustic-onset barge-in latency target across
 arbitrary client chunk sizes, multi-session production concurrency, bounded
-long-session KV, scheduler-native append, or video input.
+long-session KV, or scheduler-native append. Camera-frame input
+(`video_frames`) landed after this snapshot and is covered by its own E2E
+test rather than by the evidence above.
