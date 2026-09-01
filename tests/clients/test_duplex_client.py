@@ -528,6 +528,7 @@ def test_event_collector_reports_engine_token_and_audio_intervals():
         "output_token_count": 4,
         "ttft_ms": 120.0,
         "tpot_ms": 15.0,
+        "itls_ms": [10.0, 14.0, 18.0],
         "inter_token_interval_ms": {
             "count": 3,
             "mean": 14.0,
@@ -710,3 +711,14 @@ def test_reference_audio_data_url(tmp_path):
     assert reference_audio_data_url(str(path)) == "data:audio/wav;base64," + base64.b64encode(b"RIFF").decode("ascii")
     with pytest.raises(FileNotFoundError):
         reference_audio_data_url(str(tmp_path / "missing.wav"))
+
+
+def test_event_collector_response_text_joins_deltas_per_response():
+    collector = EventCollector()
+    collector.add({"type": "response.created", "response_id": "r1"})
+    collector.add({"type": "response.audio_transcript.delta", "response_id": "r1", "delta": "hel"})
+    collector.add({"type": "response.output_text.delta", "response_id": "r2", "delta": "other"})
+    collector.add({"type": "response.text.delta", "response_id": "r1", "delta": "lo"})
+    assert collector.response_text("r1") == "hello"
+    assert collector.response_text("r2") == "other"
+    assert collector.response_text("r3") == ""

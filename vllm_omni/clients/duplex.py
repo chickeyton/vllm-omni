@@ -1239,6 +1239,20 @@ class EventCollector:
     def errors(self) -> list[dict[str, object]]:
         return [event for event in self.events if event.get("type") == "error"]
 
+    def response_text(self, response_id: str) -> str:
+        """Join all text/transcript deltas for one response identity."""
+        return "".join(
+            str(event.get("delta") or "")
+            for event in self.events
+            if self.response_id(event) == response_id
+            and event.get("type")
+            in {
+                "response.audio_transcript.delta",
+                "response.output_text.delta",
+                "response.text.delta",
+            }
+        )
+
     def first_received_at(self, *event_types: str, after_s: float = 0.0) -> float | None:
         for event, received_at_s in zip(self.events, self.event_received_at_s, strict=True):
             if received_at_s >= after_s and event.get("type") in event_types:
@@ -1319,6 +1333,7 @@ class EventCollector:
                 "output_token_count": int(stage0_metrics.get("num_tokens_out") or 0),
                 "ttft_ms": float(stage0_metrics.get("vllm_ttft_ms") or 0.0),
                 "tpot_ms": float(stage0_metrics.get("vllm_tpot_ms") or 0.0),
+                "itls_ms": itls,
                 "inter_token_interval_ms": _interval_summary(itls),
             }
 

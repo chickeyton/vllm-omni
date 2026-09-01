@@ -3299,7 +3299,7 @@ async def test_minicpmo_auto_response_boundary_listen_closes_response():
     session.capabilities = minicpmo45_native_capabilities()
     response_id = session.begin_response(turn_id=0)
     session.bind_request(request_id)
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.continuation_owner_id = f"response:{response_id}"
     native.continuation_units = handler._NATIVE_AUTO_RESPONSE_MAX_CONTINUATION_UNITS
     _install_direct_silence_scheduler(handler, session)
@@ -3343,7 +3343,7 @@ async def test_minicpmo_auto_response_boundary_allows_next_model_turn_response()
     session.capabilities = minicpmo45_native_capabilities()
     session.begin_response(turn_id=0)
     session.bind_request(request_id)
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.continuation_owner_id = f"response:{session.active_response_id}"
     native.continuation_units = handler._NATIVE_AUTO_RESPONSE_MAX_CONTINUATION_UNITS
     ws = TimedWebSocket()
@@ -3398,7 +3398,7 @@ async def test_minicpmo_auto_response_boundary_does_not_close_new_epoch_response
     session.capabilities = minicpmo45_native_capabilities()
     old_response_id = session.begin_response(turn_id=0)
     session.bind_request(request_id)
-    native = handler._minicpmo_session_state(session)
+    native = handler._runtime_session_state(session)
     native.continuation_owner_id = f"response:{old_response_id}"
     native.continuation_units = handler._NATIVE_AUTO_RESPONSE_MAX_CONTINUATION_UNITS
     sent: list[dict[str, Any]] = []
