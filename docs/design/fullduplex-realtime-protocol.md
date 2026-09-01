@@ -46,6 +46,28 @@ name and semantics; **2** means an OpenAI event name carrying vLLM-Omni
 extensions that a stock OpenAI client ignores; **3** means vLLM-Omni only,
 with no OpenAI counterpart.
 
+## Capability negotiation by model
+
+The event vocabulary is uniform, but several surfaces are gated by the
+`capabilities` object the server returns in `session.created`; a client must
+branch on those flags rather than on the model name. The current model
+plugins advertise:
+
+| Capability | MiniCPM-o 4.5 | PersonaPlex | Nemotron VoiceChat | Gated surface |
+| --- | --- | --- | --- | --- |
+| `implementation_level` | `model_native_duplex` (when `extra_body.minicpmo45_native_duplex=true`) | `model_native_duplex` | `model_native_duplex` | model-owned `response.listen` / `response.speak`; the chat-fallback lane otherwise |
+| `chunk_period_ms` | 1000 | 80 | 80 | the model unit that `response.listen` decisions and camera frames align to |
+| `supports_session_resume` | yes | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
+| `supports_barge_in` | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, `overlap_policy=barge_in_on_speech`, `turn_detection.server_vad` |
+| `supports_audio_truncate` | yes | no | no | `conversation.item.truncate` and truncating `playback.ack` adjusting the stored assistant item |
+| video input (`video_frames` on append) | consumed by Stage 0 | ignored | ignored | omni camera track |
+| tool calls | no | no | yes | `response.function_call_arguments.*`, `function_call` items |
+
+Everything else in the catalogue — session lifecycle, heartbeat and event
+acknowledgement, append/commit/clear, the response envelope, playback
+acknowledgement, and the error envelope — behaves identically for every
+model.
+
 ## Compatibility with the OpenAI Realtime protocol
 
 The Realtime dialect is, by design, an OpenAI-Realtime-compatible surface:
