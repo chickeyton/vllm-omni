@@ -13,6 +13,7 @@ nav:
       - Videos: serving/videos_api.md
       - Audio Generation: serving/audio_generate_api.md
       - Streaming Video Input: serving/video_stream_api.md
+      - Realtime Duplex: serving/realtime_duplex_api.md
   - Examples:
     - examples/README.md
     - Offline Inference:
