@@ -495,9 +495,9 @@ purity guards in `tests/clients/test_model_session_configs.py`).
 `barge_in_client_flow.md`) is the runnable reference for the client library
 against a live duplex deployment. The wire vocabulary the client speaks —
 every `/v1/realtime?duplex=1` event with its OpenAI-compatibility tier and a
-JSON example, plus the native-to-Realtime name map — is catalogued in
-[Full-Duplex Realtime Wire Protocol](fullduplex-realtime-protocol.md); that
-document derives from the normative contract table above and must be updated
+JSON example, plus the native-to-Realtime name map — is catalogued in the
+[Realtime Duplex API](../serving/realtime_duplex_api.md) serving guide; that
+page derives from the normative contract table above and must be updated
 with it.
 
 ## Generic-Path Cleanup

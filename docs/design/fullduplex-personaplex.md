@@ -58,8 +58,8 @@ The unified implementation supports:
 - continuous user input while assistant audio is generated or played;
 - bundled `.pt` voice prompts and a session persona;
 - greedy text and depformer sampling, matching the current PersonaPlex port;
-- `/v1/realtime?duplex=1` (the wire vocabulary is catalogued in
-  [Full-Duplex Realtime Wire Protocol](fullduplex-realtime-protocol.md));
+- `/v1/realtime?duplex=1` (the wire vocabulary is catalogued in the
+  [Realtime Duplex API](../serving/realtime_duplex_api.md) serving guide);
 - the public client preset
   `vllm_omni.clients.personaplex.create_duplex_session_config()` (24 kHz
   `pcm_f32le` input format, voice prompt, persona) as the canonical
@@ -199,8 +199,8 @@ It owns per-request audio and text cursors so a cumulative output cannot replay
 old audio. The generic projector turns each native result into the Realtime
 `response.audio.delta` / `response.audio_transcript.delta` pair (and
 `response.output_text.delta` for text) under one `response_id`; the full
-mapping is the name map in
-[Full-Duplex Realtime Wire Protocol](fullduplex-realtime-protocol.md).
+mapping is the name map in the
+[Realtime Duplex API](../serving/realtime_duplex_api.md) serving guide.
 PersonaPlex keeps one visible response open while continuous output arrives.
 Session close or cancellation terminates that response through the generic
 Realtime lifecycle; a codec segment finishing is not a conversational turn

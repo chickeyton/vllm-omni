@@ -234,9 +234,9 @@ server-to-client event, and a JSON example for each. `DuplexClient` speaks
 exactly this contract; raw WebSocket clients (any OpenAI Realtime client, or
 your own) can use it directly. The ordering and cardinality rules behind it
 are specified in the normative contract section of
-[Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md), and the same
-contract is maintained as a design document at
-[Full-Duplex Realtime Wire Protocol](../design/fullduplex-realtime-protocol.md).
+[Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md); a
+compatibility change must update this section together with that table and
+its protocol tests.
 
 ### Endpoint and transport
 
