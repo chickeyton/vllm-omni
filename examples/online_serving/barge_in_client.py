@@ -31,7 +31,9 @@ then:
         --interrupt-wav follow_up_16k.wav \
         --output-dir ./duplex_out
 
-Input WAVs must be mono 16 kHz PCM16. ``--ref-audio`` is required by the
+Input WAVs must be mono 16 kHz PCM16; when a preset's session takes a
+different capture format (the PersonaPlex preset streams 24 kHz float32),
+the audio is converted before streaming. ``--ref-audio`` is required by the
 MiniCPM-o preset (without it the session is rejected with
 ``ref_audio_required``). Outputs land in ``--output-dir`` as one WAV per
 response — ``response_1_cancelled.wav`` for a barged-in answer,
@@ -51,6 +53,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from vllm_omni.clients.duplex import (  # noqa: E402
+    AudioFormat,
     DuplexClient,
     EventCollector,
     SessionConfig,
@@ -66,6 +69,29 @@ _TRANSCRIPT_DELTA_EVENTS = {
     "response.output_text.delta",
     "response.text.delta",
 }
+
+# Input WAVs are mono 16 kHz PCM16; each preset's session may negotiate a
+# different capture format (PersonaPlex takes 24 kHz float32) and a different
+# model-unit-aligned chunk size (PersonaPlex frames are exactly 80 ms).
+_PRESET_DEFAULT_CHUNK_MS = {"minicpmo_4_5": 100, "personaplex": 80, "none": 100}
+
+
+def _convert_to_session_format(pcm16_16k: bytes, target: AudioFormat) -> bytes:
+    """Convert mono 16 kHz PCM16 to the session's input format."""
+    if target.encoding == "pcm16" and target.sample_rate_hz == 16_000:
+        return pcm16_16k
+    import numpy as np
+
+    samples = np.frombuffer(pcm16_16k, dtype=np.int16).astype(np.float32) / 32768.0
+    if target.sample_rate_hz != 16_000 and len(samples) > 1:
+        target_len = round(len(samples) * target.sample_rate_hz / 16_000)
+        positions = np.linspace(0.0, len(samples) - 1, num=target_len)
+        samples = np.interp(positions, np.arange(len(samples)), samples).astype(np.float32)
+    if target.encoding == "pcm_f32le":
+        return samples.tobytes()
+    if target.encoding == "pcm16":
+        return (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+    raise ValueError(f"Unsupported session input encoding: {target.encoding!r}")
 
 
 def _session_config(preset: str, *, ref_audio_path: str | None) -> SessionConfig:
@@ -114,8 +140,10 @@ def _fold_responses(collector: EventCollector) -> dict[str, dict[str, object]]:
 
 
 async def run(args: argparse.Namespace) -> int:
-    question = read_pcm16_wav(Path(args.question_wav))
-    interrupt = read_pcm16_wav(Path(args.interrupt_wav))
+    config = _session_config(args.preset, ref_audio_path=args.ref_audio)
+    question = _convert_to_session_format(read_pcm16_wav(Path(args.question_wav)), config.input_audio)
+    interrupt = _convert_to_session_format(read_pcm16_wav(Path(args.interrupt_wav)), config.input_audio)
+    chunk_ms = args.chunk_ms if args.chunk_ms is not None else _PRESET_DEFAULT_CHUNK_MS.get(args.preset, 100)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +151,7 @@ async def run(args: argparse.Namespace) -> int:
     client = DuplexClient(
         args.url,
         model=args.model,
-        config=_session_config(args.preset, ref_audio_path=args.ref_audio),
+        config=config,
         reconnect=None,
         heartbeat_interval_s=None,
         handshake_timeout_s=args.timeout_s,
@@ -135,7 +163,7 @@ async def run(args: argparse.Namespace) -> int:
         # ASK: stream the question at realtime pace, then commit the turn.
         # The model decides on its own to answer (no VAD).
         print("[1] streaming question ...", file=sys.stderr)
-        await client.stream_pcm(question, chunk_ms=args.chunk_ms)
+        await client.stream_pcm(question, chunk_ms=chunk_ms)
         await client.commit(create_response=False)
         await wait_for_condition(
             lambda: collector.count("response.created") > 0,
@@ -152,15 +180,26 @@ async def run(args: argparse.Namespace) -> int:
         # in (the first response is cancelled) or a short remark is deferred
         # until the model yields the turn.
         print("[2] interrupting mid-answer ...", file=sys.stderr)
-        events_before_interrupt = len(collector.events)
-        await client.stream_pcm(interrupt, chunk_ms=args.chunk_ms)
+        ids_before_interrupt = set(collector.response_ids)
+        await client.stream_pcm(interrupt, chunk_ms=chunk_ms)
         await client.commit(create_response=False)
 
-        # ANSWER AGAIN: wait for the answer to the interruption to finish.
+        # ANSWER AGAIN: wait for a response created *after* the interruption
+        # to finish. The first answer may still be streaming here; matching on
+        # any response.done would let its completion satisfy the wait and cut
+        # off the actual follow-up answer at close.
+        def follow_up_answer_done() -> bool:
+            return any(
+                event.get("type") == "response.done"
+                and collector.response_id(event) is not None
+                and collector.response_id(event) not in ids_before_interrupt
+                for event in collector.events
+            )
+
         await wait_for_condition(
-            lambda: any(event.get("type") == "response.done" for event in collector.events[events_before_interrupt:]),
+            follow_up_answer_done,
             timeout_s=args.timeout_s,
-            label="response.done after interruption",
+            label="response.done for the response answering the interruption",
         )
 
         # HANG UP: report playback, close the session cleanly.
@@ -218,7 +257,12 @@ def main() -> int:
     parser.add_argument("--question-wav", required=True, help="mono 16 kHz PCM16 question")
     parser.add_argument("--interrupt-wav", required=True, help="mono 16 kHz PCM16 follow-up spoken mid-answer")
     parser.add_argument("--output-dir", default="./duplex_out")
-    parser.add_argument("--chunk-ms", type=int, default=100)
+    parser.add_argument(
+        "--chunk-ms",
+        type=int,
+        default=None,
+        help="append chunk size; defaults to the preset's model-unit-aligned size (minicpmo_4_5: 100, personaplex: 80)",
+    )
     parser.add_argument("--listen-s", type=float, default=2.0, help="how long to listen before interrupting")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     return asyncio.run(run(parser.parse_args()))

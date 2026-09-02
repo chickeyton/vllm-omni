@@ -481,12 +481,15 @@ async def run_demo(args: argparse.Namespace) -> dict[str, object]:
         await acknowledge_collected_playback(client, collector)
         close_error: str | None = None
         await client.close(timeout_s=args.timeout_s)
-        if collector.count("session.closed") == 0:
-            close_error = "Timed out waiting for session.closed"
+        # close() returns when the client's reader observed session.closed;
+        # the collector is a separate subscriber task, so wait for it to
+        # drain before checking, or a normal close reads as a failure.
         try:
             await asyncio.wait_for(consume_task, timeout=5.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             consume_task.cancel()
+        if collector.count("session.closed") == 0:
+            close_error = "Timed out waiting for session.closed"
 
         audio = collector.audio_bytes()
         first_text_at_s = collector.first_received_at(
