@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 import numpy as np
@@ -83,19 +83,17 @@ from vllm_omni.benchmarks.omniinteract import (
 from vllm_omni.benchmarks.omniinteract import (
     write_batch_artifacts as write_omniinteract_batch_artifacts,
 )
-from vllm_omni.clients.duplex import (
-    AudioFormat,
-    DuplexClient,
-    EventCollector,
-    SessionConfig,
-    acknowledge_collected_playback,
-    build_realtime_url,
-    reference_audio_data_url,
-    summarize_session_request_metrics,
-    wait_for_condition,
-)
 from vllm_omni.metrics import definitions as defs
 from vllm_omni.metrics.utils import coerce_positive_int_scalar
+
+if TYPE_CHECKING:
+    from vllm_omni.clients.duplex import DuplexClient
+
+# The duplex client library (vllm_omni.clients) is imported lazily inside the
+# functions that drive Realtime sessions: this module is imported for its
+# patching side effects by the CLI package (`vllm-omni serve` included), and
+# the client package must stay out of that import graph
+# (tests/engine/test_duplex_import_boundary.py enforces the boundary).
 
 logger = init_logger(__name__)
 
@@ -427,6 +425,8 @@ def get_samples(args, tokenizer):
         )
         if not requests:
             raise ValueError("No OmniInteract sessions were selected")
+        from vllm_omni.clients.duplex import reference_audio_data_url
+
         encoded_ref_audio = reference_audio_data_url(options.ref_audio)
         assert encoded_ref_audio is not None
         for request in requests:
@@ -1535,6 +1535,8 @@ async def async_request_openai_audio_speech(
 
 
 def _realtime_websocket_url(api_url: str) -> str:
+    from vllm_omni.clients.duplex import build_realtime_url
+
     return build_realtime_url(api_url, None, native_duplex=None)
 
 
@@ -1699,8 +1701,10 @@ class _RealtimeTTSProbe:
     """
 
     def __init__(self, url: str) -> None:
+        from vllm_omni.clients.duplex import EventCollector
+
         self._url = url
-        self.events = EventCollector()
+        self.events: EventCollector = EventCollector()
         self._client: DuplexClient | None = None
         self._consume_task: asyncio.Task[None] | None = None
 
@@ -1728,6 +1732,8 @@ class _RealtimeTTSProbe:
         session_id: str | None = None,
         timeout_s: float = 120.0,
     ) -> None:
+        from vllm_omni.clients.duplex import AudioFormat, DuplexClient, SessionConfig
+
         session_extra_body: dict[str, object] = dict(extra_body or {})
         session_extra_body["minicpmo45_native_duplex"] = bool(native_duplex)
         config = SessionConfig(
@@ -1755,6 +1761,8 @@ class _RealtimeTTSProbe:
         await self._client.send(event)
 
     async def acknowledge_playback(self) -> None:
+        from vllm_omni.clients.duplex import acknowledge_collected_playback
+
         assert self._client is not None
         await acknowledge_collected_playback(self._client, self.events)
 
@@ -1768,6 +1776,8 @@ async def async_request_openai_realtime_duplex(
     session: aiohttp.ClientSession,
     pbar: tqdm | None = None,
 ) -> MixRequestFuncOutput:
+    from vllm_omni.clients.duplex import summarize_session_request_metrics, wait_for_condition
+
     del session
     if getattr(request_func_input, "omniinteract_case", None) is not None:
         return await _async_request_omniinteract(request_func_input, pbar=pbar)

@@ -81,6 +81,26 @@ if loaded:
 """)
 
 
+def test_cli_import_graph_stays_clear_of_the_client_package() -> None:
+    # `vllm-omni serve` imports the CLI package, whose __init__ eagerly pulls
+    # in the benchmark patch module and every benchmark subcommand. None of
+    # that may drag the client-side vllm_omni.clients package into the server
+    # process; the benchmark runtime imports it lazily at execution time.
+    _assert_isolated_import_succeeds("""
+import sys
+
+import vllm_omni.entrypoints.cli.main
+
+loaded = sorted(
+    name
+    for name in sys.modules
+    if name == "vllm_omni.clients" or name.startswith("vllm_omni.clients.")
+)
+if loaded:
+    raise SystemExit("CLI import graph loaded the client package: " + ", ".join(loaded))
+""")
+
+
 def test_stable_engine_does_not_expose_duplex_contract_modules() -> None:
     _assert_isolated_import_succeeds("""
 import importlib.util
