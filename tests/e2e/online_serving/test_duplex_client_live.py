@@ -49,7 +49,9 @@ async def _run_live_session(*, url: str, model: str, ref_audio: Path, input_wav:
         config=config,
         session_id=f"duplex-client-live-{uuid.uuid4().hex}",
         reconnect=ReconnectPolicy(max_attempts=5, backoff_s=(0.25, 1.0)),
-        heartbeat_interval_s=None,
+        # Short interval so the periodic heartbeat path runs during the
+        # session — including across the forced transport drop below.
+        heartbeat_interval_s=5.0,
     )
     collector = EventCollector()
     pcm = read_pcm16_wav(input_wav)
@@ -113,7 +115,7 @@ async def _run_live_session(*, url: str, model: str, ref_audio: Path, input_wav:
 
 
 @pytest.mark.core_model
-@hardware_test(res={"cuda": "H100"}, num_cards=2)
+@hardware_test(res={"cuda": "H100"}, num_cards=1)
 @pytest.mark.parametrize("omni_server", CORE_SERVER_PARAMS, indirect=True)
 def test_duplex_client_live_session(omni_server, model_prefix: str) -> None:
     summary = asyncio.run(
