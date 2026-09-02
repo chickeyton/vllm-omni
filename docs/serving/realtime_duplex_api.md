@@ -81,7 +81,7 @@ ships a preset:
 
 | Preset | Input / output audio | What it sets |
 | --- | --- | --- |
-| `vllm_omni.clients.minicpmo_4_5.create_duplex_session_config(ref_audio=...)` | 16 kHz `pcm16` / 24 kHz `pcm16` | `extra_body.minicpmo45_native_duplex=True` (opt in to the model-native lane), `force_listen_count=0`, `overlap_policy="listen_only"`, `playback_commit_policy="ack_only"`; `ref_audio` is the assistant voice clip |
+| `vllm_omni.clients.minicpmo_4_5.create_duplex_session_config(ref_audio=...)` | 16 kHz `pcm16` / 24 kHz `pcm16` | `extra_body.native_duplex=True` (opt in to the model-native lane), `force_listen_count=0`, `overlap_policy="listen_only"`, `playback_commit_policy="ack_only"`; `ref_audio` is the assistant voice clip |
 | `vllm_omni.clients.personaplex.create_duplex_session_config(voice="NATF2.pt", persona="")` | 24 kHz `pcm_f32le` / 24 kHz `pcm16` | bundled `.pt` voice prompt and the persona as `instructions` |
 | `SessionConfig(...)` | 16 kHz `pcm16` / 24 kHz `pcm16` | model-neutral defaults; pass `extra_body`, `turn_detection`, `overlap_policy`, `playback_commit_policy`, `instructions`, `voice`, `temperature` yourself |
 
@@ -246,8 +246,9 @@ The endpoint is `ws(s)://<host>/v1/realtime?duplex=1`; the `duplex` query
 parameter (`1`, `true`, or `on`) selects the duplex session handler, and the
 route is mounted only for deployments whose deploy configuration declares
 `session_mode: duplex`. Optional query parameters are `model`, `session_id`,
-`autostart` (`0` means resume-only), `resume`, and
-`minicpmo45_native_duplex`. Every message is one JSON object per WebSocket
+`autostart` (`0` means resume-only), `resume`, and `native_duplex`
+(`minicpmo45_native_duplex` is accepted as a deprecated alias and folded
+into the canonical name). Every message is one JSON object per WebSocket
 text frame, discriminated by `type`. Inbound events are applied in arrival
 order through one per-session mailbox; outbound events preserve that order
 and carry a monotonically increasing `server_event_seq`, which is the replay
@@ -273,7 +274,7 @@ plugins advertise:
 
 | Capability | MiniCPM-o 4.5 | PersonaPlex | Nemotron VoiceChat | Gated surface |
 | --- | --- | --- | --- | --- |
-| `implementation_level` | `model_native_duplex` (when `extra_body.minicpmo45_native_duplex=true`) | `model_native_duplex` | `model_native_duplex` | model-owned `response.listen` / `response.speak`; the chat-fallback lane otherwise |
+| `implementation_level` | `model_native_duplex` (when `extra_body.native_duplex=true`) | `model_native_duplex` | `model_native_duplex` | model-owned `response.listen` / `response.speak`; the chat-fallback lane otherwise |
 | `chunk_period_ms` | 1000 | 80 | 80 | the model unit that `response.listen` decisions and camera frames align to |
 | `supports_session_resume` | yes | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
 | `supports_barge_in` | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, `overlap_policy=barge_in_on_speech`, `turn_detection.server_vad` |
@@ -341,10 +342,10 @@ Semantic divergences hidden behind shared names:
 
 | Area | Messages / fields |
 | --- | --- |
-| Session lifetime | `session.heartbeat` / `session.heartbeat_ack`, `session.event_ack`, `session.close` / `session.closed`, `session.resume` / `session.resumed` / `session.replaced` / `session.expired` / `session.resync_required`; `server_event_seq`, `resume_token`, `incarnation`, `attachment_generation`; query params `?duplex=1`, `autostart`, `resume`, `minicpmo45_native_duplex` |
+| Session lifetime | `session.heartbeat` / `session.heartbeat_ack`, `session.event_ack`, `session.close` / `session.closed`, `session.resume` / `session.resumed` / `session.replaced` / `session.expired` / `session.resync_required`; `server_event_seq`, `resume_token`, `incarnation`, `attachment_generation`; query params `?duplex=1`, `autostart`, `resume`, `native_duplex` |
 | Turn-taking | `response.speak`, `response.listen`, `overlap.decision`, `overlap_policy`, `barge_in`, `turn.signal`, `input.cancel`, `input.text.append`, `epoch` / `turn_id` fencing, `force_listen` |
 | Playback truth | `playback.ack` / `playback.acknowledged`, `playback_commit_policy` (`ack_only` \| `commit_all_on_done`), `playback{generated_ms, sent_ms, played_ms, committed_ms}`, `history_committed`, `audio_text_marks` |
-| Model negotiation | `capabilities{implementation_level, supports_input_append, supports_barge_in, supports_session_resume, chunk_period_ms, input_modes, …}`, `ref_audio`, `extra_body` (`auto_response`, `minicpmo45_native_duplex`, `force_listen_count`, `duplex_initial_user_text`) |
+| Model negotiation | `capabilities{implementation_level, supports_input_append, supports_barge_in, supports_session_resume, chunk_period_ms, input_modes, …}`, `ref_audio`, `extra_body` (`auto_response`, `native_duplex` — deprecated alias `minicpmo45_native_duplex` is folded into it, `force_listen_count`, `duplex_initial_user_text`) |
 | Diagnostics | `runtime.control`, `duplex.function_call.done`, the full error-code vocabulary (`REALTIME_ERROR_TYPES_BY_CODE` in `vllm_omni/entrypoints/duplex/realtime_state.py`) |
 
 #### Consequences for clients
@@ -474,7 +475,7 @@ additionally carries `"server_event_seq": <int>` (omitted below for brevity).
     "idle_timeout_s": 300,
     "extra_body": {
       "auto_response": true,
-      "minicpmo45_native_duplex": true,
+      "native_duplex": true,
       "force_listen_count": 0
     }
   }

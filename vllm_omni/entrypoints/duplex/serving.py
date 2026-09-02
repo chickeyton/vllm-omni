@@ -24,6 +24,7 @@ from vllm_omni.entrypoints.duplex.chat_fallback import (
     ChatFallbackProjectorMixin,
 )
 from vllm_omni.entrypoints.duplex.protocol import (
+    NATIVE_DUPLEX_KEY,
     DuplexCapabilities,
     DuplexCommittedInput,
     DuplexOverlapPolicy,
@@ -34,6 +35,8 @@ from vllm_omni.entrypoints.duplex.protocol import (
     DuplexSessionState,
     DuplexTurnController,
     ResponseCreateOptions,
+    native_duplex_opt_in,
+    normalize_native_duplex_key,
 )
 from vllm_omni.entrypoints.duplex.realtime_session import (
     REALTIME_OUTPUT_AUDIO_FORMATS,
@@ -1200,7 +1203,7 @@ class OmniDuplexSessionHandler(
                 "code": "instructions_update_unsupported",
                 "error": "session.update cannot change instructions after the native duplex context is initialized",
             }
-        if session.config.extra_body.get("minicpmo45_native_duplex") is not True:
+        if native_duplex_opt_in(session.config.extra_body) is not True:
             return None
         if not self._config_requests_audio_output(candidate_config):
             return None
@@ -1218,7 +1221,7 @@ class OmniDuplexSessionHandler(
         return (
             session.capabilities.implementation_level == "model_native_duplex"
             and session.capabilities.supports_input_append
-            and session.config.extra_body.get("minicpmo45_native_duplex") is not False
+            and native_duplex_opt_in(session.config.extra_body) is not False
         )
 
     @staticmethod
@@ -1373,17 +1376,19 @@ class OmniDuplexSessionHandler(
                 "error": "session.update cannot change ref_audio after the native duplex runtime is open",
             }
         extra_body_payload = payload.get("extra_body")
-        if isinstance(extra_body_payload, dict) and "minicpmo45_native_duplex" in extra_body_payload:
-            current_native_duplex = session.config.extra_body.get("minicpmo45_native_duplex")
-            if (
-                current_native_duplex is not None
-                and extra_body_payload["minicpmo45_native_duplex"] != current_native_duplex
-            ):
+        if isinstance(extra_body_payload, dict):
+            # Fold the deprecated model-prefixed alias into the canonical
+            # native_duplex key before comparing or merging.
+            extra_body_payload = normalize_native_duplex_key(dict(extra_body_payload))
+            payload = {**payload, "extra_body": extra_body_payload}
+        if isinstance(extra_body_payload, dict) and NATIVE_DUPLEX_KEY in extra_body_payload:
+            current_native_duplex = native_duplex_opt_in(session.config.extra_body)
+            if current_native_duplex is not None and extra_body_payload[NATIVE_DUPLEX_KEY] != current_native_duplex:
                 return {
                     "type": "error",
                     "session_id": session.session_id,
                     "code": "native_duplex_mode_update_unsupported",
-                    "error": "session.update cannot change minicpmo45_native_duplex after the session is created",
+                    "error": "session.update cannot change native_duplex after the session is created",
                 }
         if isinstance(payload.get("instructions"), str):
             session.config.instructions = str(payload["instructions"])

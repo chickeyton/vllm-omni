@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from vllm.multimodal.media import MediaConnector
 
-from vllm_omni.entrypoints.duplex.protocol import DuplexSessionConfig
+from vllm_omni.entrypoints.duplex.protocol import DuplexSessionConfig, native_duplex_opt_in
 from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
     reject_changed_runtime_value,
@@ -47,7 +47,7 @@ class MiniCPMO45NativeDuplexServingAdapter:
 
     @classmethod
     def is_enabled(cls, config: DuplexSessionConfig) -> bool:
-        return config.extra_body.get("minicpmo45_native_duplex") is True
+        return native_duplex_opt_in(config.extra_body) is True
 
     @classmethod
     def validate_client_config(cls, config: DuplexSessionConfig) -> None:

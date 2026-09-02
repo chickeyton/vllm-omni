@@ -1735,7 +1735,7 @@ class _RealtimeTTSProbe:
         from vllm_omni.clients.duplex import AudioFormat, DuplexClient, SessionConfig
 
         session_extra_body: dict[str, object] = dict(extra_body or {})
-        session_extra_body["minicpmo45_native_duplex"] = bool(native_duplex)
+        session_extra_body["native_duplex"] = bool(native_duplex)
         config = SessionConfig(
             output_audio=AudioFormat(output_audio_format, 24_000),
             instructions=instructions,

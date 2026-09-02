@@ -15,6 +15,7 @@ import numpy as np
 from vllm_omni.entrypoints.duplex.audio import (
     convert_input_audio_with_rate,
 )
+from vllm_omni.entrypoints.duplex.protocol import normalize_native_duplex_key
 from vllm_omni.entrypoints.duplex.realtime_state import (
     REALTIME_INPUT_AUDIO_FORMATS,
     REALTIME_OUTPUT_AUDIO_FORMATS,
@@ -752,7 +753,9 @@ class RealtimeInputTranslator(RealtimeStateOwner):
         audio_input = audio_config.get("input") if isinstance(audio_config, dict) else None
         audio_output = audio_config.get("output") if isinstance(audio_config, dict) else None
         extra_body_payload = session_payload.get("extra_body")
-        extra_body = dict(extra_body_payload) if isinstance(extra_body_payload, dict) else {}
+        extra_body = (
+            normalize_native_duplex_key(dict(extra_body_payload)) if isinstance(extra_body_payload, dict) else {}
+        )
         extra_body["realtime_session_payload"] = self._json_safe_realtime_payload(session_payload)
         if isinstance(session_payload.get("tools"), list):
             extra_body["realtime_tools"] = session_payload["tools"]

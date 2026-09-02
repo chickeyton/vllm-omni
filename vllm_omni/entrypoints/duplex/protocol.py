@@ -27,6 +27,30 @@ class DuplexSessionState(str, Enum):
     CLOSED = "closed"
 
 
+# Canonical extra_body key for the per-session opt-in to a model-native
+# duplex runtime, plus the deprecated model-prefixed spelling it replaced.
+# Client payloads may still use the legacy key; it is folded into the
+# canonical one at ingestion so everything downstream (and every echo in
+# session.created/session.updated) sees only NATIVE_DUPLEX_KEY.
+NATIVE_DUPLEX_KEY = "native_duplex"
+LEGACY_NATIVE_DUPLEX_KEY = "minicpmo45_native_duplex"
+
+
+def normalize_native_duplex_key(extra_body: dict[str, object]) -> dict[str, object]:
+    """Fold the deprecated alias into the canonical key (canonical wins)."""
+    if LEGACY_NATIVE_DUPLEX_KEY in extra_body:
+        legacy = extra_body.pop(LEGACY_NATIVE_DUPLEX_KEY)
+        extra_body.setdefault(NATIVE_DUPLEX_KEY, legacy)
+    return extra_body
+
+
+def native_duplex_opt_in(extra_body: Mapping[str, object]) -> object:
+    """Read the opt-in flag, accepting the deprecated alias for raw dicts."""
+    if NATIVE_DUPLEX_KEY in extra_body:
+        return extra_body[NATIVE_DUPLEX_KEY]
+    return extra_body.get(LEGACY_NATIVE_DUPLEX_KEY)
+
+
 class DuplexTurnState(str, Enum):
     IDLE = "idle"
     USER_SPEAKING = "user_speaking"
@@ -272,7 +296,7 @@ class DuplexSessionConfig:
         if isinstance(source.get("modalities"), list) and all(isinstance(x, str) for x in source["modalities"]):
             config.modalities = list(source["modalities"])
         if isinstance(source.get("extra_body"), dict):
-            config.extra_body = dict(source["extra_body"])
+            config.extra_body = normalize_native_duplex_key(dict(source["extra_body"]))
             extra = config.extra_body
             if isinstance(extra.get("overlap_policy"), str):
                 config.overlap_policy = cls._normalize_overlap_policy(extra["overlap_policy"])

@@ -118,6 +118,7 @@ def test_realtime_model_name_does_not_implicitly_enable_native_duplex():
 
     event = protocol._session_create_from_realtime({"model": "openbmb/MiniCPM-o-4_5"})
 
+    assert "native_duplex" not in event["session"]["extra_body"]
     assert "minicpmo45_native_duplex" not in event["session"]["extra_body"]
 
 
@@ -127,14 +128,44 @@ def test_realtime_explicit_native_duplex_flag_is_preserved():
     event = protocol._session_create_from_realtime(
         {
             "model": "openbmb/MiniCPM-o-4_5",
+            "extra_body": {"native_duplex": True},
+        }
+    )
+
+    assert event["session"]["extra_body"]["native_duplex"] is True
+
+
+def test_realtime_legacy_native_duplex_alias_is_normalized():
+    # The deprecated model-prefixed spelling still opts in, but everything
+    # downstream (and every session echo) sees only the canonical key.
+    protocol = NativeRealtimeSessionProtocol({})
+
+    event = protocol._session_create_from_realtime(
+        {
+            "model": "openbmb/MiniCPM-o-4_5",
             "extra_body": {"minicpmo45_native_duplex": True},
         }
     )
 
-    assert event["session"]["extra_body"]["minicpmo45_native_duplex"] is True
+    assert event["session"]["extra_body"]["native_duplex"] is True
+    assert "minicpmo45_native_duplex" not in event["session"]["extra_body"]
 
 
 def test_realtime_explicit_query_native_duplex_flag_is_available_before_autostart():
+    protocol = NativeRealtimeSessionProtocol(
+        {
+            "model": "openbmb/MiniCPM-o-4_5",
+            "native_duplex": "1",
+        }
+    )
+
+    event = json.loads(asyncio.run(protocol.receive_internal_event_text(None)))
+
+    assert event["type"] == "session.create"
+    assert event["session"]["extra_body"]["native_duplex"] is True
+
+
+def test_realtime_legacy_query_native_duplex_alias_seeds_canonical_key():
     protocol = NativeRealtimeSessionProtocol(
         {
             "model": "openbmb/MiniCPM-o-4_5",
@@ -145,7 +176,8 @@ def test_realtime_explicit_query_native_duplex_flag_is_available_before_autostar
     event = json.loads(asyncio.run(protocol.receive_internal_event_text(None)))
 
     assert event["type"] == "session.create"
-    assert event["session"]["extra_body"]["minicpmo45_native_duplex"] is True
+    assert event["session"]["extra_body"]["native_duplex"] is True
+    assert "minicpmo45_native_duplex" not in event["session"]["extra_body"]
 
 
 @pytest.mark.asyncio
@@ -153,7 +185,7 @@ async def test_realtime_resume_heartbeat_and_event_ack_translate_without_session
     protocol = NativeRealtimeSessionProtocol(
         {
             "model": "openbmb/MiniCPM-o-4_5",
-            "minicpmo45_native_duplex": "1",
+            "native_duplex": "1",
         }
     )
 
@@ -219,7 +251,7 @@ async def test_realtime_resume_query_suppresses_model_autostart_on_same_url():
     protocol = NativeRealtimeSessionProtocol(
         {
             "model": "openbmb/MiniCPM-o-4_5",
-            "minicpmo45_native_duplex": "1",
+            "native_duplex": "1",
             "resume": "1",
         }
     )

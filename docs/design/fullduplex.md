@@ -549,7 +549,7 @@ deployments do not create its registries and background state.
 For an enabled deployment, the client still selects the Realtime duplex route
 with `?duplex=1` (or an equivalent explicit true value). Model-name matching is
 not used for routing or native-runtime activation. MiniCPM clients explicitly
-set `extra_body.minicpmo45_native_duplex=true`; the canonical way to do so is
+set `extra_body.native_duplex=true`; the canonical way to do so is
 the `vllm_omni.clients.minicpmo_4_5.create_duplex_session_config()` preset,
 which the repository's barge-in example
 (`examples/online_serving/barge_in_client.py`) uses in its session payload.

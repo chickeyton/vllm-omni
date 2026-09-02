@@ -80,7 +80,7 @@ def test_native_input_append_supports_explicit_session_opt_out():
 
     assert OmniDuplexSessionHandler._uses_native_input_append(session) is True
 
-    session.config.extra_body["minicpmo45_native_duplex"] = False
+    session.config.extra_body["native_duplex"] = False
     assert OmniDuplexSessionHandler._uses_native_input_append(session) is False
 
 
@@ -1257,7 +1257,7 @@ async def test_minicpmo_native_session_update_rejects_native_duplex_mode_flip():
         {
             "type": "turn.signal",
             "event": "session.update",
-            "payload": {"extra_body": {"minicpmo45_native_duplex": False}},
+            "payload": {"extra_body": {"native_duplex": False}},
         }
     )
     ws.put(
@@ -1594,7 +1594,7 @@ def _native_session_create(
     event["session"]["model"] = "openbmb/MiniCPM-o-4_5"
     event["session"]["modalities"] = list(modalities or ["text"])
     event["session"]["instructions"] = "You are a concise assistant."
-    event["session"]["extra_body"] = {"minicpmo45_native_duplex": True}
+    event["session"]["extra_body"] = {"native_duplex": True}
     return event
 
 
@@ -1611,7 +1611,7 @@ def _native_realtime_session_update(
             "modalities": list(modalities or ["text"]),
             "instructions": "You are a concise assistant.",
             "idle_timeout_s": 1,
-            "extra_body": {"minicpmo45_native_duplex": True},
+            "extra_body": {"native_duplex": True},
         },
     }
 
@@ -4864,7 +4864,7 @@ async def test_realtime_resume_rotates_token_replays_and_preserves_runtime_ident
     second = TimedWebSocket(receive_timeout_s=0.1)
     second.query_params = {
         "model": "openbmb/MiniCPM-o-4_5",
-        "minicpmo45_native_duplex": "1",
+        "native_duplex": "1",
         "resume": "1",
     }
     second.put(
@@ -4958,7 +4958,7 @@ async def test_realtime_resume_preserves_append_tail_order_across_connections():
     second = TimedWebSocket(receive_timeout_s=0.5)
     second.query_params = {
         "model": "openbmb/MiniCPM-o-4_5",
-        "minicpmo45_native_duplex": "1",
+        "native_duplex": "1",
         "resume": "1",
     }
     second.put(
@@ -6437,7 +6437,7 @@ async def test_minicpmo_native_duplex_rejects_ref_audio_path():
     handler = OmniDuplexSessionHandler(chat_service=chat_service, config_timeout_s=0.1, idle_timeout_s=1)
     event = _native_session_create("sid-native-ref-path")
     event["session"]["extra_body"] = {
-        "minicpmo45_native_duplex": True,
+        "native_duplex": True,
         "ref_audio_path": "/tmp/ref.wav",
     }
     ws = TimedWebSocket()

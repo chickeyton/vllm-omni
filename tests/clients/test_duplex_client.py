@@ -601,7 +601,7 @@ def test_build_realtime_url_with_model_extra_query():
         "ws://localhost:8099/v1/realtime?custom=1",
         "openbmb/MiniCPM-o-4_5",
         session_id="session-a",
-        extra_query={"minicpmo45_native_duplex": "1"},
+        extra_query={"native_duplex": "1"},
     )
 
     query = parse_qs(urlsplit(url).query)
@@ -609,7 +609,7 @@ def test_build_realtime_url_with_model_extra_query():
         "custom": ["1"],
         "duplex": ["1"],
         "model": ["openbmb/MiniCPM-o-4_5"],
-        "minicpmo45_native_duplex": ["1"],
+        "native_duplex": ["1"],
         "session_id": ["session-a"],
     }
 
@@ -619,12 +619,12 @@ def test_build_realtime_url_resume_only_when_autostart_disabled():
         "ws://localhost:8099/v1/realtime?duplex=1",
         "openbmb/MiniCPM-o-4_5",
         autostart=False,
-        extra_query={"minicpmo45_native_duplex": "1"},
+        extra_query={"native_duplex": "1"},
     )
 
     query = parse_qs(urlsplit(url).query)
     assert query["autostart"] == ["0"]
-    assert query["minicpmo45_native_duplex"] == ["1"]
+    assert query["native_duplex"] == ["1"]
 
 
 def test_event_collector_partitions_audio_by_response():
@@ -869,7 +869,7 @@ def test_build_realtime_url_native_duplex_flag_and_http_scheme():
     url = build_realtime_url("https://host/v1/realtime", "m", native_duplex=False)
     parts = urlsplit(url)
     assert parts.scheme == "wss"
-    assert parse_qs(parts.query)["minicpmo45_native_duplex"] == ["0"]
+    assert parse_qs(parts.query)["native_duplex"] == ["0"]
 
     with pytest.raises(ValueError):
         build_realtime_url("ftp://host/v1/realtime", "m")

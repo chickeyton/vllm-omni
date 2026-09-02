@@ -24,7 +24,7 @@ def test_minicpmo45_session_config_matches_native_duplex_deployment():
     assert payload["ref_audio"] == "data:audio/wav;base64,AAA="
     assert payload["overlap_policy"] == "listen_only"
     assert payload["playback_commit_policy"] == "ack_only"
-    assert payload["extra_body"]["minicpmo45_native_duplex"] is True
+    assert payload["extra_body"]["native_duplex"] is True
     assert payload["extra_body"]["auto_response"] is True
     assert payload["temperature"] == 0.0
 

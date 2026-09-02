@@ -32,6 +32,9 @@ _PRIVATE_RUNTIME_CONFIG_KEYS = frozenset(
     {
         "personaplex_prefill_slots",
         "personaplex_model_path",
+        # PersonaPlex is always model-native; the per-session opt-in knob
+        # (canonical name and its deprecated alias) is server-owned here.
+        "native_duplex",
         "minicpmo45_native_duplex",
     }
 )

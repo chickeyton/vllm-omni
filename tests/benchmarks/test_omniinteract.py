@@ -520,7 +520,12 @@ def test_standard_sample_loading_prepares_media_before_timing(tmp_path: Path, mo
     )
     preprocess_serve_args(args)
     assert args.endpoint == "/v1/realtime"
-    monkeypatch.setattr(benchmark_patch, "reference_audio_data_url", lambda _: "data:audio/wav;base64,ref")
+    # The benchmark patch module imports the duplex client library lazily
+    # (it must stay out of the CLI import graph), so patch the provider.
+    monkeypatch.setattr(
+        "vllm_omni.clients.duplex.reference_audio_data_url",
+        lambda _: "data:audio/wav;base64,ref",
+    )
     monkeypatch.setattr(benchmark_patch, "prepare_media", lambda *a, **k: (1.0, b"pcm", ["frame"]))
     samples = benchmark_patch.get_samples(args, None)
     assert len(samples) == args.num_prompts == 3

@@ -93,7 +93,7 @@ async def _run_protocol_smoke(*, url: str, model: str, ref_audio: Path) -> list[
         model,
         autostart=False,
         session_id=session_id,
-        extra_query={"minicpmo45_native_duplex": "1"},
+        extra_query={"native_duplex": "1"},
     )
     async with websockets.connect(websocket_url, max_size=64 * 1024 * 1024) as ws:
         await ws.send(
@@ -105,7 +105,7 @@ async def _run_protocol_smoke(*, url: str, model: str, ref_audio: Path) -> list[
                         "model": model,
                         "modalities": ["audio", "text"],
                         "ref_audio": _ref_audio_data_url(str(ref_audio)),
-                        "extra_body": {"minicpmo45_native_duplex": True},
+                        "extra_body": {"native_duplex": True},
                     },
                 }
             )

@@ -286,9 +286,14 @@ def test_personaplex_runtime_config_update_rejects_changed_voice() -> None:
     assert unchanged["personaplex_voice_prompt"] == "NATF2.pt"
 
 
-def test_personaplex_rejects_minicpmo_only_opt_out_flag() -> None:
+def test_personaplex_rejects_native_duplex_opt_out_flag() -> None:
+    # PersonaPlex is always model-native; the per-session opt-in knob is
+    # server-owned there, under both the canonical name and its deprecated
+    # model-prefixed alias.
     adapter = PersonaPlexServingRuntimeAdapter(lambda *_: None)
 
+    with pytest.raises(ServingRuntimeConfigError, match="native_duplex"):
+        adapter.validate_client_extra_body({"native_duplex": False})
     with pytest.raises(ServingRuntimeConfigError, match="minicpmo45_native_duplex"):
         adapter.validate_client_extra_body({"minicpmo45_native_duplex": False})
 

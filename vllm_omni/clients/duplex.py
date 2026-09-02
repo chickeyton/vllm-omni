@@ -1590,10 +1590,9 @@ def build_realtime_url(
     """Add explicit duplex query parameters to a Realtime URL.
 
     :class:`DuplexClient` builds its own URL; this helper is for drivers that
-    speak the wire protocol directly. Model-specific query flags (e.g.
-    MiniCPM-o's ``minicpmo45_native_duplex``) ride in ``extra_query``;
-    ``native_duplex`` is a shorthand for that MiniCPM-o flag. ``http(s)``
-    URLs are rewritten to ``ws(s)``.
+    speak the wire protocol directly. ``native_duplex`` sets the per-session
+    model-native opt-in query flag; other model-specific query flags ride in
+    ``extra_query``. ``http(s)`` URLs are rewritten to ``ws(s)``.
     """
     parts = urlsplit(url)
     if parts.scheme in {"http", "https"}:
@@ -1605,7 +1604,7 @@ def build_realtime_url(
     if model:
         query.setdefault("model", model)
     if native_duplex is not None:
-        query["minicpmo45_native_duplex"] = "1" if native_duplex else "0"
+        query["native_duplex"] = "1" if native_duplex else "0"
     for key, value in (extra_query or {}).items():
         query.setdefault(key, value)
     if autostart is not None:

@@ -77,7 +77,7 @@ def _url_with_model(url, model, *, autostart=None, session_id=None):
         model,
         autostart=autostart,
         session_id=session_id,
-        extra_query={"minicpmo45_native_duplex": "1"},
+        extra_query={"native_duplex": "1"},
     )
 
 
@@ -613,7 +613,7 @@ def _session_update_event(args: DemoArgs) -> dict[str, object]:
         "playback_commit_policy": "ack_only",
         "extra_body": {
             "auto_response": True,
-            "minicpmo45_native_duplex": True,
+            "native_duplex": True,
             "force_listen_count": 0,
         },
     }
