@@ -111,6 +111,33 @@ _MAX_BUFFERED_EVENTS = 1024
 _MAX_FRAME_BYTES = 64 << 20
 
 
+def _bare_base64(data: str) -> str:
+    """Strip a ``data:<mime>;base64,`` prefix; the wire carries bare base64."""
+    if data.startswith("data:"):
+        _, _, payload = data.partition(";base64,")
+        if payload:
+            return payload
+    return data
+
+
+def _put_drop_oldest(queue: asyncio.Queue, item: object) -> None:
+    """Deliver ``item`` without blocking, dropping the oldest entry when full.
+
+    Every internal feed path uses this: a consumer that stops draining its
+    queue loses its oldest buffered events instead of parking the single
+    reader task, which must keep dispatching (and acking) for the rest of
+    the session.
+    """
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:  # pragma: no cover - racing consumer
+            pass
+        queue.put_nowait(item)
+
+
 # ---------------------------------------------------------------------------
 # Errors
 
@@ -205,6 +232,15 @@ class SessionConfig:
             "modalities": list(self.modalities),
             "input_audio_format": self.input_audio.encoding,
             "output_audio_format": self.output_audio.encoding,
+            # The encodings alone do not pin the rates (presets differ from the
+            # server defaults), so declare both explicitly: the server reads
+            # the input rate from the top-level field and the output rate from
+            # the audio.output block.
+            "sample_rate_hz": self.input_audio.sample_rate_hz,
+            "audio": {
+                "input": {"sample_rate_hz": self.input_audio.sample_rate_hz},
+                "output": {"sample_rate_hz": self.output_audio.sample_rate_hz},
+            },
             "turn_detection": self.turn_detection,
         }
         if session_id:
@@ -458,6 +494,11 @@ class _ClosedMarker:
     expected: bool
 
 
+@dataclass(frozen=True)
+class _ErrorMarker:
+    error: ErrorEvent
+
+
 # ---------------------------------------------------------------------------
 # Response demultiplexing
 
@@ -504,7 +545,9 @@ class ResponseHandle:
 
         ``played_ms`` advances as chunks are yielded, so it reflects what the
         application has taken for playback — feed it to
-        :meth:`DuplexClient.ack_playback`.
+        :meth:`DuplexClient.ack_playback`. A handle whose audio is never
+        drained drops its oldest buffered chunks once the buffer fills; it
+        never stalls the client's reader.
         """
         while True:
             item = await self._audio_queue.get()
@@ -515,13 +558,13 @@ class ResponseHandle:
             self.played_ms += len(chunk) * 1000.0 / (rate * self._output_format.bytes_per_sample)
             yield chunk
 
-    async def _feed(self, event: DuplexEvent) -> None:
+    def _feed(self, event: DuplexEvent) -> None:
         if self._done.is_set():
             return
         if isinstance(event, AudioDelta):
             chunk = event.audio
             if chunk:
-                await self._audio_queue.put((chunk, event.sample_rate_hz))
+                _put_drop_oldest(self._audio_queue, (chunk, event.sample_rate_hz))
         elif isinstance(event, TranscriptDelta):
             self.transcript += event.text or ""
         elif isinstance(event, TextDelta):
@@ -538,14 +581,7 @@ class ResponseHandle:
         self._done.set()
         # A full queue cannot block _finish: the sentinel is delivered by a
         # non-blocking put with a drop-oldest fallback.
-        try:
-            self._audio_queue.put_nowait(None)
-        except asyncio.QueueFull:
-            try:
-                self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:  # pragma: no cover - racing consumer
-                pass
-            self._audio_queue.put_nowait(None)
+        _put_drop_oldest(self._audio_queue, None)
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +631,7 @@ class DuplexClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._subscribers: list[asyncio.Queue[DuplexEvent | _ClosedMarker]] = []
-        self._response_queue: asyncio.Queue[ResponseHandle | _ClosedMarker] = asyncio.Queue(
+        self._response_queue: asyncio.Queue[ResponseHandle | _ClosedMarker | _ErrorMarker] = asyncio.Queue(
             maxsize=_MAX_BUFFERED_EVENTS
         )
         self._responses: dict[str, ResponseHandle] = {}
@@ -638,6 +674,18 @@ class DuplexClient:
         try:
             if exc_type is None and not self._closed.is_set():
                 await self.close()
+            elif not self._closed.is_set():
+                # An application error (or cancellation) is propagating. Still
+                # tell the server the session is over: dropping the transport
+                # silently reads as a resumable disconnect and holds the
+                # session slot for the full disconnect grace period. Best
+                # effort only — the teardown below closes the transport
+                # whether or not the close reaches the server.
+                self._closing = True
+                try:
+                    await self.send({"type": "session.close"})
+                except DuplexClientError:
+                    pass
         finally:
             await self._teardown()
 
@@ -662,14 +710,16 @@ class DuplexClient:
         self,
         pcm: bytes,
         *,
-        final: bool = False,
         is_speech: bool | None = None,
         video_frames: Sequence[str] | None = None,
     ) -> None:
         """Append one chunk of input audio in the session's input format.
 
-        ``video_frames`` takes data-URL JPEG strings (one per ~1 s unit for
-        omni models); see :func:`image_data_url`.
+        A turn is ended with :meth:`commit`, never by a flag on the append.
+
+        ``video_frames`` takes base64 JPEG/PNG strings (one per ~1 s unit for
+        omni models). Data URLs (:func:`image_data_url`) are accepted too;
+        their prefix is stripped, since the wire contract carries bare base64.
         """
         input_format = self.config.input_audio
         duration_ms = input_format.duration_ms(len(pcm))
@@ -682,12 +732,10 @@ class DuplexClient:
             "duration_ms": round(duration_ms),
             "audio_end_ms": round(self._input_audio_end_ms),
         }
-        if final:
-            event["final"] = True
         if is_speech is not None:
             event["is_speech"] = is_speech
         if video_frames:
-            event["video_frames"] = list(video_frames)
+            event["video_frames"] = [_bare_base64(frame) for frame in video_frames]
         await self.send(event)
 
     async def stream_pcm(
@@ -820,13 +868,22 @@ class DuplexClient:
             self._remove_subscriber(queue)
 
     async def responses(self) -> AsyncIterator[ResponseHandle]:
-        """Iterate over response lifecycles (single consumer)."""
+        """Iterate over response lifecycles (single consumer).
+
+        Raises :class:`DuplexProtocolError` when the server rejects a request
+        with an ``error`` event while waiting — a rejected send (an invalid
+        video frame, an empty commit) produces no response, so without this
+        the wait would never end. Re-enter the iterator to keep consuming
+        after handling the error.
+        """
         while True:
             item = await self._response_queue.get()
             if isinstance(item, _ClosedMarker):
                 if item.expected:
                     return
                 raise DuplexSessionClosedError(item.reason)
+            if isinstance(item, _ErrorMarker):
+                raise item.error.to_exception()
             yield item
 
     async def wait_for(self, *types: str, timeout_s: float) -> DuplexEvent:
@@ -868,8 +925,9 @@ class DuplexClient:
         # with an explicit session.resume). Autostart would race that handshake:
         # with a model query param, the server creates a bare default session
         # before reading the first client event, silently dropping ref_audio
-        # and the model-specific extra_body.
-        query.setdefault("autostart", "0")
+        # and the model-specific extra_body. Force it off even when the caller's
+        # URL carries autostart=1 — this client cannot operate over it.
+        query["autostart"] = "0"
         return urlunsplit((parts.scheme or "ws", parts.netloc, path, urlencode(query), parts.fragment))
 
     async def _default_connect(self, url: str) -> WebSocketTransport:
@@ -885,7 +943,10 @@ class DuplexClient:
             raise DuplexConnectionError(f"connect to {url} failed: {exc}") from exc
 
     def _adopt_session(self, event: SessionCreated) -> None:
-        self.session_info = event.session
+        # A resume activation carries no nested session object; keep the
+        # session_info captured at the original handshake in that case.
+        if event.session:
+            self.session_info = event.session
         session_id = event.session.get("session_id") or event.session.get("id") or event.session_id
         if isinstance(session_id, str) and session_id:
             self.session_id = session_id
@@ -973,16 +1034,21 @@ class DuplexClient:
                     created_event=event,
                 )
                 self._responses[response_id] = handle
-                await self._response_queue.put(handle)
+                _put_drop_oldest(self._response_queue, handle)
         elif isinstance(event, (AudioDelta, TranscriptDelta, TextDelta, SpeakDecision)):
             handle = self._responses.get(event.response_id or "")
             if handle is not None:
-                await handle._feed(event)
+                handle._feed(event)
         elif isinstance(event, ListenDecision):
             handle = self._responses.pop(event.response_id or "", None)
+            if handle is None and event.response_id is None and len(self._responses) == 1:
+                # Older servers omit the response id from response.listen; a
+                # listen with no id and exactly one in-flight response can
+                # only be that response's terminal decision.
+                handle = self._responses.pop(next(iter(self._responses)))
             if handle is not None:
                 # A listen decision against an active response is terminal.
-                await handle._feed(event)
+                handle._feed(event)
                 handle._finish(event)
             else:
                 listen_handle = ResponseHandle(
@@ -992,16 +1058,21 @@ class DuplexClient:
                     decision="listen",
                 )
                 listen_handle._finish(event)
-                await self._response_queue.put(listen_handle)
+                _put_drop_oldest(self._response_queue, listen_handle)
         elif isinstance(event, ResponseDone):
             handle = self._responses.pop(event.response_id or "", None)
             if handle is not None:
                 if handle.decision is None:
                     handle.decision = "speak"
                 handle._finish(event)
+        elif isinstance(event, ErrorEvent):
+            # A rejected request produces no response; surface the rejection
+            # on the response path too so a consumer waiting in responses()
+            # is not left waiting forever (see the responses() docstring).
+            _put_drop_oldest(self._response_queue, _ErrorMarker(event))
 
         for queue in list(self._subscribers):
-            await queue.put(event)
+            _put_drop_oldest(queue, event)
 
         if isinstance(event, SessionClosed):
             self._finalize("closed", expected=True)
@@ -1079,6 +1150,8 @@ class DuplexClient:
                         break  # transient error: next attempt
                     pending.append(data)
             except asyncio.CancelledError:
+                # ws is not yet self._ws, so _teardown will not close it.
+                await self._close_quietly(ws)
                 raise
             except Exception:
                 await self._close_quietly(ws)
@@ -1099,6 +1172,13 @@ class DuplexClient:
             await asyncio.sleep(interval)
             try:
                 await self.send({"type": "session.heartbeat"})
+            except DuplexConnectionError:
+                # Transient transport failure — a tick can land inside the
+                # resume window while the old socket is already dead. Keep
+                # ticking; the resumed session still needs heartbeats to
+                # reset the server's receive timeout. If the session is
+                # really over, _finalize sets _closed and the loop exits.
+                continue
             except DuplexClientError:
                 return
 
@@ -1112,10 +1192,7 @@ class DuplexClient:
             handle._finish(None)
         self._responses.clear()
         for queue in (*self._subscribers, self._response_queue):
-            try:
-                queue.put_nowait(marker)
-            except asyncio.QueueFull:  # pragma: no cover - subscriber gave up
-                pass
+            _put_drop_oldest(queue, marker)
 
     async def _teardown(self) -> None:
         self._closing = True

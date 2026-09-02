@@ -1501,14 +1501,15 @@ class DuplexSessionRunnerMixin:
                             # the speak/listen decision and MUST receive silence units --
                             # the official model typically starts speaking during the
                             # silence after a question.
-                            await emit_event(
-                                {
-                                    "type": "response.listen",
-                                    "session_id": session.session_id,
-                                    "epoch": session.epoch,
-                                    "reason": "silence_or_noise",
-                                }
-                            )
+                            listen_payload = {
+                                "type": "response.listen",
+                                "session_id": session.session_id,
+                                "epoch": session.epoch,
+                                "reason": "silence_or_noise",
+                            }
+                            if session.active_response_id is not None:
+                                listen_payload["response_id"] = session.active_response_id
+                            await emit_event(listen_payload)
                             continue
                         if self._should_force_listen_for_auto_response_overlap(session, event, payload):
                             # Auto-response keeps a long-lived native Stage0 stream.
@@ -1604,14 +1605,15 @@ class DuplexSessionRunnerMixin:
                                 "no_response": True,
                             }
                         )
-                        await emit_event(
-                            {
-                                "type": "response.listen",
-                                "session_id": session.session_id,
-                                "epoch": session.epoch,
-                                "reason": "silence_or_noise",
-                            }
-                        )
+                        listen_payload = {
+                            "type": "response.listen",
+                            "session_id": session.session_id,
+                            "epoch": session.epoch,
+                            "reason": "silence_or_noise",
+                        }
+                        if session.active_response_id is not None:
+                            listen_payload["response_id"] = session.active_response_id
+                        await emit_event(listen_payload)
                         continue
                     should_create_response = (
                         event_type == "response.create"

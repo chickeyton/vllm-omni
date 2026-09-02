@@ -372,15 +372,18 @@ class NativeRuntimeBridgeMixin:
         if expected_epoch is not None and response_epoch != expected_epoch:
             return
         native.clear_continuation()
-        await send_json(
-            {
-                "type": "response.listen",
-                "session_id": session.session_id,
-                "epoch": response_epoch,
-                "reason": "continuation_limit",
-                "model_listen": False,
-            }
-        )
+        payload = {
+            "type": "response.listen",
+            "session_id": session.session_id,
+            "epoch": response_epoch,
+            "reason": "continuation_limit",
+            "model_listen": False,
+        }
+        if response_id is not None:
+            # Clients demultiplex a listen against a precreated response by
+            # its id; every listen that terminates a response must carry it.
+            payload["response_id"] = response_id
+        await send_json(payload)
         if response_id is None:
             if session.epoch == response_epoch and response_turn_id is not None:
                 session.complete_model_turn(response_turn_id)
@@ -936,6 +939,8 @@ class NativeRuntimeBridgeMixin:
                 "model_listen": False,
                 "buffering": True,
             }
+            if session.active_response_id is not None:
+                payload["response_id"] = session.active_response_id
             self._attach_native_runtime_metadata(payload, native_result)
             await send_json(payload)
             return close_reason, emitted_response
@@ -986,6 +991,11 @@ class NativeRuntimeBridgeMixin:
                 "reason": native_result.get("reason") or "model_listen",
                 "model_listen": model_listen,
             }
+            if response_id is not None:
+                # The listen is this response's terminal decision (a
+                # response.done follows below with the same id); carry the id
+                # so clients can bind the decision to the precreated response.
+                payload["response_id"] = response_id
             self._attach_native_runtime_metadata(payload, native_result)
             await send_json(payload)
             if native_result.get("abort_data_plane_request") is True and isinstance(data_plane_request_id, str):

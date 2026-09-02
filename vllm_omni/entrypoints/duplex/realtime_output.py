@@ -72,18 +72,25 @@ class RealtimeOutputProjector:
                 payloads.extend(self._ensure_response_audio_part_added(response_id))
             return payloads
         if event_type == "response.listen":
-            return [
-                {
-                    "type": "response.listen",
-                    "session_id": event.get("session_id"),
-                    "epoch": event.get("epoch"),
-                    "response": {
-                        "object": "realtime.response",
-                        "status": "listening",
-                        "metadata": event,
-                    },
-                }
-            ]
+            listen_response: dict[str, object] = {
+                "object": "realtime.response",
+                "status": "listening",
+                "metadata": event,
+            }
+            listen_payload: dict[str, object] = {
+                "type": "response.listen",
+                "session_id": event.get("session_id"),
+                "epoch": event.get("epoch"),
+                "response": listen_response,
+            }
+            listen_response_id = event.get("response_id")
+            if isinstance(listen_response_id, str) and listen_response_id:
+                # Keep the response identity visible on the Realtime dialect:
+                # a listen that terminates a precreated response is matched to
+                # it by this id (clients demultiplex on response_id).
+                listen_response["id"] = listen_response_id
+                listen_payload["response_id"] = listen_response_id
+            return [listen_payload]
         if event_type == "response.speak":
             response_id = event.get("response_id")
             state = self._response_state(response_id)

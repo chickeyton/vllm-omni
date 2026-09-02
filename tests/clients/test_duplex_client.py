@@ -99,10 +99,31 @@ def test_session_config_payload_defaults():
     assert payload["modalities"] == ["audio", "text"]
     assert payload["input_audio_format"] == "pcm16"
     assert payload["output_audio_format"] == "pcm16"
+    # The encodings do not pin the rates; the payload must carry both (the
+    # server reads the input rate top-level and the output rate from audio).
+    assert payload["sample_rate_hz"] == 16_000
+    assert payload["audio"] == {
+        "input": {"sample_rate_hz": 16_000},
+        "output": {"sample_rate_hz": 24_000},
+    }
     assert payload["turn_detection"] is None
     assert payload["extra_body"] == {"auto_response": True}
     assert "voice" not in payload
     assert "ref_audio" not in payload
+
+
+def test_session_config_payload_carries_preset_rates():
+    config = SessionConfig(
+        input_audio=AudioFormat("pcm_f32le", 24_000),
+        output_audio=AudioFormat("pcm16", 24_000),
+    )
+    payload = config.to_session_payload(model="m")
+    assert payload["input_audio_format"] == "pcm_f32le"
+    assert payload["sample_rate_hz"] == 24_000
+    assert payload["audio"] == {
+        "input": {"sample_rate_hz": 24_000},
+        "output": {"sample_rate_hz": 24_000},
+    }
 
 
 def test_audio_format_math():
@@ -191,7 +212,7 @@ async def test_append_audio_tracks_cumulative_end_ms():
     async with client:
         pcm = b"\x01\x02" * 1600  # 100 ms of pcm16 @ 16 kHz
         await client.append_audio(pcm)
-        await client.append_audio(pcm, is_speech=True, final=True)
+        await client.append_audio(pcm, is_speech=True)
         appends = [event for event in sock.sent if event.get("type") == "input_audio_buffer.append"]
         assert [a["audio_end_ms"] for a in appends] == [100, 200]
         assert appends[0]["format"] == "pcm16"
@@ -199,8 +220,21 @@ async def test_append_audio_tracks_cumulative_end_ms():
         assert appends[0]["duration_ms"] == 100
         assert "is_speech" not in appends[0]
         assert appends[1]["is_speech"] is True
-        assert appends[1]["final"] is True
         assert base64.b64decode(appends[0]["audio"]) == pcm
+        sock.feed(SESSION_CLOSED)
+
+
+async def test_append_audio_strips_video_frame_data_url_prefix():
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, _ = make_client(sock)
+    async with client:
+        jpeg_b64 = base64.b64encode(b"\xff\xd8fake").decode("ascii")
+        # The wire contract carries bare base64; image_data_url output must
+        # still be accepted (the server validator rejects data-URL prefixes).
+        await client.append_audio(b"\x00\x00", video_frames=[f"data:image/jpeg;base64,{jpeg_b64}", jpeg_b64])
+        append = next(event for event in sock.sent if event.get("type") == "input_audio_buffer.append")
+        assert append["video_frames"] == [jpeg_b64, jpeg_b64]
         sock.feed(SESSION_CLOSED)
 
 
@@ -301,6 +335,61 @@ async def test_listen_terminates_active_response():
         sock.feed(SESSION_CLOSED)
 
 
+async def test_listen_without_id_binds_to_sole_active_response():
+    # Older servers omit response_id from response.listen; with exactly one
+    # in-flight response the decision can only be its terminal.
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, _ = make_client(sock)
+    async with client:
+        sock.feed({"type": "response.created", "response": {"id": "resp-1"}, "server_event_seq": 2})
+        sock.feed({"type": "response.listen", "server_event_seq": 3})
+        async for response in client.responses():
+            await response.wait(timeout_s=5.0)
+            assert response.response_id == "resp-1"
+            assert response.decision == "listen"
+            break
+        assert client._responses == {}
+        sock.feed(SESSION_CLOSED)
+
+
+async def test_error_event_surfaces_on_response_path():
+    # A rejected send produces no response; a consumer waiting in responses()
+    # must see the rejection instead of waiting forever.
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, _ = make_client(sock)
+    async with client:
+        sock.feed(
+            {
+                "type": "error",
+                "error": {"code": "input_audio_buffer_empty", "message": "empty commit"},
+                "server_event_seq": 2,
+            }
+        )
+        with pytest.raises(DuplexProtocolError) as excinfo:
+            async for _ in client.responses():
+                pass
+        assert excinfo.value.code == "input_audio_buffer_empty"
+        sock.feed(SESSION_CLOSED)
+
+
+async def test_slow_audio_consumer_drops_oldest_instead_of_stalling():
+    from vllm_omni.clients.duplex import AudioDelta, ResponseHandle
+
+    handle = ResponseHandle(
+        response_id="r1",
+        output_format=AudioFormat("pcm16", 24_000),
+        max_buffered_events=2,
+    )
+    for payload in (b"c1", b"c2", b"c3"):
+        # _feed must never block the reader, even against a full queue.
+        handle._feed(AudioDelta({"type": "response.audio.delta", "delta": _b64(payload)}))
+    handle._finish(None)
+    chunks = [chunk async for chunk in handle.audio()]
+    assert chunks == [b"c3"]  # oldest chunks were dropped, the sentinel landed
+
+
 # ---------------------------------------------------------------------------
 # Resume
 
@@ -309,11 +398,15 @@ async def test_resume_after_transport_drop():
     first = FakeSocket()
     first.feed(SESSION_CREATED)
     second = FakeSocket()
+    # Mirror the real resume activation payload
+    # (entrypoints/duplex/serving.py, activation_payload_factory): it carries
+    # no nested "session" object, only the identity fields.
     second.feed(
         {
             "type": "session.resumed",
-            "session": {"session_id": "sess-1"},
+            "session_id": "sess-1",
             "incarnation": 0,
+            "attachment_generation": 1,
             "resume_token": "tok-2",
             "server_event_seq": 5,
         }
@@ -341,6 +434,9 @@ async def test_resume_after_transport_drop():
         assert isinstance(seen[0], ConnectionResumed)
         assert isinstance(seen[1], SessionResumed)
         assert client.resume_token == "tok-2"
+        # The activation payload has no session object; the info captured at
+        # the original handshake must survive the resume.
+        assert client.session_info == {"session_id": "sess-1"}
         assert len(calls) == 2
         resume = second.sent[0]
         assert resume["type"] == "session.resume"
@@ -361,6 +457,47 @@ async def test_no_reconnect_policy_surfaces_closed():
         with pytest.raises(DuplexSessionClosedError):
             async for _ in stream:
                 pass
+
+
+async def test_heartbeat_survives_transient_send_failure():
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    armed = {"fail": True}
+    original_send = sock.send
+
+    async def flaky_send(raw: str) -> None:
+        if json.loads(raw).get("type") == "session.heartbeat" and armed["fail"]:
+            armed["fail"] = False
+            raise RuntimeError("transport hiccup")
+        await original_send(raw)
+
+    sock.send = flaky_send  # type: ignore[method-assign]
+    client, _ = make_client(sock, heartbeat_interval_s=0.01)
+    async with client:
+        # The first tick fails; the loop must keep ticking (a resumed but
+        # quiet session relies on heartbeats to reset the server timeout).
+        await _drain(lambda: "session.heartbeat" in sock.sent_types())
+        sock.feed(SESSION_CLOSED)
+
+
+async def test_aexit_sends_session_close_on_error_path():
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    client, _ = make_client(sock)
+    with pytest.raises(RuntimeError):
+        async with client:
+            raise RuntimeError("application failure")
+    # The server must not be left holding the session for the disconnect
+    # grace period; the error path still announces the close.
+    assert "session.close" in sock.sent_types()
+
+
+def test_target_url_forces_autostart_off():
+    client = DuplexClient("ws://test-host:8099/v1/realtime?autostart=1", model="m")
+    query = parse_qs(urlsplit(client._target_url()).query)
+    # autostart would race the session.update handshake and silently drop
+    # ref_audio/extra_body; the client overrides it even when the URL asks.
+    assert query["autostart"] == ["0"]
 
 
 async def test_fatal_resume_error_gives_up():

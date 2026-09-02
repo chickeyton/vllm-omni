@@ -3326,6 +3326,11 @@ async def test_minicpmo_auto_response_boundary_listen_closes_response():
     assert emitted is True
     assert engine.appended == []
     assert ws.sent_types() == ["response.listen", "response.done"]
+    # The listen terminates the precreated response: clients demultiplex the
+    # decision by its id, so the payload must carry the response identity.
+    listen_payload, done_payload = ws.sent[-2], ws.sent[-1]
+    assert listen_payload["response_id"] == response_id
+    assert done_payload["response_id"] == response_id
     assert session.active_response_id is None
     assert session.active_request_id == request_id
     assert session.turn_id == 1

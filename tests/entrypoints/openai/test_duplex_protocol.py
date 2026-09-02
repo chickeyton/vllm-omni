@@ -295,6 +295,39 @@ def test_realtime_projects_resume_lifecycle_events_without_duplex_prefix():
     }
 
 
+def test_realtime_projects_listen_response_identity():
+    protocol = NativeRealtimeSessionProtocol({})
+    protocol.encode_outbound_event({"type": "session.created", "session": {"id": "sid-listen"}})
+
+    bound = protocol.encode_outbound_event(
+        {
+            "type": "response.listen",
+            "session_id": "sid-listen",
+            "epoch": 0,
+            "reason": "model_listen",
+            "model_listen": True,
+            "response_id": "resp_1",
+        }
+    )[0]
+    # A listen that terminates a precreated response keeps the response
+    # identity on the Realtime dialect; clients demultiplex on response_id.
+    assert bound["type"] == "response.listen"
+    assert bound["response_id"] == "resp_1"
+    assert bound["response"]["id"] == "resp_1"
+    assert bound["response"]["status"] == "listening"
+
+    anonymous = protocol.encode_outbound_event(
+        {
+            "type": "response.listen",
+            "session_id": "sid-listen",
+            "epoch": 0,
+            "reason": "silence_or_noise",
+        }
+    )[0]
+    assert "response_id" not in anonymous
+    assert "id" not in anonymous["response"]
+
+
 def test_duplex_session_registry_advances_incarnation_when_id_is_reused():
     registry = DuplexSessionRegistry()
 

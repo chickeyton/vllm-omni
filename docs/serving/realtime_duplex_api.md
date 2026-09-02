@@ -106,10 +106,12 @@ await client.commit(create_response=False)           # the model decides listen/
 
 `stream_pcm` slices PCM into `chunk_ms` appends and paces them in real time
 (`realtime=False` sends as fast as possible). `append_audio` sends one chunk
-and accepts `is_speech`, `final`, and `video_frames` (data-URL JPEGs riding
-the append that closes a one-second model unit; `stream_pcm(video_frames=...,
+and accepts `is_speech` and `video_frames` (base64 JPEG/PNG strings riding
+the append that closes a one-second model unit — data URLs are accepted and
+their prefix stripped; `stream_pcm(video_frames=...,
 stacked_video_frames=...)` interleaves a frame track automatically and
-returns the number of frames sent).
+returns the number of frames sent). A turn is ended with `commit`, never by
+a flag on the append.
 
 `commit` seals the buffered utterance into a user item. With the default
 `auto_response=True` a commit lets the model respond; pass
@@ -316,7 +318,7 @@ A stock client ignores the extra keys; the extensions are additive.
 | `response.created` / `response.done` / `response.listen` | `response_id` at top level; the raw duplex event under `response.metadata` (`duplex_event`); `status_details.reason` uses vLLM reasons (`barge_in`, `client_cancelled`, `new_response`, …) |
 | `response.audio.delta` | `format`, `sample_rate_hz`, `metadata{session_id, epoch, model_speak, end_of_turn, audio_duration_ms, audio_text_marks, playback}` |
 | `response.speak` (inserted before the first delta) | not an OpenAI event, but rides the OpenAI response envelope (`response_id`, `item_id`, `output_index`, `content_index`) |
-| `input_audio_buffer.append` | `is_speech`, `video_frames` (+ `max_slice_nums`), `duration_ms`, `audio_end_ms`, per-event `format` / `sample_rate_hz`, `final` |
+| `input_audio_buffer.append` | `is_speech`, `video_frames` (+ `max_slice_nums`), `duration_ms`, `audio_end_ms`, per-event `format` / `sample_rate_hz` |
 | `input_audio_buffer.commit` | `final`, `response_create`, `is_speech:false` (silence declaration) |
 | `input_audio_buffer.committed` | the native `input.committed` event wrapped under `event` (`turn_id`, `epoch`, `history_len`, `message`, `response_create_deferred`) |
 | `conversation.item.*` server events | echo of the originating event under `event` |
@@ -433,7 +435,7 @@ table lives in the normative contract section of [Full-Duplex Runtime (MiniCPM-o
 | `response.output_item.done` | 1 | Assistant item finalized. |
 | `response.done` | 2 | Terminal event; `status` ∈ `completed` \| `cancelled` \| `failed`. OpenAI name; vLLM-Omni `status_details.reason` values and raw duplex event under `metadata`. |
 | `rate_limits.updated` | 1 | Compatibility event after every `response.done`; always an empty list. |
-| `response.listen` | 3 | Model chose to keep listening at a unit boundary or after a silence commit; no `response.created` precedes it. |
+| `response.listen` | 3 | Model chose to keep listening at a unit boundary or after a silence commit. Carries `response_id` when the decision terminates a precreated response (a `response.done` with the same id follows); otherwise no `response.created` precedes it. |
 | `response.function_call_arguments.delta` | 1 | Tool-call arguments delta (Nemotron VoiceChat). |
 | `response.function_call_arguments.done` | 1 | Tool-call arguments complete. |
 | `duplex.function_call.done` | 3 | Raw fallback when a model tool call is malformed. |
@@ -632,7 +634,8 @@ events with `server_event_seq > 40` are replayed in order)
 }
 ```
 
-with camera frames (omni video; rides the append that closes a 1 s model unit)
+with camera frames (omni video; rides the append that closes a 1 s model
+unit; each entry is a **bare** base64 JPEG/PNG — no `data:` URL prefix)
 
 ```json
 {
@@ -642,7 +645,7 @@ with camera frames (omni video; rides the append that closes a 1 s model unit)
   "sample_rate_hz": 16000,
   "duration_ms": 200,
   "audio_end_ms": 1200,
-  "video_frames": ["data:image/jpeg;base64,…", "data:image/jpeg;base64,…"]
+  "video_frames": ["/9j/4AAQSkZJRg…", "/9j/4AAQSkZJRg…"]
 }
 ```
 
