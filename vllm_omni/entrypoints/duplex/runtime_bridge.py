@@ -931,6 +931,8 @@ class NativeRuntimeBridgeMixin:
         if native_result.get("is_buffering") is True or native_result.get("prefill_success") is False:
             if native_result.get("data_plane_request_id") == session.active_request_id:
                 session.clear_request()
+            # No response_id here: a buffering listen is informational, not a
+            # response terminal — clients must not close a handle over it.
             payload = {
                 "type": "response.listen",
                 "session_id": session.session_id,
@@ -939,8 +941,6 @@ class NativeRuntimeBridgeMixin:
                 "model_listen": False,
                 "buffering": True,
             }
-            if session.active_response_id is not None:
-                payload["response_id"] = session.active_response_id
             self._attach_native_runtime_metadata(payload, native_result)
             await send_json(payload)
             return close_reason, emitted_response

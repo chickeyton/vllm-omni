@@ -506,8 +506,11 @@ class _ErrorMarker:
 class ResponseHandle:
     """One ``response.created`` → terminal lifecycle, demultiplexed.
 
-    Listen decisions surface as already-finished handles with
-    ``decision == "listen"`` and no audio, so a turn loop stays uniform.
+    A handle reaches :meth:`DuplexClient.responses` only once its decision is
+    known: when the response starts producing output (``decision`` is
+    ``"speak"`` or about to become it) or when a terminal listen finishes it
+    (``decision == "listen"``, no audio). Standalone listen decisions surface
+    as already-finished handles too, so a turn loop stays uniform.
     """
 
     def __init__(
@@ -529,6 +532,7 @@ class ResponseHandle:
         self._output_format = output_format
         self._audio_queue: asyncio.Queue[tuple[bytes, int | None] | None] = asyncio.Queue(maxsize=max_buffered_events)
         self._done = asyncio.Event()
+        self._announced = False
 
     @property
     def finished(self) -> bool:
@@ -572,7 +576,10 @@ class ResponseHandle:
         elif isinstance(event, SpeakDecision):
             self.decision = "speak"
         elif isinstance(event, ListenDecision):
-            self.decision = "listen"
+            # A terminal listen on a response that already spoke is the
+            # model yielding the turn; it must not downgrade the decision.
+            if self.decision is None:
+                self.decision = "listen"
 
     def _finish(self, event: DuplexEvent | None) -> None:
         if self._done.is_set():
@@ -954,6 +961,12 @@ class DuplexClient:
         if event.resume_token:
             self.resume_token = event.resume_token
 
+    def _announce(self, handle: ResponseHandle) -> None:
+        """Deliver a handle to responses() exactly once, decision known."""
+        if not handle._announced:
+            handle._announced = True
+            _put_drop_oldest(self._response_queue, handle)
+
     def _add_subscriber(self) -> asyncio.Queue[DuplexEvent | _ClosedMarker]:
         queue: asyncio.Queue[DuplexEvent | _ClosedMarker] = asyncio.Queue(maxsize=_MAX_BUFFERED_EVENTS)
         if self._closed.is_set() and self._closed_marker is not None:
@@ -1034,22 +1047,25 @@ class DuplexClient:
                     created_event=event,
                 )
                 self._responses[response_id] = handle
-                _put_drop_oldest(self._response_queue, handle)
+                # Not yielded yet: the handle reaches responses() once its
+                # decision is known — at the first output below, or at its
+                # terminal event — so a turn loop can branch on `decision`
+                # the moment it receives the handle.
         elif isinstance(event, (AudioDelta, TranscriptDelta, TextDelta, SpeakDecision)):
             handle = self._responses.get(event.response_id or "")
             if handle is not None:
                 handle._feed(event)
+                self._announce(handle)
         elif isinstance(event, ListenDecision):
+            # Only a listen carrying a response_id is that response's
+            # terminal decision (the server stamps it exactly there); an
+            # id-less listen is a standalone decision beat and must never
+            # close an in-flight response.
             handle = self._responses.pop(event.response_id or "", None)
-            if handle is None and event.response_id is None and len(self._responses) == 1:
-                # Older servers omit the response id from response.listen; a
-                # listen with no id and exactly one in-flight response can
-                # only be that response's terminal decision.
-                handle = self._responses.pop(next(iter(self._responses)))
             if handle is not None:
-                # A listen decision against an active response is terminal.
                 handle._feed(event)
                 handle._finish(event)
+                self._announce(handle)
             else:
                 listen_handle = ResponseHandle(
                     response_id=event.response_id,
@@ -1057,6 +1073,7 @@ class DuplexClient:
                     max_buffered_events=_MAX_BUFFERED_EVENTS,
                     decision="listen",
                 )
+                listen_handle._announced = True
                 listen_handle._finish(event)
                 _put_drop_oldest(self._response_queue, listen_handle)
         elif isinstance(event, ResponseDone):
@@ -1065,6 +1082,7 @@ class DuplexClient:
                 if handle.decision is None:
                     handle.decision = "speak"
                 handle._finish(event)
+                self._announce(handle)
         elif isinstance(event, ErrorEvent):
             # A rejected request produces no response; surface the rejection
             # on the response path too so a consumer waiting in responses()

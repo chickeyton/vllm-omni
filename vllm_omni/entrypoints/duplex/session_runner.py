@@ -1501,15 +1501,17 @@ class DuplexSessionRunnerMixin:
                             # the speak/listen decision and MUST receive silence units --
                             # the official model typically starts speaking during the
                             # silence after a question.
-                            listen_payload = {
-                                "type": "response.listen",
-                                "session_id": session.session_id,
-                                "epoch": session.epoch,
-                                "reason": "silence_or_noise",
-                            }
-                            if session.active_response_id is not None:
-                                listen_payload["response_id"] = session.active_response_id
-                            await emit_event(listen_payload)
+                            # No response_id: a silence-skip listen can arrive
+                            # while a response is still streaming and must not
+                            # read as that response's terminal decision.
+                            await emit_event(
+                                {
+                                    "type": "response.listen",
+                                    "session_id": session.session_id,
+                                    "epoch": session.epoch,
+                                    "reason": "silence_or_noise",
+                                }
+                            )
                             continue
                         if self._should_force_listen_for_auto_response_overlap(session, event, payload):
                             # Auto-response keeps a long-lived native Stage0 stream.
@@ -1605,15 +1607,16 @@ class DuplexSessionRunnerMixin:
                                 "no_response": True,
                             }
                         )
-                        listen_payload = {
-                            "type": "response.listen",
-                            "session_id": session.session_id,
-                            "epoch": session.epoch,
-                            "reason": "silence_or_noise",
-                        }
-                        if session.active_response_id is not None:
-                            listen_payload["response_id"] = session.active_response_id
-                        await emit_event(listen_payload)
+                        # No response_id: this silence listen answers an empty
+                        # commit, it is not a response terminal.
+                        await emit_event(
+                            {
+                                "type": "response.listen",
+                                "session_id": session.session_id,
+                                "epoch": session.epoch,
+                                "reason": "silence_or_noise",
+                            }
+                        )
                         continue
                     should_create_response = (
                         event_type == "response.create"

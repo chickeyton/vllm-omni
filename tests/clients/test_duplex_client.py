@@ -335,21 +335,55 @@ async def test_listen_terminates_active_response():
         sock.feed(SESSION_CLOSED)
 
 
-async def test_listen_without_id_binds_to_sole_active_response():
-    # Older servers omit response_id from response.listen; with exactly one
-    # in-flight response the decision can only be its terminal.
+async def test_id_less_listen_never_closes_an_in_flight_response():
+    # An id-less listen is a standalone decision beat (e.g. a silence-skip
+    # while a response streams); it must surface as its own finished handle
+    # and leave the in-flight response to its real terminal.
     sock = FakeSocket()
     sock.feed(SESSION_CREATED)
     client, _ = make_client(sock)
     async with client:
         sock.feed({"type": "response.created", "response": {"id": "resp-1"}, "server_event_seq": 2})
-        sock.feed({"type": "response.listen", "server_event_seq": 3})
+        sock.feed({"type": "response.speak", "response_id": "resp-1", "server_event_seq": 3})
+        sock.feed({"type": "response.listen", "server_event_seq": 4})
+        sock.feed({"type": "response.done", "response_id": "resp-1", "server_event_seq": 5})
+        seen: list[tuple[str | None, str | None, bool]] = []
         async for response in client.responses():
             await response.wait(timeout_s=5.0)
-            assert response.response_id == "resp-1"
-            assert response.decision == "listen"
+            seen.append((response.response_id, response.decision, response.finished))
+            if len(seen) == 2:
+                break
+        assert ("resp-1", "speak", True) in seen
+        assert (None, "listen", True) in seen
+        sock.feed(SESSION_CLOSED)
+
+
+async def test_terminal_listen_keeps_spoken_decision():
+    # A terminal listen after the response spoke is the model yielding the
+    # turn; the handle must stay decision="speak" with its audio intact.
+    sock = FakeSocket()
+    sock.feed(SESSION_CREATED)
+    chunk = b"\x00\x01" * 2400
+    client, _ = make_client(sock)
+    async with client:
+        sock.feed({"type": "response.created", "response": {"id": "resp-1"}, "server_event_seq": 2})
+        sock.feed({"type": "response.speak", "response_id": "resp-1", "server_event_seq": 3})
+        sock.feed(
+            {
+                "type": "response.audio.delta",
+                "response_id": "resp-1",
+                "delta": _b64(chunk),
+                "sample_rate_hz": 24_000,
+                "server_event_seq": 4,
+            }
+        )
+        sock.feed({"type": "response.listen", "response_id": "resp-1", "server_event_seq": 5})
+        async for response in client.responses():
+            chunks = [piece async for piece in response.audio()]
+            assert chunks == [chunk]
+            assert response.decision == "speak"
+            assert response.finished
             break
-        assert client._responses == {}
         sock.feed(SESSION_CLOSED)
 
 
