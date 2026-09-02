@@ -117,13 +117,13 @@ async def _run_live_session(*, url: str, model: str, ref_audio: Path, input_wav:
 @pytest.mark.core_model
 @hardware_test(res={"cuda": "H100"}, num_cards=1)
 @pytest.mark.parametrize("omni_server", CORE_SERVER_PARAMS, indirect=True)
-def test_duplex_client_live_session(omni_server, model_prefix: str) -> None:
+def test_duplex_client_live_session(omni_server) -> None:
     summary = asyncio.run(
         asyncio.wait_for(
             _run_live_session(
                 url=realtime_url(omni_server),
                 model=omni_server.model,
-                ref_audio=resolve_ref_audio(model_prefix),
+                ref_audio=resolve_ref_audio(),
                 input_wav=validated_input_wav(),
             ),
             timeout=_SESSION_TIMEOUT_S,
