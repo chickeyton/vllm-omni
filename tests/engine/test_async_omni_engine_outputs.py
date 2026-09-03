@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Tests for AsyncOmniEngine.try_get_output and try_get_output_async.
 
 Focuses on the critical behavior: when the orchestrator thread dies,

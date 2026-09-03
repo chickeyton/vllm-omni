@@ -35,7 +35,7 @@ Messages in both directions are JSON text frames. Audio carried inside an
 event is base64-encoded raw PCM16.
 
 | Direction | Event | Purpose |
-|-----------|-------|---------|
+| ----------- | ------- | --------- |
 | Server to client | `session.created` | Confirms that the WebSocket connection is ready |
 | Client to server | `session.update` | Selects and validates the served model |
 | Client to server | `input_audio_buffer.commit` with `final: false` | Starts generation over the incoming stream |

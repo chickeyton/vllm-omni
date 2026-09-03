@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Live E2E coverage for the public duplex client (``vllm_omni.clients.duplex``).
 
 Drives a real MiniCPM-o 4.5 duplex session end to end through

@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 # Server side for barge_in_client.py: start MiniCPM-o 4.5 in native
 # full-duplex mode.
 #

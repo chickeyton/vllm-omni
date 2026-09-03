@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Unit tests for the public duplex client (fake transport, no server)."""
 
 from __future__ import annotations
@@ -887,9 +887,9 @@ def test_reference_audio_data_url(tmp_path):
 def test_event_collector_response_text_joins_deltas_per_response():
     collector = EventCollector()
     collector.add({"type": "response.created", "response_id": "r1"})
-    collector.add({"type": "response.audio_transcript.delta", "response_id": "r1", "delta": "hel"})
+    collector.add({"type": "response.audio_transcript.delta", "response_id": "r1", "delta": "he"})
     collector.add({"type": "response.output_text.delta", "response_id": "r2", "delta": "other"})
-    collector.add({"type": "response.text.delta", "response_id": "r1", "delta": "lo"})
+    collector.add({"type": "response.text.delta", "response_id": "r1", "delta": "llo"})
     assert collector.response_text("r1") == "hello"
     assert collector.response_text("r2") == "other"
     assert collector.response_text("r3") == ""

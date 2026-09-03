@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """PersonaPlex pipeline: Talker (AR decode -> Mimi codebooks) -> Code2Wav (codebooks -> 24 kHz PCM).
 
 PersonaPlex is a Moshi finetune (full-duplex speech-to-speech). For offline/batch

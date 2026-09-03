@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """PersonaPlex frame/token contract (the model *policy*, no engine state).
 
 This mirrors the ``minicpmo45`` model-package layout from PR #3907: the token

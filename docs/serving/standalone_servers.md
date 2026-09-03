@@ -38,7 +38,7 @@ python -m vllm_omni.experimental.fullduplex.joyvl.serving.server \
 ```
 
 | Method and route | Purpose |
-|------------------|---------|
+| ------------------ | --------- |
 | `GET /health` | Readiness check |
 | `GET /v1/models` | Reports the configured interaction model |
 | `POST /v1/chat/completions` | Processes one frame or interaction tick |

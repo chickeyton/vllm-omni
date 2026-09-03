@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """NemotronVoiceChat pipeline: thinker (speech -> frame-locked text) -> talker
 (text timeline -> 31-quantizer RVQ code stacks) -> code2wav (codes -> 22.05 kHz PCM).
 

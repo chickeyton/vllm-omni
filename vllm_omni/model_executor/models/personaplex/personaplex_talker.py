@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """PersonaPlex talker: the temporal transformer as a vLLM-native omni AR stage.
 
 This is the stage-0 (``LLM_AR``) model the OmniGPUModelRunner drives. It composes

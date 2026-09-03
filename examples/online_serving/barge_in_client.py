@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Full-duplex use case: talk over the assistant (barge-in).
 
 Scenario (see ``barge_in_client_flow.md`` for the diagram)

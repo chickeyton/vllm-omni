@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Stage-1 Code2Wav model for PersonaPlex (Moshi finetune).
 
 This is the ``LLM_GENERATION`` codec stage of the 2-stage PersonaPlex pipeline.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Public asynchronous client for the vLLM-Omni full-duplex Realtime API.
 
 Connects to ``/v1/realtime?duplex=1`` (the normative duplex contract) and

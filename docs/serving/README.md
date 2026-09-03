@@ -43,7 +43,7 @@ Completions for conversational or heterogeneous omni pipelines, rather than as
 the default wrapper for every generation task.
 
 | Task | Endpoint | Request | Response | Details |
-|------|----------|---------|----------|---------|
+| ------ | ---------- | --------- | ---------- | --------- |
 | Conversation or multimodal understanding/generation | `POST /v1/chat/completions` | JSON | OpenAI-style JSON or SSE | [Chat Completions](chat_completions_api.md) |
 | Text-to-speech | `POST /v1/audio/speech` | JSON | Audio bytes or SSE | [Speech](speech_api.md) |
 | Sound, music, or ambient audio generation | `POST /v1/audio/generate` | JSON | Audio bytes | [Audio Generation](audio_generate_api.md) |
@@ -141,7 +141,7 @@ These WebSocket APIs have different event schemas and cannot be used
 interchangeably.
 
 | Workload | Endpoint | Interaction model | Details |
-|----------|----------|-------------------|---------|
+| ---------- | ---------- | ------------------- | --------- |
 | Incremental text input for speech synthesis | `WS /v1/audio/speech/stream` | Send text events and receive audio | [Streaming Text to Speech](speech_api.md#streaming-text-input-websocket) |
 | Live video understanding | `WS /v1/video/chat/stream` | Send video frames and receive text/audio | [Streaming Video Input](video_stream_api.md) |
 | Turn-based realtime audio | `WS /v1/realtime` | Stream one audio input and receive transcript/audio events | [Realtime Audio](realtime_api.md) |
@@ -158,7 +158,7 @@ ordinary realtime handler when duplex is unavailable.
 ## Related Endpoints
 
 | Purpose | Endpoints | Reference |
-|---------|-----------|-----------|
+| --------- | ----------- | ----------- |
 | Discovery and readiness | `GET /health`, `GET /v1/models` | This page |
 | Batched conversations | `POST /v1/chat/completions/batch` | [Batch requests](chat_completions_api.md#batch-requests) |
 | Batched speech | `POST /v1/audio/speech/batch` | [Batch speech generation](speech_api.md#batch-speech-generation) |

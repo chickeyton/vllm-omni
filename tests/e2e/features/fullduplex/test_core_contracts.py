@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Contract tests for the fullduplex core (PR #3907 alignment).
 
 Covers the DuplexFence identity value, the session identity rules (epoch only
