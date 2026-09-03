@@ -224,6 +224,7 @@ class SessionConfig:
     overlap_policy: str | None = None
     playback_commit_policy: str | None = None
     turn_detection: dict[str, object] | None = None
+    idle_timeout_s: float | None = None
     extra_body: dict[str, object] = field(default_factory=dict)
 
     def to_session_payload(self, *, model: str, session_id: str | None = None) -> dict[str, object]:
@@ -257,6 +258,8 @@ class SessionConfig:
             payload["overlap_policy"] = self.overlap_policy
         if self.playback_commit_policy is not None:
             payload["playback_commit_policy"] = self.playback_commit_policy
+        if self.idle_timeout_s is not None:
+            payload["idle_timeout_s"] = self.idle_timeout_s
         extra_body: dict[str, object] = {"auto_response": self.auto_response}
         extra_body.update(self.extra_body)
         payload["extra_body"] = extra_body
