@@ -1702,6 +1702,10 @@ class OmniDuplexSessionHandler(
                     }
                 )
                 return
+            # Reserve the response's current history position before any later
+            # input commit can append a user item.  A 0 ms ACK is intentional:
+            # the response may be active but have no audio delta yet.
+            session.reserve_history_item(item_id)
         elif item_id is not None:
             await send_json(
                 {
@@ -1713,7 +1717,8 @@ class OmniDuplexSessionHandler(
                 }
             )
             return
-        if event.get("truncate") is True:
+        hard_truncate = event.get("truncate") is True
+        if hard_truncate:
             playback = session.acknowledge_playback(
                 int(played_ms),
                 committed_cursor,
@@ -1745,6 +1750,7 @@ class OmniDuplexSessionHandler(
                 item_id,
                 audio_end_ms=committed_cursor,
                 playback=playback,
+                hard=hard_truncate,
             )
         elif session.pending_history_item_ids:
             # A plain playback ack has no OpenAI item id. Commit the only
@@ -1757,6 +1763,7 @@ class OmniDuplexSessionHandler(
                     item_id,
                     audio_end_ms=committed_cursor,
                     playback=playback,
+                    hard=hard_truncate,
                 )
         elif session.active_response_id is not None:
             item_id = f"item_{session.active_response_id}"
@@ -1764,6 +1771,7 @@ class OmniDuplexSessionHandler(
                 item_id,
                 audio_end_ms=committed_cursor,
                 playback=playback,
+                hard=hard_truncate,
             )
         elif session.last_assistant_full_message is not None:
             if item_id is None and session.history_item_ids:
@@ -1779,6 +1787,7 @@ class OmniDuplexSessionHandler(
                     item_id,
                     audio_end_ms=committed_cursor,
                     playback=playback,
+                    hard=hard_truncate,
                 )
         await send_json(
             {
@@ -1795,6 +1804,7 @@ class OmniDuplexSessionHandler(
         )
         if committed_history and committed_cursor >= max(playback.sent_ms, playback.generated_ms):
             session.release_response_playback(response_id)
+            session.release_response_history_snapshot(response_id)
 
     async def _cancel_active_response(
         self,

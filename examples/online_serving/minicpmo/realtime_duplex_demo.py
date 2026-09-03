@@ -158,6 +158,23 @@ def _response_in_progress(events: list[dict[str, object]]) -> bool:
     )
 
 
+async def _commit_input_after_playback_checkpoint(client: DuplexClient, collector: EventCollector) -> float:
+    """Commit input only after preserving already-played assistant history.
+
+    Native duplex can finish several responses while the user is still
+    streaming.  Under the ``ack_only`` playback policy, acknowledging those
+    responses after the final input commit is intentionally rejected: it could
+    append an old assistant message after the newly committed user message.
+    Checkpoint playback first so the server commits each assistant item at its
+    original history position.  A second acknowledgement after the commit can
+    then safely advance response-local playback that drained in the meantime.
+    """
+    await acknowledge_collected_playback(client, collector)
+    commit_sent_at_s = time.monotonic()
+    await client.commit()
+    return commit_sent_at_s
+
+
 def _event_count_after(
     events: list[dict[str, object]],
     event_type: str,
@@ -453,8 +470,7 @@ async def run_demo(args: argparse.Namespace) -> dict[str, object]:
             chunk_period_ms=_chunk_period_ms(collector.events),
         )
         wait_for_post_commit_decision = False
-        commit_sent_at_s = time.monotonic()
-        await client.commit()
+        commit_sent_at_s = await _commit_input_after_playback_checkpoint(client, collector)
         wait_error: str | None = None
         committed_index: int | None = None
         post_commit_decision: str | None = None

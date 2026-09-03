@@ -215,7 +215,6 @@ class _Playback:
         self.segments: list[_AudioSegment] = []
         self.completed: set[str] = set()
         self.completion_acked: set[str] = set()
-        self.superseded: set[str] = set()
         self.warnings: list[str] = []
         self._total_samples: dict[str, int] = {}
         self._response_end_s: dict[str, float] = {}
@@ -230,16 +229,6 @@ class _Playback:
             index, self.cursor = self.cursor, self.cursor + 1
             event = events.events[index]
             response_id = events.response_id(event)
-            if event.get("type") in {"input_audio_buffer.committed", "input.committed"}:
-                # A committed user input advances the server's input commit
-                # sequence, which supersedes every earlier response: the
-                # server refuses playback.ack for them from that point
-                # (playback_ack_too_late). Freeze their remaining tail at
-                # whatever was acked while they were current — the listener
-                # moved on, so the unplayed tail stays uncommitted.
-                self.superseded.update(self._total_samples)
-                self.superseded.update(self.completed)
-                continue
             if event.get("type") == "response.done":
                 if response_id:
                     self.completed.add(response_id)
@@ -279,27 +268,28 @@ class _Playback:
         """Ack playback progress incrementally along the serialized clock.
 
         A real listener reports cumulative played audio while it plays, not
-        once after the fact; a single post-drain ack is guaranteed to arrive
-        after the next user turn was committed in multi-turn sessions, which
-        the server rejects (``playback_ack_too_late``). Superseded responses
-        (see :meth:`ingest`) stop acking entirely.
+        once after the fact. The first ack for a response goes out as soon as
+        its audio starts arriving, whatever the played amount: it checkpoints
+        the response's history position on the server, so a user input
+        committed later updates that slot in place instead of displacing it.
+        Later acks follow ``_ACK_STEP_MS``, with the exact total at drain.
         """
         events = client.events
         self.ingest(events)
         now = time.monotonic() if now is None else now
         for response_id, total_samples in self._total_samples.items():
-            if response_id in self.completion_acked or response_id in self.superseded:
+            if response_id in self.completion_acked:
                 continue
-            acked_ms = self._acked_ms.get(response_id, 0)
+            acked_ms = self._acked_ms.get(response_id)
             if response_id in self.completed and now >= self._response_end_s[response_id]:
                 played_ms = total_samples * 1000 // OUTPUT_SAMPLE_RATE
-                if played_ms > acked_ms:
+                if acked_ms is None or played_ms > acked_ms:
                     await client.send_playback_ack(response_id, played_ms)
                     self._acked_ms[response_id] = played_ms
                 self.completion_acked.add(response_id)
                 continue
             played_ms = self._played_ms(response_id, now)
-            if played_ms - acked_ms < _ACK_STEP_MS:
+            if acked_ms is not None and played_ms - acked_ms < _ACK_STEP_MS:
                 continue
             await client.send_playback_ack(response_id, played_ms)
             self._acked_ms[response_id] = played_ms

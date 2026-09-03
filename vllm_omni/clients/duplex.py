@@ -1334,6 +1334,11 @@ class EventCollector:
     def errors(self) -> list[dict[str, object]]:
         return [event for event in self.events if event.get("type") == "error"]
 
+    def response_is_done(self, response_id: str) -> bool:
+        return any(
+            event.get("type") == "response.done" and self.response_id(event) == response_id for event in self.events
+        )
+
     def response_text(self, response_id: str) -> str:
         """Join all text/transcript deltas for one response identity."""
         return "".join(
@@ -1654,11 +1659,16 @@ def summarize_session_request_metrics(
 
 
 async def acknowledge_collected_playback(client: DuplexClient, collector: EventCollector) -> None:
-    """Ack full playback of every collected response's audio (probe shorthand)."""
+    """Ack playback of every collected response's audio (probe shorthand).
+
+    A response that has produced no audio yet is still acked (0 ms) unless it
+    already finished: the ack checkpoints the response's history position on
+    the server, so a user input committed later cannot displace it.
+    """
     output_format = AudioFormat("pcm16", collector.output_sample_rate_hz)
     for response_id in collector.response_ids:
         pcm16 = collector.audio_bytes(response_id)
-        if not pcm16:
+        if not pcm16 and collector.response_is_done(response_id):
             continue
         played_ms = output_format.duration_ms(len(pcm16))
         await client.ack_playback(
