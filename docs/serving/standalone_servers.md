@@ -6,7 +6,7 @@ separate user-facing server process; its routes are not added to the unified
 API server.
 
 | Server | Transport | Role |
-|--------|-----------|------|
+| --- | --- | --- |
 | JoyVL interaction server | HTTP | Adds state, memory, proactive decisions, and delegation in front of a separate OpenAI-compatible model backend |
 
 PersonaPlex no longer ships a standalone compatibility server: it is served

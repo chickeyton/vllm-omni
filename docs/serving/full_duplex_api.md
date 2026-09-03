@@ -14,7 +14,7 @@ capability gates, see the [Realtime Duplex API guide](realtime_duplex_api.md).
 ## Choose an Endpoint
 
 | Endpoint | Protocol | Recommended use |
-|----------|----------|-----------------|
+| --- | --- | --- |
 | `WS /v1/realtime?duplex=1` | OpenAI Realtime-style event projection | Applications and browser clients |
 | `WS /v1/duplex` | Native vLLM-Omni duplex events | Runtime integration and low-level testing |
 
