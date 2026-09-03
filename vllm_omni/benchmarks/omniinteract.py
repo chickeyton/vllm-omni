@@ -22,7 +22,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin, urlsplit
 
 import pybase64 as base64
@@ -33,21 +33,19 @@ from vllm_omni.benchmarks.data_modules.omniinteract_dataset import (
     OmniInteractPreparedInput,
     case_manifest,
 )
-from vllm_omni.clients.duplex import (
-    PCM16_BYTES_PER_SAMPLE,
-    PCM16_SAMPLE_RATE,
-    DuplexClient,
-    EventCollector,
-    SessionConfig,
-    WebSocketTransport,
-    build_realtime_url,
-    chunk_period_ms,
-    has_residual_model_unit,
-    reference_audio_data_url,
-    summarize_session_request_metrics,
-    write_pcm16_wav,
-)
 
+# The duplex client library (vllm_omni.clients) is imported lazily inside the
+# functions that need it: this module reaches the CLI import graph through the
+# benchmark patch package (`vllm-omni serve` included), and the client package
+# must stay out of that graph
+# (tests/engine/test_duplex_import_boundary.py enforces the boundary).
+if TYPE_CHECKING:
+    from vllm_omni.clients.duplex import EventCollector, WebSocketTransport
+
+# The duplex input wire format (16 kHz mono PCM16); mirrors
+# vllm_omni.clients.duplex without importing it at module scope.
+PCM16_SAMPLE_RATE = 16_000
+PCM16_BYTES_PER_SAMPLE = 2
 OUTPUT_SAMPLE_RATE = 24_000
 SUCCESS_ARTIFACTS = (".done", "output.wav", "wav_transcript.json", "events.json", "result.json")
 BATCH_ARTIFACTS = ("batch_summary.json", "official_eval_manifest.jsonl")
@@ -472,6 +470,8 @@ def _ensure_final_commit_tail(pcm: bytes, events: list[dict[str, object]]) -> by
     that correlation; the server pads the missing sample back to a full unit.
     """
 
+    from vllm_omni.clients.duplex import chunk_period_ms, has_residual_model_unit
+
     period_ms = chunk_period_ms(events)
     if len(pcm) >= PCM16_BYTES_PER_SAMPLE and not has_residual_model_unit(pcm, chunk_period_ms=period_ms):
         return pcm[:-PCM16_BYTES_PER_SAMPLE]
@@ -582,6 +582,8 @@ def _atomic_write_json(path: Path, value: object) -> None:
 
 
 def _atomic_write_wav(path: Path, pcm: bytes | bytearray, rate: int) -> None:
+    from vllm_omni.clients.duplex import write_pcm16_wav
+
     _atomic_replace(
         path,
         lambda temporary: write_pcm16_wav(
@@ -830,6 +832,8 @@ def _websocket_url(config: OmniInteractBenchmarkConfig, session_id: str) -> str:
         if urlsplit(config.endpoint).scheme
         else urljoin(config.base_url.rstrip("/") + "/", config.endpoint.lstrip("/"))
     )
+    from vllm_omni.clients.duplex import build_realtime_url
+
     return build_realtime_url(
         endpoint,
         config.model,
@@ -852,6 +856,8 @@ class _RealtimeSession:
     _MAX_FRAME_BYTES = 64 * 1024 * 1024
 
     def __init__(self, config: OmniInteractBenchmarkConfig, session_id: str, reference_audio: str) -> None:
+        from vllm_omni.clients.duplex import DuplexClient, EventCollector, SessionConfig
+
         self.session_config = SessionConfig(
             ref_audio=reference_audio,
             overlap_policy="listen_only",
@@ -973,6 +979,8 @@ def _populate_response_metrics(
             request_metrics.append(metric)
     result.output_tokens = output_tokens
     result.duplex_request_metrics = request_metrics
+    from vllm_omni.clients.duplex import summarize_session_request_metrics
+
     result.duplex_session_metrics = summarize_session_request_metrics(
         request_metrics,
         session_id=result.session_id,
@@ -1006,6 +1014,8 @@ async def run_omniinteract_case(
     started_at = time.monotonic()
     try:
         if prepared_input is None:
+            from vllm_omni.clients.duplex import reference_audio_data_url
+
             reference_audio = reference_audio_data_url(config.ref_audio)
             duration, pcm, frames = await asyncio.to_thread(
                 prepare_media,

@@ -29,7 +29,9 @@ def _assert_isolated_import_succeeds(script: str) -> None:
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        # The CLI probe imports the whole vllm + benchmark graph; on a loaded
+        # shared host that alone can take over a minute.
+        timeout=180,
         check=False,
     )
     assert result.returncode == 0, result.stderr

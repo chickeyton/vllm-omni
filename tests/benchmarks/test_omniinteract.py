@@ -478,7 +478,10 @@ def test_publication_failure_removes_partial_success_bundle(tmp_path: Path, monk
 def test_atomic_write_preserves_destination_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     destination = tmp_path / "output.wav"
     destination.write_bytes(b"old")
-    monkeypatch.setattr(oi, "write_pcm16_wav", lambda *a, **k: (_ for _ in ()).throw(OSError("write")))
+    monkeypatch.setattr(
+        "vllm_omni.clients.duplex.write_pcm16_wav",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("write")),
+    )
     with pytest.raises(OSError):
         oi._atomic_write_wav(destination, b"\0\0", 24_000)
     assert destination.read_bytes() == b"old"
