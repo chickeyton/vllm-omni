@@ -301,7 +301,10 @@ options apply. Use `--omniinteract-require-response` only for functional E2E cas
 Each completed case writes `output.wav`, `wav_transcript.json`, `events.json`, `result.json`, and a final `.done` marker under
 `--omniinteract-output-dir`. The root also contains `batch_summary.json` and `official_eval_manifest.jsonl`; failed cases write
 `.failed.json`. Runs sharing one output root are serialized. Completion validates transport, response lifecycle, and artifacts,
-not answer accuracy. Transcript timestamps are serialized playback-queue times. Clipped or cancelled outputs are ineligible and
+not answer accuracy. Transcript timestamps are serialized playback-queue times. Playback ACKs report cumulative progress
+incrementally along that serialized clock, like a live listener; once a later user input is committed, earlier responses stop
+acking (the server refuses their acks by contract), and a `playback_ack_too_late` rejection that loses that race in flight is
+recorded as an artifact warning rather than failing the case. Clipped or cancelled outputs are ineligible and
 omitted from the official manifest; `audio_clipped_bytes` records output beyond the rounded video horizon.
 
 TTFT, TTFP, and RTF start at client receipt of `response.created`. TPOT/ITL use engine stage-0 timing; ITL is emitted only when

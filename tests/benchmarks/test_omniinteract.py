@@ -333,13 +333,73 @@ async def test_deferred_commit_ignores_the_prior_response_terminal():
 
 
 @pytest.mark.asyncio
-async def test_playback_acks_only_after_serial_audio_drain():
+async def test_playback_acks_incrementally_along_the_serial_clock():
+    # 1 s of audio playing from t=10.0: progress is acked cumulatively while
+    # it plays (at least every _ACK_STEP_MS of new audio), and the completion
+    # ack lands exactly at the total once the serial clock drains it.
+    collector = _collector((_audio(samples=24_000), 10.0), (_done(), 10.01))
+    client, playback = _CompletionClient(collector), oi._Playback()
+    await playback.acknowledge(client, now=10.05)
+    assert client.acks == []  # below the ack step, not yet drained
+    await playback.acknowledge(client, now=10.3)
+    assert client.acks == [("r1", 300)]
+    await playback.acknowledge(client, now=10.35)
+    assert client.acks == [("r1", 300)]  # step not reached, no spam
+    await playback.acknowledge(client, now=10.7)
+    assert client.acks == [("r1", 300), ("r1", 700)]
+    await playback.acknowledge(client, now=11.0)
+    assert client.acks == [("r1", 300), ("r1", 700), ("r1", 1000)]
+    assert playback.completion_acked == {"r1"}
+    await playback.acknowledge(client, now=11.5)
+    assert client.acks[-1] == ("r1", 1000)  # completion acked once
+
+
+@pytest.mark.asyncio
+async def test_playback_completion_ack_lands_at_drain_for_short_audio():
     collector = _collector((_audio(samples=2400), 10.0), (_done(), 10.01))
     client, playback = _CompletionClient(collector), oi._Playback()
     await playback.acknowledge(client, now=10.05)
     assert client.acks == []
     await playback.acknowledge(client, now=10.1)
     assert client.acks == [("r1", 100)]
+
+
+@pytest.mark.asyncio
+async def test_committed_input_freezes_acks_for_superseded_responses():
+    # Once a later user input is committed, the server refuses playback.ack
+    # for earlier responses (playback_ack_too_late); the playback timeline
+    # must stop acking them instead of walking into the rejection.
+    collector = _collector(
+        (_audio(samples=24_000), 10.0),
+        (_done(), 10.01),
+        ({"type": "input_audio_buffer.committed"}, 10.4),
+        (_created("r2"), 10.5),
+        (_audio("r2", samples=2400), 10.6),
+        (_done("r2"), 10.61),
+    )
+    client, playback = _CompletionClient(collector), oi._Playback()
+    await playback.acknowledge(client, now=11.5)
+    assert playback.superseded == {"r1"}
+    assert client.acks == [("r2", 100)]  # r1's tail stays unacked, r2 drains
+
+
+def test_tolerated_playback_ack_rejection_is_a_warning_not_a_failure():
+    collector = _collector(
+        (
+            {
+                "type": "error",
+                "error": {"type": "invalid_request_error", "code": "playback_ack_too_late"},
+            },
+            1.0,
+        ),
+    )
+    warnings: list[str] = []
+    oi._raise_if_session_terminated(collector, 0, warnings=warnings)
+    assert warnings == ["tolerated in-flight server rejection: playback_ack_too_late"]
+
+    collector.add({"type": "error", "error": {"code": "bad_event", "message": "boom"}}, received_at_s=1.1)
+    with pytest.raises(RuntimeError, match="bad_event"):
+        oi._raise_if_session_terminated(collector, 0, warnings=warnings)
 
 
 @pytest.mark.parametrize(

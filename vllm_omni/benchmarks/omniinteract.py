@@ -51,6 +51,9 @@ SUCCESS_ARTIFACTS = (".done", "output.wav", "wav_transcript.json", "events.json"
 BATCH_ARTIFACTS = ("batch_summary.json", "official_eval_manifest.jsonl")
 ARTIFACT_LOCK_FILE = ".omniinteract.lock"
 _INPUT_CHUNK_MS = 200
+# Minimum new played audio between two incremental playback.ack sends for one
+# response; completion acks always flush regardless of the step.
+_ACK_STEP_MS = 200
 VIDEO_FPS = 1.0
 _COMPLETION_SETTLE_S = 2.0
 logger = logging.getLogger(__name__)
@@ -212,9 +215,11 @@ class _Playback:
         self.segments: list[_AudioSegment] = []
         self.completed: set[str] = set()
         self.completion_acked: set[str] = set()
+        self.superseded: set[str] = set()
         self.warnings: list[str] = []
         self._total_samples: dict[str, int] = {}
         self._response_end_s: dict[str, float] = {}
+        self._acked_ms: dict[str, int] = {}
 
     def _warn_once(self, warning: str) -> None:
         if warning not in self.warnings:
@@ -225,6 +230,16 @@ class _Playback:
             index, self.cursor = self.cursor, self.cursor + 1
             event = events.events[index]
             response_id = events.response_id(event)
+            if event.get("type") in {"input_audio_buffer.committed", "input.committed"}:
+                # A committed user input advances the server's input commit
+                # sequence, which supersedes every earlier response: the
+                # server refuses playback.ack for them from that point
+                # (playback_ack_too_late). Freeze their remaining tail at
+                # whatever was acked while they were current — the listener
+                # moved on, so the unplayed tail stays uncommitted.
+                self.superseded.update(self._total_samples)
+                self.superseded.update(self.completed)
+                continue
             if event.get("type") == "response.done":
                 if response_id:
                     self.completed.add(response_id)
@@ -261,16 +276,46 @@ class _Playback:
             self._response_end_s[response_id] = segment.end_s
 
     async def acknowledge(self, client: RealtimeDuplexClient, now: float | None = None) -> None:
+        """Ack playback progress incrementally along the serialized clock.
+
+        A real listener reports cumulative played audio while it plays, not
+        once after the fact; a single post-drain ack is guaranteed to arrive
+        after the next user turn was committed in multi-turn sessions, which
+        the server rejects (``playback_ack_too_late``). Superseded responses
+        (see :meth:`ingest`) stop acking entirely.
+        """
         events = client.events
         self.ingest(events)
         now = time.monotonic() if now is None else now
-        for response_id in self.completed - self.completion_acked:
-            total_samples = self._total_samples.get(response_id, 0)
-            if not total_samples or now < self._response_end_s[response_id]:
+        for response_id, total_samples in self._total_samples.items():
+            if response_id in self.completion_acked or response_id in self.superseded:
                 continue
-            played_ms = total_samples * 1000 // OUTPUT_SAMPLE_RATE
+            acked_ms = self._acked_ms.get(response_id, 0)
+            if response_id in self.completed and now >= self._response_end_s[response_id]:
+                played_ms = total_samples * 1000 // OUTPUT_SAMPLE_RATE
+                if played_ms > acked_ms:
+                    await client.send_playback_ack(response_id, played_ms)
+                    self._acked_ms[response_id] = played_ms
+                self.completion_acked.add(response_id)
+                continue
+            played_ms = self._played_ms(response_id, now)
+            if played_ms - acked_ms < _ACK_STEP_MS:
+                continue
             await client.send_playback_ack(response_id, played_ms)
-            self.completion_acked.add(response_id)
+            self._acked_ms[response_id] = played_ms
+
+    def _played_ms(self, response_id: str, now: float) -> int:
+        """Cumulative audio of one response played by ``now`` on the serial clock."""
+        played_samples = 0
+        for segment in self.segments:
+            if segment.response_id != response_id or now <= segment.start_s:
+                continue
+            samples = len(segment.pcm16) // PCM16_BYTES_PER_SAMPLE
+            if now >= segment.end_s:
+                played_samples += samples
+            else:
+                played_samples += min(samples, int((now - segment.start_s) * OUTPUT_SAMPLE_RATE + 0.5))
+        return played_samples * 1000 // OUTPUT_SAMPLE_RATE
 
 
 async def stream_inputs(
@@ -377,15 +422,34 @@ def _has_post_commit_decision(
     return False
 
 
+# An ack computed just before a commit event was delivered can still lose the
+# race server-side; the response it acks was already superseded, so the
+# refusal is harmless — record it instead of failing the case.
+_TOLERATED_ERROR_CODES = frozenset({"playback_ack_too_late"})
+
+
+def _error_code(event: dict[str, object]) -> str | None:
+    error = event.get("error")
+    code = error.get("code") if isinstance(error, dict) else event.get("code")
+    return code if isinstance(code, str) else None
+
+
 def _raise_if_session_terminated(
     collector: RealtimeEventCollector,
     from_index: int,
     *,
     explicit_close_from: int | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     errors = collector.errors()
-    if errors:
-        raise RuntimeError(str(errors[-1]))
+    fatal = [event for event in errors if _error_code(event) not in _TOLERATED_ERROR_CODES]
+    if fatal:
+        raise RuntimeError(str(fatal[-1]))
+    if warnings is not None:
+        for event in errors:
+            warning = f"tolerated in-flight server rejection: {_error_code(event)}"
+            if warning not in warnings:
+                warnings.append(warning)
     for index, event in enumerate(collector.events[from_index:], start=from_index):
         event_type = event.get("type")
         if event_type not in {"session.expired", "session.closed"}:
@@ -438,7 +502,11 @@ async def wait_for_session_completion(
     stable_since = time.monotonic()
     while time.monotonic() < deadline:
         client.raise_if_reader_stopped()
-        _raise_if_session_terminated(client.events, commit_from if session_from is None else session_from)
+        _raise_if_session_terminated(
+            client.events,
+            commit_from if session_from is None else session_from,
+            warnings=playback.warnings,
+        )
         await playback.acknowledge(client)
         if len(client.events.events) != last_event_count:
             last_event_count = len(client.events.events)
@@ -897,17 +965,19 @@ async def run_omniinteract_case(
                     settle_s=_COMPLETION_SETTLE_S,
                 )
                 await playback.acknowledge(client, playback.end_s)
-                _raise_if_session_terminated(client.events, session_from)
+                _raise_if_session_terminated(client.events, session_from, warnings=playback.warnings)
                 close_from = len(client.events.events)
                 await client.close_session(timeout_s=min(config.timeout_s, 20.0))
             except Exception:
                 with contextlib.suppress(Exception):
                     await client.close_session(timeout_s=min(config.timeout_s, 20.0))
                 raise
-            errors = client.events.errors()
-            if errors:
-                raise RuntimeError(str(errors[-1]))
-            _raise_if_session_terminated(client.events, session_from, explicit_close_from=close_from)
+            _raise_if_session_terminated(
+                client.events,
+                session_from,
+                explicit_close_from=close_from,
+                warnings=playback.warnings,
+            )
             result.latency_s = time.monotonic() - started_at
             result.input_audio_chunks, result.input_video_frames = chunks, frame_count
             result.pacing_mean_lag_s, result.pacing_max_lag_s = mean_lag, max_lag
