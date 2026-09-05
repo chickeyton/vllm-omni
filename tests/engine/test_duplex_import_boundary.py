@@ -103,6 +103,41 @@ if loaded:
 """)
 
 
+def test_client_package_stays_clear_of_the_server_import_graph() -> None:
+    # vllm_omni.clients.duplex advertises a lightweight dependency set
+    # (pybase64 + websockets). Importing it and exercising the code paths
+    # that previously reached into the server tree (timing_summary once
+    # imported vllm_omni.metrics, dragging in prometheus_client) must not
+    # load any vllm_omni module outside the client package.
+    _assert_isolated_import_succeeds("""
+import base64
+import sys
+
+import vllm_omni  # the package __init__ loads its own baseline graph
+
+baseline = set(sys.modules)
+
+from vllm_omni.clients.duplex import EventCollector
+
+collector = EventCollector()
+chunk = base64.b64encode(b"\\x00\\x00" * 2400).decode("ascii")
+collector.add({"type": "response.created", "response_id": "r1"}, received_at_s=1.0)
+collector.add({"type": "response.audio.delta", "response_id": "r1", "delta": chunk}, received_at_s=1.1)
+collector.add({"type": "response.audio.delta", "response_id": "r1", "delta": chunk}, received_at_s=1.2)
+summary = collector.timing_summary("r1")
+if "audio_output" not in summary or "request_metrics" not in summary:
+    raise SystemExit("timing_summary produced no audio_output/request_metrics sections")
+
+added = sorted(
+    name
+    for name in set(sys.modules) - baseline
+    if name.startswith("vllm_omni.") and not name.startswith("vllm_omni.clients")
+)
+if added:
+    raise SystemExit("the client package pulled in server modules: " + ", ".join(added))
+""")
+
+
 def test_stable_engine_does_not_expose_duplex_contract_modules() -> None:
     _assert_isolated_import_succeeds("""
 import importlib.util

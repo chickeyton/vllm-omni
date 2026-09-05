@@ -612,7 +612,16 @@ ConnectFn = Callable[[str], Awaitable["WebSocketTransport"]]
 
 
 class DuplexClient:
-    """Async client for one duplex session over ``/v1/realtime?duplex=1``."""
+    """Async client for one duplex session over ``/v1/realtime?duplex=1``.
+
+    ``session_id`` only names the session this client creates: entering the
+    client always performs the ``session.update`` handshake. Resuming an
+    existing session is supported only as automatic reconnect within the same
+    client instance (see ``ReconnectPolicy``); taking over a session from a
+    new client requires the wire-level ``session.resume`` handshake
+    (``resume_token``, ``incarnation``, ``last_received_server_event_seq``),
+    which this client does not expose.
+    """
 
     def __init__(
         self,
@@ -1471,10 +1480,6 @@ class EventCollector:
             }
             request_started_at_s = input_committed_at_s if input_committed_at_s is not None else response_created_at_s
             if request_started_at_s is not None:
-                # Lazily import so this module stays importable without the
-                # vllm_omni metrics stack (the client is otherwise standalone).
-                from vllm_omni.metrics.definitions import compute_audio_rtf
-
                 audio_duration_ms = (
                     max(cumulative_audio_ms)
                     if cumulative_audio_ms
@@ -1498,15 +1503,12 @@ class EventCollector:
                         else None
                     ),
                     "ttfp_ms": _rounded_ms((audio_received_at_s[0] - request_started_at_s) * 1000.0),
-                    "rtf": round(
-                        compute_audio_rtf(
-                            audio_generation_ms / 1000.0,
-                            audio_duration_ms / 1000.0,
-                        ),
-                        6,
-                    )
-                    if audio_duration_ms > 0
-                    else None,
+                    # Same definition as the server-side metric
+                    # (vllm_omni.metrics.definitions.compute_audio_rtf:
+                    # generation latency divided by audio content duration),
+                    # computed locally so this module keeps its documented
+                    # dependency set of pybase64 and websockets only.
+                    "rtf": round(audio_generation_ms / audio_duration_ms, 6) if audio_duration_ms > 0 else None,
                     "audio_generation_ms": _rounded_ms(audio_generation_ms),
                     "audio_duration_ms": _rounded_ms(audio_duration_ms),
                 }

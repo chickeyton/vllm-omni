@@ -88,11 +88,18 @@ ships a preset:
 Keyword overrides on a preset replace the corresponding `SessionConfig`
 field, e.g. `create_duplex_session_config(ref_audio=..., temperature=0.6)`.
 
-Constructor options: `session_id` (choose the id yourself, e.g. to resume a
-known session), `reconnect` (a `ReconnectPolicy`, default five attempts with
-0.25–4 s jittered backoff; `None` disables auto-resume), `heartbeat_interval_s`
-(default 30 s; `None` disables the lease heartbeat), `handshake_timeout_s`,
-and `connect` (a custom transport factory, used by tests and benchmarks).
+Constructor options: `session_id` (names the session the client creates; it
+does not resume or take over an existing session — entering the client always
+performs the `session.update` handshake), `reconnect` (a `ReconnectPolicy`,
+default five attempts with 0.25–4 s jittered backoff; `None` disables
+auto-resume), `heartbeat_interval_s` (default 30 s; `None` disables the lease
+heartbeat), `handshake_timeout_s`, and `connect` (a custom transport factory,
+used by tests and benchmarks). Resume is supported only as automatic reconnect
+within the same `DuplexClient` instance (see
+[Reconnect and resume](#reconnect-and-resume)); re-attaching from a new client
+or process requires the wire-level `session.resume` handshake
+(`resume_token`, `incarnation`, `last_received_server_event_seq`), which this
+client does not expose.
 
 ### Stream audio and commit a turn
 
