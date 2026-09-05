@@ -229,7 +229,11 @@ summary = collector.timing_summary(after_s=commit_sent_at, input_committed_at_s=
 audio cadence, and, when the deployment attaches engine stage metrics to the
 response events (the benchmark requests them with
 `extra_body.return_stage_metrics=True`), the Stage 0 token metrics
-(`ttft_ms`, `tpot_ms`, `itls_ms`). `audio_bytes(response_id)`, `count(type)`,
+(`ttft_ms`, `tpot_ms`, `itls_ms`). It reports raw measurements only —
+derived metrics such as the audio RTF are computed by the caller from
+`audio_generation_ms` / `audio_duration_ms` (the benchmarks use
+`vllm_omni.metrics.definitions.compute_audio_rtf`), keeping metric
+definitions out of the dependency-free client. `audio_bytes(response_id)`, `count(type)`,
 `errors()`, and `first_received_at(type)` cover the common assertions; the
 `openai-realtime-duplex` benchmark backend (`vllm-omni bench serve`) is built
 on the same helpers.

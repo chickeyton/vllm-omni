@@ -944,6 +944,17 @@ class _RealtimeSession:
                 await asyncio.wait_for(asyncio.shield(self._consume_task), timeout=5.0)
 
 
+def _audio_rtf_from_raw_metric(raw_metric: dict[str, object]) -> float | None:
+    """Derive the audio RTF from a client-reported raw request metric."""
+    from vllm_omni.metrics.definitions import compute_audio_rtf
+
+    generation_ms = raw_metric.get("audio_generation_ms")
+    duration_ms = raw_metric.get("audio_duration_ms")
+    if not isinstance(generation_ms, int | float) or not isinstance(duration_ms, int | float) or duration_ms <= 0:
+        return None
+    return round(compute_audio_rtf(float(generation_ms) / 1000.0, float(duration_ms) / 1000.0), 6)
+
+
 def _populate_response_metrics(
     result: OmniInteractCaseResult,
     collector: EventCollector,
@@ -972,6 +983,10 @@ def _populate_response_metrics(
             "response_id": response_id,
             **(raw_metric if isinstance(raw_metric, dict) else {}),
         }
+        if isinstance(raw_metric, dict):
+            # The client reports raw data only; the RTF is derived here with
+            # the canonical server-side metric definition.
+            metric["rtf"] = _audio_rtf_from_raw_metric(raw_metric)
         if isinstance(stage0, dict):
             metric["stage0_tokens"] = dict(stage0)
             output_tokens += int(stage0.get("output_token_count") or 0)

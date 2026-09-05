@@ -70,6 +70,7 @@ from vllm_omni.benchmarks.omniinteract import (
     VIDEO_FPS,
     OmniInteractBenchmarkConfig,
     OmniInteractCaseResult,
+    _audio_rtf_from_raw_metric,
     clear_batch_artifacts,
     clear_case_artifacts,
     prepare_media,
@@ -1882,6 +1883,9 @@ async def async_request_openai_realtime_duplex(
                         "utterance_id": utterance_id or None,
                         "response_id": response_id,
                         **request_metrics,
+                        # The client reports raw data only; the RTF is derived
+                        # here with the canonical server-side definition.
+                        "rtf": _audio_rtf_from_raw_metric(request_metrics),
                     }
                 )
                 response_audio = client.events.audio_bytes(response_id)

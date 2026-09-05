@@ -1489,13 +1489,17 @@ class EventCollector:
                     0.0,
                     (audio_received_at_s[-1] - request_started_at_s) * 1000.0,
                 )
+                # Raw measurements only: derived metrics such as the RTF
+                # (audio_generation_ms / audio_duration_ms) are computed by
+                # the caller — e.g. with vllm_omni.metrics.definitions.
+                # compute_audio_rtf — so metric definitions stay out of this
+                # dependency-free client module.
                 result["request_metrics"] = {
                     "source": "client_monotonic_receive",
                     "measurement_origin": measurement_origin
                     or {
                         "ttft": "input_audio_buffer.commit client send to first non-empty text delta",
                         "ttfp": "input_audio_buffer.commit client send to first audio packet",
-                        "rtf": "commit-to-last-audio receive time divided by emitted audio duration",
                     },
                     "ttft_ms": (
                         _rounded_ms((first_text_received_at_s - request_started_at_s) * 1000.0)
@@ -1503,12 +1507,6 @@ class EventCollector:
                         else None
                     ),
                     "ttfp_ms": _rounded_ms((audio_received_at_s[0] - request_started_at_s) * 1000.0),
-                    # Same definition as the server-side metric
-                    # (vllm_omni.metrics.definitions.compute_audio_rtf:
-                    # generation latency divided by audio content duration),
-                    # computed locally so this module keeps its documented
-                    # dependency set of pybase64 and websockets only.
-                    "rtf": round(audio_generation_ms / audio_duration_ms, 6) if audio_duration_ms > 0 else None,
                     "audio_generation_ms": _rounded_ms(audio_generation_ms),
                     "audio_duration_ms": _rounded_ms(audio_duration_ms),
                 }
@@ -1644,7 +1642,14 @@ def summarize_session_request_metrics(
     *,
     session_id: str | None,
 ) -> dict[str, object]:
-    """Average client-observed metrics across turns that emitted audio."""
+    """Average client-observed metrics across turns that emitted audio.
+
+    ``request_metrics`` entries are caller-assembled dicts; keys that are
+    absent or non-numeric in an entry are simply skipped. ``rtf`` is not
+    produced by :meth:`EventCollector.timing_summary` (which reports raw data
+    only) — callers that want ``mean_rtf`` add an ``rtf`` value per turn,
+    e.g. via ``vllm_omni.metrics.definitions.compute_audio_rtf``.
+    """
 
     def mean(metric: str, *, digits: int = 3) -> float | None:
         values = [

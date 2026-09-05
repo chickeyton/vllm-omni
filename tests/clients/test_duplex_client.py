@@ -729,16 +729,16 @@ def test_event_collector_reports_engine_token_and_audio_intervals():
         },
         "max_chunk_gap_ms": 110.0,
     }
+    # Raw data only: derived metrics such as the RTF are the caller's job
+    # (e.g. vllm_omni.metrics.definitions.compute_audio_rtf).
     assert timing["request_metrics"] == {
         "source": "client_monotonic_receive",
         "measurement_origin": {
             "ttft": "input_audio_buffer.commit client send to first non-empty text delta",
             "ttfp": "input_audio_buffer.commit client send to first audio packet",
-            "rtf": "commit-to-last-audio receive time divided by emitted audio duration",
         },
         "ttft_ms": 250.0,
         "ttfp_ms": 300.0,
-        "rtf": pytest.approx(1.916667),
         "audio_generation_ms": 460.0,
         "audio_duration_ms": 240.0,
     }
