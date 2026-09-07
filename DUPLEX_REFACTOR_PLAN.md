@@ -9,6 +9,9 @@ allocated by the server and the `incarnation` counter is dropped (§3.9, §7 D16
 Revision 5 (implemented): the simplification pass of §7 D17: one session object
 without a separate resources holder, no input-mode mechanism, typed objects
 across the engine queue, and typed construction of stateless events.
+Revision 6 (design only, not yet implemented): session-level replica binding
+(§3.10, §7 D18): each stage's replica is chosen at most once per session, and
+a bound replica's failure fails the session.
 
 This document records (1) what the current duplex code does and where its
 problems are, (2) the target architecture, (3) the public API design of
@@ -856,6 +859,75 @@ engine + serving layers); the gain is conceptual.
 
 ---
 
+### 3.10 Replica binding: one choice per stage per session (§7 D18)
+
+Today replica placement for duplex requests is done entirely by the shared
+`StagePool` code of `OrchestratorBase`, at the request level: each pool
+picks a replica by load balancing when a request id first reaches that
+stage and keeps affinity for that request id only. For a session this
+means the Stage 0 replica is chosen at the first audio append, each later
+stage's replica is chosen when the first output reaches it, the choices are
+uncorrelated, and they end with the epoch: a barge-in or cancel creates a
+new request id and every stage picks again. `DuplexSessionManager` admits
+against one global `max_sessions` and never sees a replica; the
+`supports_multi_session_same_replica` capability is not read anywhere.
+
+Rules:
+
+1. **At most one replica choice per stage per session.** The first
+   submission of a session to a stage binds the session to the chosen
+   replica for that stage; every later submission to that stage, in any
+   epoch, goes to the same replica. Epoch changes never trigger a new pick.
+   Stages the session never reaches get no binding.
+2. **Resume does not rebind.** A websocket reattaching to a live session
+   finds the bindings untouched; only a new session chooses again.
+3. **A bound replica's failure fails the session.** The session closes with
+   `session.closed(reason="replica_failed")`; there is no migration and no
+   retry on another replica. A session with an in-flight request learns of
+   the failure through the existing `_cleanup_request_ids(release_owners=True)`
+   path; an idle session learns on its next submission, when the pool reports
+   the bound replica down. (Optionally the reaper can poll bound replicas so
+   idle sessions fail promptly.)
+4. **Binding at open, not at first use.** Binding the stateful stages when
+   the session is admitted lets `DuplexSessionManager.open` count sessions
+   per replica and refuse admission when a plugin declares
+   `supports_multi_session_same_replica = False` (Nemotron) and every
+   replica of that stage is taken. Stateless stages may still be bound
+   lazily at first use under rule 1.
+
+Design:
+
+- `DuplexCapabilities.session_bound_stages: tuple[int, ...]` — stages whose
+  replicas hold per-session state (MiniCPM-o / PersonaPlex / Nemotron:
+  `(0,)`; a cascade such as AURA: the stage that carries the session's
+  multimodal cache).
+- `DuplexEngineSession.replica_bindings: dict[int, int]` (stage id ->
+  replica id), set at open for `session_bound_stages`, filled lazily for
+  other stages, released with `release_all_requests`.
+- `DuplexStagePort.bind_session_replica(session_id, stage_id, *,
+  exclusive: bool) -> int`, implemented by `DuplexOrchestrator` on top of the
+  pool's selection, choosing by current session count per replica; raises
+  `DuplexSessionError(code="resource_exhausted")` when `exclusive` and no
+  free replica exists.
+- `DuplexStageSubmission.replica_id: int | None` — the runner passes the
+  session's binding on every submission; `DuplexOrchestrator.submit` and the
+  base forwarding path pass it to the pool as a fixed pick, so the pool's
+  own per-request stickiness is bypassed for session-owned requests.
+- Failure: `_cleanup_request_ids(release_owners=True)` already closes the
+  owning sessions; add a replica-down check in `DuplexOrchestrator.submit`
+  that raises so the runner closes the session with `replica_failed`.
+
+Ownership is unchanged: the manager admits and records, the orchestrator
+owns replicas, the runner only carries the binding on submissions.
+
+Effect on today's models: with one Stage 0 replica nothing changes. With
+several Stage 0 replicas a MiniCPM-o or PersonaPlex session no longer moves
+after a barge-in, and Nemotron's one-session-per-replica constraint becomes
+enforced at admission instead of relying on the operator sizing
+`max_sessions` against the replica count.
+
+---
+
 ## 4. Removals
 
 | Item | Where | Replacement |
@@ -1034,6 +1106,7 @@ suites, offline MiniCPM-o tests, `test_duplex_lease.py`,
 | D14 | Collaborators are constructed explicitly: `DuplexOmni._create_engine()` returns `DuplexOmniEngine`, `DuplexOmniEngine._create_orchestrator()` returns `DuplexOrchestrator` with duplex-specific constructor arguments. No `engine_cls` / `orchestrator_cls` attributes. |
 | D15 | `DuplexControlClient` is deleted; `DuplexOmniEngine` builds messages directly; `DuplexControlRequestError` becomes `DuplexSessionError`. |
 | D16 | Session ids are always allocated by the server (`DuplexOmni.open_session`); clients cannot pick one. Because ids are never reused, the `incarnation` counter is dropped from the fence, events, messages, wire protocol and model-side session keys (§3.9). Revision 4; not yet implemented in code. |
+| D18 | Replica binding is a session-level decision (revision 6, design only): a replica is chosen at most once per stage per session, at open for the stages the plugin declares stateful and at first use otherwise; the binding survives epoch changes and resume; a bound replica's failure fails the session with `replica_failed`, no migration. Admission counts sessions per replica and enforces `supports_multi_session_same_replica` (§3.10). |
 | D17 | Simplification pass (revision 5, implemented): (1) `DuplexEngineSession` absorbs the former `DuplexSessionResources` (lease, accepted fence, stage request resources, append sequencing); the duplicate config / capability copies and the second request tracker are gone. (2) The input-mode mechanism (`DuplexInputMode`, `input_modes`, `implementation_level`) is removed: every duplex model is model-native and appends audio chunks. (3) `DuplexSessionConfig` and `DuplexCapabilities` cross the in-process engine queue as objects; control errors are plain fields on the result. (4) Stateless events are constructed typed at the emit site; the projector keeps only the stateful and domain-terminal projections. Constraint recorded: queue messages now carry dataclasses, so a future out-of-process orchestrator would need an encoding step. |
 
 ---
