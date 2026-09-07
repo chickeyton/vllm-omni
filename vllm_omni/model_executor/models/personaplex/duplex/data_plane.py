@@ -11,6 +11,7 @@ import numpy as np
 from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_belongs_to_session,
 )
+from vllm_omni.engine.duplex.plugin import DuplexDataPlane
 
 EncodeAudio = Callable[[object, int, str, float | None], str | None]
 
@@ -34,7 +35,7 @@ class _RequestCursor:
     terminal: bool = False
 
 
-class PersonaPlexDataPlaneSession:
+class PersonaPlexDataPlaneSession(DuplexDataPlane):
     """Project cumulative staged PersonaPlex output into Realtime deltas."""
 
     def __init__(self, encode_audio: EncodeAudio) -> None:

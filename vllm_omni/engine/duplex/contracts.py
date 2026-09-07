@@ -1,24 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-"""Model-neutral contracts for the experimental duplex engine plugin.
+"""Model-neutral value types shared by the duplex engine components.
 
-This module contains only immutable data transfer objects and narrow protocols.
-Duplex control algorithms, session implementations, model policy, and Realtime
-serving remain in sibling experimental modules.
+Immutable DTOs plus the ``DuplexStagePort`` base class that ``DuplexOrchestrator``
+implements for the session manager/runner.
 """
 
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterable, Mapping
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any
 
-from vllm_omni.engine.duplex.messages import DuplexFence
-from vllm_omni.engine.messages import EngineQueueMessage
+
+@dataclass(frozen=True, slots=True)
+class DuplexFence:
+    """Engine-internal session identity used for stage request ids and stale filtering."""
+
+    session_id: str
+    epoch: int = 0
+    turn_id: int = 0
+    response_seq: int = 0
+    incarnation: int = 0
 
 
 class SessionMode(str, Enum):
@@ -58,43 +66,6 @@ class DuplexOutputDecision:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
-
-
-class DuplexRuntimeExtension(Protocol):
-    """Pure model policy invoked by the experimental duplex control plane."""
-
-    def configure_sampling_params(
-        self,
-        *,
-        runtime_config: dict[str, Any],
-        defaults: tuple[object, ...],
-    ) -> tuple[object, ...]: ...
-
-    def plan_append(
-        self,
-        *,
-        request_id: str,
-        fence: DuplexFence,
-        session_config: dict[str, Any],
-        runtime_config: dict[str, Any],
-        seq: int,
-        turn_seq: int,
-        mode: DuplexInputMode,
-        payload: object,
-        final: bool,
-        sampling_params: object,
-    ) -> DuplexAppendPlan: ...
-
-    def decide_output(
-        self,
-        *,
-        stage_id: int,
-        final_stage_id: int,
-        segment_finished: bool,
-        segment_token_ids: tuple[int, ...],
-        segment_output_metadata: dict[str, Any],
-        output: object,
-    ) -> DuplexOutputDecision | None: ...
 
 
 @dataclass(frozen=True)
@@ -159,53 +130,30 @@ class DuplexOutputContext:
         )
 
 
-class DuplexStagePort(Protocol):
+class DuplexStagePort(ABC):
+    """Narrow stage-management surface the session runner/manager use (implemented by DuplexOrchestrator)."""
+
     @property
+    @abstractmethod
     def stage_count(self) -> int: ...
 
+    @abstractmethod
     def sampling_defaults(self) -> tuple[object, ...]: ...
 
+    @abstractmethod
     def ensure_request(self, context: DuplexStageRequestContext) -> None: ...
 
+    @abstractmethod
     async def submit(self, submission: DuplexStageSubmission) -> DuplexStageSubmissionResult: ...
 
+    @abstractmethod
     async def cleanup(self, request_ids: list[str], *, abort: bool = False) -> None: ...
 
+    @abstractmethod
+    async def abort_requests(self, request_ids: list[str]) -> None: ...
 
-class DuplexControlPlanePort(Protocol):
-    @property
-    def sessions(self) -> object: ...
-
-    def accepts(self, message: object) -> bool: ...
-
-    def dispatch(self, message: object) -> None: ...
-
-    async def shutdown(self) -> None: ...
-
-    def close_sessions_for_request_ids(self, request_ids: list[str]) -> dict[str, list[str]]: ...
-
-    def finalize_closed_sessions(self, session_ids: Iterable[str]) -> None: ...
-
-    def session_for_identity(self, identity: DuplexRequestIdentity | None) -> object | None: ...
-
-    def decide_output(
-        self,
-        stage_id: int,
-        output: object,
-        context: DuplexOutputContext | None,
-    ) -> DuplexOutputDecision | None: ...
-
-
-class CorrelatedRpcTransport(Protocol):
-    def execute(
-        self,
-        key: tuple[str, str],
-        message: EngineQueueMessage,
-        *,
-        timeout: float | None,
-        timeout_message: str,
-        block_on_submit: bool = False,
-    ) -> EngineQueueMessage: ...
+    @abstractmethod
+    def stage_metric_snapshot(self, stage_id: int, output: object) -> dict[str, object] | None: ...
 
 
 def duplex_data_plane_request_info(result: dict[str, object]) -> tuple[str | None, int | None]:
@@ -255,16 +203,14 @@ def duplex_resource_request_belongs_to_session(request_id: str, session_id: str)
 
 
 __all__ = [
-    "CorrelatedRpcTransport",
+    "DuplexFence",
     "DuplexAppendPlan",
-    "DuplexControlPlanePort",
     "DuplexInputMode",
     "DuplexOutputAction",
     "DuplexOutputContext",
     "DuplexOutputDecision",
     "DuplexRequestIdentity",
     "DuplexRuntimeCapabilities",
-    "DuplexRuntimeExtension",
     "DuplexStagePort",
     "DuplexStageRequestContext",
     "DuplexStageSubmission",

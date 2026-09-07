@@ -14,7 +14,10 @@ Scenario (see ``barge_in_client_flow.md`` for the diagram)
 
 The demo is model-neutral: it drives any duplex model through the public
 :class:`vllm_omni.clients.duplex.DuplexClient` over
-``/v1/realtime?duplex=1``. Model-specific session shape comes from the
+``/v1/realtime?duplex=1``, or — with ``--inline`` — through
+:class:`vllm_omni.clients.inline_duplex.InlineDuplexClient` on an in-process
+:class:`vllm_omni.entrypoints.duplex_omni.DuplexOmni` (no server needed; the
+model loads in this process). Model-specific session shape comes from the
 per-model presets under ``vllm_omni.clients.<model>`` selected with
 ``--preset`` (default ``minicpmo_4_5``, whose model decides listen/speak on
 its own — no VAD).
@@ -30,6 +33,15 @@ then:
         --question-wav question_16k.wav \
         --interrupt-wav follow_up_16k.wav \
         --output-dir ./duplex_out
+
+or, without a server, in-process (``--deploy-config`` is optional and defaults
+to the model's bundled duplex profile):
+
+    python barge_in_client.py --inline \
+        --model /path/to/MiniCPM-o-4_5 \
+        --ref-audio /path/to/reference_voice.wav \
+        --question-wav question_16k.wav \
+        --interrupt-wav follow_up_16k.wav
 
 Input WAVs must be mono 16 kHz PCM16; when a preset's session takes a
 different capture format (the PersonaPlex preset streams 24 kHz float32),
@@ -55,6 +67,7 @@ if str(REPO_ROOT) not in sys.path:
 from vllm_omni.clients.duplex import (  # noqa: E402
     AudioFormat,
     DuplexClient,
+    DuplexClientBase,
     EventCollector,
     SessionConfig,
     acknowledge_collected_playback,
@@ -139,6 +152,35 @@ def _fold_responses(collector: EventCollector) -> dict[str, dict[str, object]]:
     return out
 
 
+def _make_client(args: argparse.Namespace, config: SessionConfig) -> DuplexClientBase:
+    """Websocket client by default; ``--inline`` drives an in-process DuplexOmni."""
+    if not args.inline:
+        return DuplexClient(
+            args.url,
+            model=args.model,
+            config=config,
+            reconnect=None,
+            heartbeat_interval_s=None,
+            handshake_timeout_s=args.timeout_s,
+        )
+    # Imported lazily: the in-process path loads the model (and its engine
+    # dependencies) in this process, which the websocket path never needs.
+    from vllm_omni.entrypoints.duplex_omni import DuplexOmni
+
+    from vllm_omni.clients.inline_duplex import InlineDuplexClient
+
+    omni_kwargs: dict[str, object] = {"model": args.model}
+    if args.deploy_config:
+        omni_kwargs["deploy_config"] = args.deploy_config
+    omni = DuplexOmni(**omni_kwargs)
+    return InlineDuplexClient(
+        omni,
+        model=args.model,
+        config=config,
+        handshake_timeout_s=args.timeout_s,
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
     config = _session_config(args.preset, ref_audio_path=args.ref_audio)
     question = _convert_to_session_format(read_pcm16_wav(Path(args.question_wav)), config.input_audio)
@@ -148,14 +190,7 @@ async def run(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     collector = EventCollector()
-    client = DuplexClient(
-        args.url,
-        model=args.model,
-        config=config,
-        reconnect=None,
-        heartbeat_interval_s=None,
-        handshake_timeout_s=args.timeout_s,
-    )
+    client = _make_client(args, config)
     # GREET: open the voice session (handshake happens on enter).
     async with client:
         consume_task = asyncio.create_task(collector.consume(client))
@@ -246,7 +281,21 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", default="ws://127.0.0.1:8099/v1/realtime")
-    parser.add_argument("--model", default="openbmb/MiniCPM-o-4_5")
+    parser.add_argument(
+        "--model",
+        default="openbmb/MiniCPM-o-4_5",
+        help="served model name, or the model path with --inline",
+    )
+    parser.add_argument(
+        "--inline",
+        action="store_true",
+        help="run the model in this process through DuplexOmni + InlineDuplexClient instead of connecting to --url",
+    )
+    parser.add_argument(
+        "--deploy-config",
+        default=None,
+        help="deploy YAML for --inline (default: the model's bundled profile)",
+    )
     parser.add_argument(
         "--preset",
         choices=["minicpmo_4_5", "personaplex", "none"],

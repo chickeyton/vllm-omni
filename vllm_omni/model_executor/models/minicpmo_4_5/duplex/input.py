@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from vllm_omni.engine.duplex.plugin import PcmAppendBuffer, PcmAppendReservation
+
 
 @dataclass(frozen=True, slots=True)
 class _PcmSpan:
@@ -18,7 +20,7 @@ class _PcmSpan:
     is_speech: bool
 
 
-class MiniCPMO45PcmAppendReservation:
+class MiniCPMO45PcmAppendReservation(PcmAppendReservation):
     __slots__ = (
         "_active",
         "_force_listen",
@@ -106,7 +108,7 @@ def decode_native_ref_audio_from_config(session_config: dict[str, Any]) -> np.nd
     return np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=True)
 
 
-class MiniCPMO45PcmAppendBuffer:
+class MiniCPMO45PcmAppendBuffer(PcmAppendBuffer):
     """Accumulates short native-duplex PCM chunks into model-sized appends."""
 
     def __init__(self) -> None:

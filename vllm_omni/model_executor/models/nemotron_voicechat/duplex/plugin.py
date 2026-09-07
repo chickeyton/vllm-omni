@@ -1,19 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-"""Realtime serving adapter for Nemotron VoiceChat native duplex."""
+"""Nemotron VoiceChat full-duplex model plugin: engine policy and session policy in one class."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from vllm_omni.entrypoints.duplex.protocol import DuplexCapabilities
-from vllm_omni.entrypoints.duplex.runtime_adapter import ServingRuntimeConfigError
+from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
+from vllm_omni.engine.duplex.contracts import (
+    DuplexAppendPlan,
+    DuplexFence,
+    DuplexInputMode,
+    DuplexOutputAction,
+    DuplexOutputDecision,
+)
+from vllm_omni.engine.duplex.plugin import (
+    DuplexModelPlugin,
+    DuplexRuntimeConfigError,
+    EncodeAudio,
+)
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.session import (
     MiniCPMO45ServingSessionState,
 )
@@ -23,9 +36,8 @@ from vllm_omni.model_executor.models.nemotron_voicechat.duplex.data_plane import
 )
 from vllm_omni.model_executor.models.nemotron_voicechat.duplex.input import (
     NemotronVoiceChatPcmAppendBuffer,
+    decode_pcm_f32le,
 )
-
-EncodeAudio = Callable[[object, int, str, float | None], str | None]
 
 _DEFAULT_SYSTEM_PROMPT = (
     "You are an AI voice assistant developed by NVIDIA. "
@@ -54,34 +66,59 @@ _PRIVATE_KEYS = frozenset(
 )
 
 
+# ---- engine-policy helpers (frame-locked Stage0 timeline) ----
+
+
+def _plain_token_ids(value: object, *, name: str) -> list[int]:
+    if not isinstance(value, list | tuple) or not value:
+        raise ValueError(f"Nemotron VoiceChat runtime requires non-empty {name}")
+    try:
+        return [int(token_id) for token_id in value]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Nemotron VoiceChat {name} must contain token ids") from exc
+
+
+def _positive_int(value: object, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Nemotron VoiceChat requires a positive {name}") from exc
+    if parsed <= 0:
+        raise ValueError(f"Nemotron VoiceChat requires a positive {name}")
+    return parsed
+
+
+# ---- session-policy helpers (prompt / tools / tokenizer) ----
+
+
 def _stt_config(model_config: Any) -> dict[str, Any]:
     hf_config = getattr(model_config, "hf_config", None)
     stt_cfg = getattr(hf_config, "stt_cfg", None)
     if not isinstance(stt_cfg, dict):
-        raise ServingRuntimeConfigError("Nemotron VoiceChat checkpoint STT configuration is unavailable")
+        raise DuplexRuntimeConfigError("Nemotron VoiceChat checkpoint STT configuration is unavailable")
     return stt_cfg
 
 
-def _normalized_tools(config: object) -> tuple[list[dict[str, object]], str]:
-    extra_body = getattr(config, "extra_body", None)
+def _normalized_tools(config: DuplexSessionConfig) -> tuple[list[dict[str, object]], str]:
+    extra_body = config.extra_body
     raw_tools = extra_body.get("realtime_tools") if isinstance(extra_body, dict) else None
     if raw_tools is None:
         return [], "[]"
     if not isinstance(raw_tools, list):
-        raise ServingRuntimeConfigError("Nemotron VoiceChat tools must be a list")
+        raise DuplexRuntimeConfigError("Nemotron VoiceChat tools must be a list")
     if len(raw_tools) > 5:
-        raise ServingRuntimeConfigError("Nemotron VoiceChat supports at most 5 tools per session")
+        raise DuplexRuntimeConfigError("Nemotron VoiceChat supports at most 5 tools per session")
 
     normalized: list[dict[str, object]] = []
     for index, tool in enumerate(raw_tools):
         if not isinstance(tool, dict):
-            raise ServingRuntimeConfigError(f"Nemotron VoiceChat tool {index} must be an object")
+            raise DuplexRuntimeConfigError(f"Nemotron VoiceChat tool {index} must be an object")
         function = tool.get("function", tool)
         if not isinstance(function, dict):
-            raise ServingRuntimeConfigError(f"Nemotron VoiceChat tool {index} has no function definition")
+            raise DuplexRuntimeConfigError(f"Nemotron VoiceChat tool {index} has no function definition")
         definition = {key: value for key, value in function.items() if key != "type"}
         if not isinstance(definition.get("name"), str) or not str(definition["name"]).strip():
-            raise ServingRuntimeConfigError(f"Nemotron VoiceChat tool {index} requires a name")
+            raise DuplexRuntimeConfigError(f"Nemotron VoiceChat tool {index} requires a name")
         normalized.append(definition)
     signature = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return normalized, signature
@@ -115,13 +152,13 @@ def _render_tool_response(output: str) -> str:
     return f"<TOOL_RESPONSE>{payload}</TOOL_RESPONSE>"
 
 
-def _require_native_full_duplex(config: object) -> None:
-    extra_body = getattr(config, "extra_body", None)
+def _require_full_duplex(config: DuplexSessionConfig) -> None:
+    extra_body = config.extra_body
     enabled = isinstance(extra_body, dict) and (
         extra_body.get("auto_response") is True or extra_body.get("full_duplex") is True
     )
     if not enabled:
-        raise ServingRuntimeConfigError(
+        raise DuplexRuntimeConfigError(
             "Nemotron VoiceChat currently supports model-native full-duplex streaming only; "
             "set extra_body.auto_response=true",
             code="unsupported_nemotron_duplex_mode",
@@ -140,7 +177,7 @@ def _tokenize_runtime(model_config: Any, instructions: str) -> tuple[dict[str, o
     def token(name: str, default: str) -> int:
         value = tokenizer.convert_tokens_to_ids(stt_cfg.get(name, default))
         if value is None:
-            raise ServingRuntimeConfigError(f"Nemotron VoiceChat tokenizer does not define {name}")
+            raise DuplexRuntimeConfigError(f"Nemotron VoiceChat tokenizer does not define {name}")
         return int(value)
 
     bos_id = token("bos_token", "<s>")
@@ -161,40 +198,154 @@ def _tokenize_runtime(model_config: Any, instructions: str) -> tuple[dict[str, o
     return runtime, tokenizer
 
 
-class NemotronVoiceChatServingRuntimeAdapter:
-    adapter_id = "nemotron_voicechat"
+class NemotronVoiceChatDuplexPlugin(DuplexModelPlugin):
+    """Frame-locked (80 ms) full-duplex policy for Nemotron VoiceChat."""
+
+    plugin_id = "nemotron_voicechat"
     silence_continuation_samples = 1280
     # The session-owned persistent drain is the sole data-plane output
     # consumer. Collecting on append would race that drain and can consume a
-    # Stage2 audio output before the realtime projector observes it.
+    # Stage2 audio output before the projector observes it.
     collect_outputs_on_append = False
     clean_response_done_prefix = ""
     interrupted_tts_prefix = ""
     private_runtime_config_keys = _PRIVATE_KEYS
 
     def __init__(self, encode_audio: EncodeAudio) -> None:
-        self.session_states: dict[str, MiniCPMO45ServingSessionState] = {}
+        super().__init__(encode_audio)
         self.data_plane = NemotronVoiceChatDataPlaneSession(encode_audio)
         self._tokenizer: Any | None = None
+
+    # ---- engine policy: append one 80 ms acoustic frame to one resumable thinker request ----
+
+    def configure_sampling_params(
+        self,
+        *,
+        runtime_config: dict[str, Any],
+        defaults: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        del runtime_config
+        if not defaults:
+            return defaults
+        # Every scheduler segment is one transport wake of a long-lived
+        # request.  CUMULATIVE output makes the multimodal output processor
+        # concatenate all earlier Stage-2 waveforms and resend them on every
+        # wake (80, 160, 240, ... ms), causing O(n^2) audio replay.  Duplex
+        # consumers require per-wake deltas at every stage.
+        configured = [params.clone() if isinstance(params, SamplingParams) else params for params in defaults]
+        for params in configured:
+            if isinstance(params, SamplingParams):
+                params.output_kind = RequestOutputKind.DELTA
+        stage0 = defaults[0]
+        if isinstance(stage0, SamplingParams):
+            stage0 = stage0.clone()
+            stage0.temperature = 0.0
+            stage0.top_p = 1.0
+            stage0.top_k = 0
+            stage0.max_tokens = 1
+            stage0.ignore_eos = True
+            stage0.output_kind = RequestOutputKind.DELTA
+            configured[0] = stage0
+        return tuple(configured)
+
+    def plan_append(
+        self,
+        *,
+        request_id: str,
+        fence: DuplexFence,
+        session_config: dict[str, Any],
+        runtime_config: dict[str, Any],
+        seq: int,
+        turn_seq: int,
+        mode: DuplexInputMode,
+        payload: object,
+        final: bool,
+        sampling_params: object,
+    ) -> DuplexAppendPlan:
+        del sampling_params, turn_seq
+        if mode is not DuplexInputMode.APPEND_AUDIO_CHUNK:
+            raise ValueError(f"Nemotron VoiceChat does not support duplex input mode {mode.value!r}")
+        decode_pcm_f32le(payload, exact_frame=True)
+        normalized_payload = dict(payload)
+        prompt_ids = _plain_token_ids(
+            runtime_config.get("nvc_prompt_token_ids"),
+            name="nvc_prompt_token_ids",
+        )
+        max_model_len = _positive_int(
+            runtime_config.get("nvc_max_model_len"),
+            name="nvc_max_model_len",
+        )
+        required_model_len = len(prompt_ids) + seq + 1
+        if required_model_len > max_model_len:
+            raise ValueError(
+                "Nemotron VoiceChat duplex session exceeds the Stage-0 "
+                f"max_model_len: prompt_tokens={len(prompt_ids)} + input_frames={seq} + "
+                f"sampled_token=1 gives {required_model_len} > {max_model_len}; "
+                "start a new session or raise Stage 0 max_model_len"
+            )
+        try:
+            pad_id = int(runtime_config["nvc_text_pad_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Nemotron VoiceChat runtime requires nvc_text_pad_id") from exc
+        scheduler_prompt = prompt_ids + [pad_id] if seq <= 1 else [pad_id]
+        return DuplexAppendPlan(
+            prompt={
+                "prompt_token_ids": scheduler_prompt,
+                "model_intermediate_buffer": {
+                    "request_id": request_id,
+                    "global_request_id": [fence.session_id],
+                    "duplex": {
+                        "data_plane": True,
+                        "fence": fence,
+                        "session_id": fence.session_id,
+                        "incarnation": fence.incarnation,
+                        "epoch": fence.epoch,
+                        "source_input_seq": seq,
+                        "seq": seq,
+                        "mode": mode.value,
+                        "payload": normalized_payload,
+                        "final": final,
+                        "session_config": dict(session_config),
+                        "runtime_config": dict(runtime_config),
+                        "scheduler_token_budget": len(scheduler_prompt),
+                    },
+                },
+            }
+        )
+
+    def decide_output(
+        self,
+        *,
+        stage_id: int,
+        final_stage_id: int,
+        segment_finished: bool,
+        segment_token_ids: tuple[int, ...],
+        segment_output_metadata: dict[str, Any],
+        output: object,
+    ) -> DuplexOutputDecision | None:
+        del final_stage_id, segment_finished, output
+        if stage_id != 0:
+            return None
+        metadata = dict(segment_output_metadata)
+        metadata["nvc_text_token_ids"] = list(segment_token_ids)
+        # Stage 0 is a client-visible side channel even though Stage 2 is the
+        # configured audio response stage. Mark it explicitly so the shared
+        # collector does not discard it while waiting for the final stage.
+        metadata["duplex_direct_response"] = True
+        return DuplexOutputDecision(
+            action=DuplexOutputAction.DIRECT_RESPONSE,
+            metadata=metadata,
+            final_output_type="text",
+        )
+
+    # ---- session policy ----
 
     def create_session_state(self) -> MiniCPMO45ServingSessionState:
         return MiniCPMO45ServingSessionState(
             audio_buffer=NemotronVoiceChatPcmAppendBuffer(),
         )
 
-    def session_state(self, session_id: str) -> MiniCPMO45ServingSessionState:
-        return self.session_states.setdefault(session_id, self.create_session_state())
-
-    def remove_session_state(self, session_id: str) -> None:
-        self.session_states.pop(session_id, None)
-
-    @staticmethod
-    def is_enabled(config: object) -> bool:
-        del config
-        return True
-
-    @staticmethod
-    def capabilities(*, max_sessions: int) -> DuplexCapabilities:
+    def capabilities(self, *, max_sessions: int) -> DuplexCapabilities:
         supports_multi_session = max_sessions > 1
         return DuplexCapabilities(
             supports_model_native_turn_policy=True,
@@ -233,31 +384,25 @@ class NemotronVoiceChatServingRuntimeAdapter:
             target_barge_in_latency_ms=None,
         )
 
-    @staticmethod
-    def validate_client_extra_body(extra_body: object) -> None:
+    def validate_client_extra_body(self, extra_body: object) -> None:
         if not isinstance(extra_body, dict):
             return
         private = sorted(_PRIVATE_KEYS.intersection(extra_body))
         if private:
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "Nemotron VoiceChat runtime configuration is server-owned: " + ", ".join(private)
             )
 
-    async def prepare_runtime_config(
-        self,
-        config: object,
-        *,
-        model_config: Any,
-    ) -> dict[str, object]:
-        self.validate_client_extra_body(getattr(config, "extra_body", None))
-        _require_native_full_duplex(config)
-        instructions = str(getattr(config, "instructions", None) or _DEFAULT_SYSTEM_PROMPT)
+    async def prepare_runtime_config(self, config: DuplexSessionConfig, *, model_config: Any) -> dict[str, object]:
+        self.validate_client_extra_body(config.extra_body)
+        _require_full_duplex(config)
+        instructions = str(config.instructions or _DEFAULT_SYSTEM_PROMPT)
         tools, tools_signature = _normalized_tools(config)
         rendered_prompt = _render_tool_prompt(instructions, tools)
         runtime, tokenizer = await asyncio.to_thread(_tokenize_runtime, model_config, rendered_prompt)
         max_model_len = getattr(model_config, "max_model_len", None)
         if not isinstance(max_model_len, int) or max_model_len <= 0:
-            raise ServingRuntimeConfigError("Nemotron VoiceChat requires a positive Stage-0 max_model_len")
+            raise DuplexRuntimeConfigError("Nemotron VoiceChat requires a positive Stage-0 max_model_len")
         runtime["nvc_max_model_len"] = max_model_len
         # Keep raw session values for immutable-in-incarnation update checks;
         # only the rendered prompt token ids enter Stage-0 KV.
@@ -269,24 +414,26 @@ class NemotronVoiceChatServingRuntimeAdapter:
 
     def runtime_config_for_function_output(
         self,
-        item: Mapping[str, object],
+        config: DuplexSessionConfig,
         current: Mapping[str, object],
-    ) -> dict[str, object]:
+        item: Mapping[str, object],
+    ) -> dict[str, object] | None:
         """Queue a client tool result for frame-locked function-channel injection."""
+        del config
         call_id = item.get("call_id")
         output = item.get("output")
         if not isinstance(call_id, str) or not call_id:
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "function_call_output requires call_id",
                 code="invalid_function_call_output",
             )
         if not isinstance(output, str):
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "function_call_output requires a string output",
                 code="invalid_function_call_output",
             )
         if self._tokenizer is None:
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "Nemotron VoiceChat tokenizer is unavailable for function output",
                 code="invalid_function_call_output",
             )
@@ -297,7 +444,7 @@ class NemotronVoiceChatServingRuntimeAdapter:
             )
         )
         if not response_token_ids:
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "function_call_output tokenized to an empty response",
                 code="invalid_function_call_output",
             )
@@ -314,31 +461,29 @@ class NemotronVoiceChatServingRuntimeAdapter:
         runtime["nvc_function_response_batches"] = batches
         return runtime
 
-    @staticmethod
     def runtime_config_for_update(
-        config: object,
+        self,
+        config: DuplexSessionConfig,
         current: Mapping[str, object],
     ) -> dict[str, object]:
-        NemotronVoiceChatServingRuntimeAdapter.validate_client_extra_body(getattr(config, "extra_body", None))
-        _require_native_full_duplex(config)
+        self.validate_client_extra_body(config.extra_body)
+        _require_full_duplex(config)
         runtime = deepcopy(dict(current))
-        instructions = str(getattr(config, "instructions", None) or _DEFAULT_SYSTEM_PROMPT)
+        instructions = str(config.instructions or _DEFAULT_SYSTEM_PROMPT)
         _, tools_signature = _normalized_tools(config)
         # The system/tool prompt is already resident in Stage-0 KV. Updating it
         # without a new incarnation would make the advertised config disagree
         # with model state, so reject such updates explicitly.
         if runtime and instructions != runtime.get("instructions"):
-            raise ServingRuntimeConfigError(
+            raise DuplexRuntimeConfigError(
                 "Nemotron VoiceChat instructions cannot change inside an active duplex incarnation"
             )
         if runtime and tools_signature != runtime.get("nvc_tools_signature", "[]"):
-            raise ServingRuntimeConfigError(
-                "Nemotron VoiceChat tools cannot change inside an active duplex incarnation"
-            )
+            raise DuplexRuntimeConfigError("Nemotron VoiceChat tools cannot change inside an active duplex incarnation")
         return runtime
 
-    @staticmethod
     def data_plane_context(
+        self,
         *,
         epoch: int,
         turn_id: int,
@@ -360,4 +505,4 @@ class NemotronVoiceChatServingRuntimeAdapter:
         )
 
 
-__all__ = ["NemotronVoiceChatServingRuntimeAdapter"]
+__all__ = ["NemotronVoiceChatDuplexPlugin"]

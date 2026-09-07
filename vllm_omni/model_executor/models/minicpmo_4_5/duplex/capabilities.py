@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from vllm_omni.entrypoints.duplex.protocol import DuplexCapabilities
+from vllm_omni.engine.duplex.config import DuplexCapabilities
 
 
 def minicpmo45_native_capabilities(*, max_sessions: int = 1) -> DuplexCapabilities:

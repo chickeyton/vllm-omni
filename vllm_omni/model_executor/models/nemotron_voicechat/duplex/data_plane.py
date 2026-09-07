@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_belongs_to_session,
 )
+from vllm_omni.engine.duplex.plugin import DuplexDataPlane
 from vllm_omni.outputs.duplex import (
     get_duplex_output_decision,
 )
@@ -137,7 +138,7 @@ def _speech_end_event(request_id: str) -> dict[str, object]:
     }
 
 
-class NemotronVoiceChatDataPlaneSession:
+class NemotronVoiceChatDataPlaneSession(DuplexDataPlane):
     """Join frame-locked text/function outputs with Stage-2 audio."""
 
     def __init__(self, encode_audio: EncodeAudio) -> None:

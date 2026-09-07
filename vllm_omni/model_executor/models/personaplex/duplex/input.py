@@ -8,12 +8,14 @@ import binascii
 
 import numpy as np
 
+from vllm_omni.engine.duplex.plugin import PcmAppendBuffer, PcmAppendReservation
+
 _SAMPLE_RATE_HZ = 24000
 _FRAME_SAMPLES = 1920
 _BYTES_PER_SAMPLE = 4
 
 
-class PersonaPlexPcmAppendReservation:
+class PersonaPlexPcmAppendReservation(PcmAppendReservation):
     __slots__ = (
         "_active",
         "_owner",
@@ -51,7 +53,7 @@ class PersonaPlexPcmAppendReservation:
         self._owner._rollback_reservation(self)
 
 
-class PersonaPlexPcmAppendBuffer:
+class PersonaPlexPcmAppendBuffer(PcmAppendBuffer):
     """Transactionally frame 24 kHz float PCM into PersonaPlex 80 ms units."""
 
     def __init__(self) -> None:

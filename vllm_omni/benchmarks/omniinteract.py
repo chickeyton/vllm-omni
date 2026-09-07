@@ -838,7 +838,6 @@ def _websocket_url(config: OmniInteractBenchmarkConfig, session_id: str) -> str:
         endpoint,
         config.model,
         autostart=False,
-        native_duplex=True,
         session_id=session_id,
     )
 
@@ -864,7 +863,6 @@ class _RealtimeSession:
             playback_commit_policy="ack_only",
             idle_timeout_s=float(config.timeout_s),
             extra_body={
-                "native_duplex": True,
                 "force_listen_count": 0,
                 **(config.extra_body or {}),
             },

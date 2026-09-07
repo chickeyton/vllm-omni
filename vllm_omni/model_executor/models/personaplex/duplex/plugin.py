@@ -1,20 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+"""PersonaPlex full-duplex model plugin: engine policy and session policy in one class."""
+
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any
 
-from vllm_omni.entrypoints.duplex.protocol import (
-    DuplexCapabilities,
+from vllm.sampling_params import SamplingParams
+
+from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
+from vllm_omni.engine.duplex.contracts import (
+    DuplexAppendPlan,
+    DuplexFence,
+    DuplexInputMode,
+    DuplexOutputDecision,
 )
-from vllm_omni.entrypoints.duplex.runtime_adapter import (
-    ServingRuntimeConfigError,
+from vllm_omni.engine.duplex.plugin import (
+    DuplexModelPlugin,
+    DuplexModelSessionState,
+    DuplexRuntimeConfigError,
+    EncodeAudio,
     reject_changed_runtime_value,
 )
 from vllm_omni.model_executor.models.personaplex.duplex.config import DEFAULT_PERSONA
@@ -26,26 +39,42 @@ from vllm_omni.model_executor.models.personaplex.duplex.input import (
     PersonaPlexPcmAppendBuffer,
 )
 
-EncodeAudio = Callable[[object, int, str, float | None], str | None]
-
 _PRIVATE_RUNTIME_CONFIG_KEYS = frozenset(
     {
         "personaplex_prefill_slots",
         "personaplex_model_path",
-        # PersonaPlex is always model-native; the per-session opt-in knob
-        # (canonical name and its deprecated alias) is server-owned here.
-        "native_duplex",
-        "minicpmo45_native_duplex",
     }
 )
+_FRAME_BYTES = 1920 * 4
+
+
+def _validated_frame_payload(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ValueError("PersonaPlex duplex append payload must be a mapping")
+    if payload.get("format") != "pcm_f32le":
+        raise ValueError("PersonaPlex duplex append format must be pcm_f32le")
+    if payload.get("sample_rate_hz") != 24000:
+        raise ValueError("PersonaPlex duplex append sample_rate_hz must be 24000")
+    audio = payload.get("audio")
+    if not isinstance(audio, str):
+        raise ValueError("PersonaPlex duplex append audio must be base64 pcm_f32le")
+    try:
+        raw = base64.b64decode(audio, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("PersonaPlex duplex append audio is not valid base64") from exc
+    if len(raw) != _FRAME_BYTES:
+        raise ValueError("PersonaPlex duplex append must contain exactly 1920 samples")
+    return dict(payload)
 
 
 @dataclass(slots=True)
-class PersonaPlexServingSessionState:
+class PersonaPlexServingSessionState(DuplexModelSessionState):
+    """Model-owned state of one PersonaPlex duplex session (owned by the session runner)."""
+
     audio_buffer: PersonaPlexPcmAppendBuffer = field(default_factory=PersonaPlexPcmAppendBuffer)
     input_since_commit: bool = False
     speech_since_commit: bool = False
-    native_context_locked: bool = False
+    context_locked: bool = False
     committed_audio_payload: dict[str, object] | None = None
     committed_audio_operation_id: str | None = None
     committed_audio_reserved_bytes: int = 0
@@ -86,32 +115,112 @@ class PersonaPlexServingSessionState:
         self.pending_silence_owner_id = None
 
 
-class PersonaPlexServingRuntimeAdapter:
-    adapter_id = "personaplex"
+class PersonaPlexDuplexPlugin(DuplexModelPlugin):
+    """PersonaPlex is pure lockstep: every session is model-native duplex."""
+
+    plugin_id = "personaplex"
     clean_response_done_prefix = ""
     interrupted_tts_prefix = ""
     private_runtime_config_keys = _PRIVATE_RUNTIME_CONFIG_KEYS
+    collect_outputs_on_append = False
+    silence_continuation_samples = 16000
 
     def __init__(self, encode_audio: EncodeAudio) -> None:
-        self.session_states: dict[str, PersonaPlexServingSessionState] = {}
+        super().__init__(encode_audio)
         self.data_plane = PersonaPlexDataPlaneSession(encode_audio)
+
+    # ---- engine policy (the resumable Stage0 request) ----
+
+    def configure_sampling_params(
+        self,
+        *,
+        runtime_config: dict[str, Any],
+        defaults: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        del runtime_config
+        if not defaults:
+            return defaults
+        configured = list(defaults)
+        stage0 = defaults[0]
+        if isinstance(stage0, SamplingParams):
+            stage0 = stage0.clone()
+            stage0.temperature = 0.0
+            stage0.top_k = 1
+            stage0.max_tokens = 1
+            configured[0] = stage0
+        return tuple(configured)
+
+    def plan_append(
+        self,
+        *,
+        request_id: str,
+        fence: DuplexFence,
+        session_config: dict[str, Any],
+        runtime_config: dict[str, Any],
+        seq: int,
+        turn_seq: int,
+        mode: DuplexInputMode,
+        payload: object,
+        final: bool,
+        sampling_params: object,
+    ) -> DuplexAppendPlan:
+        del sampling_params
+        if mode is not DuplexInputMode.APPEND_AUDIO_CHUNK:
+            raise ValueError(f"PersonaPlex does not support duplex input mode {mode.value!r}")
+        normalized_payload = _validated_frame_payload(payload)
+        prefill_slots = runtime_config.get("personaplex_prefill_slots", 0)
+        try:
+            prefill_slots = max(0, int(prefill_slots))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("personaplex_prefill_slots must be a non-negative integer") from exc
+        prompt_slots = 1 + (prefill_slots if seq <= 1 else 0)
+        return DuplexAppendPlan(
+            prompt={
+                "prompt_token_ids": [0] * prompt_slots,
+                "model_intermediate_buffer": {
+                    "request_id": request_id,
+                    "global_request_id": [fence.session_id],
+                    "duplex": {
+                        "data_plane": True,
+                        "fence": fence,
+                        "session_id": fence.session_id,
+                        "incarnation": fence.incarnation,
+                        "epoch": fence.epoch,
+                        "turn_id": fence.turn_id,
+                        "response_seq": fence.response_seq,
+                        "seq": seq,
+                        "turn_seq": turn_seq,
+                        "mode": mode.value,
+                        "payload": normalized_payload,
+                        "final": final,
+                        "session_config": dict(session_config),
+                        "runtime_config": dict(runtime_config),
+                        "scheduler_token_budget": prompt_slots,
+                    },
+                },
+            }
+        )
+
+    def decide_output(
+        self,
+        *,
+        stage_id: int,
+        final_stage_id: int,
+        segment_finished: bool,
+        segment_token_ids: tuple[int, ...],
+        segment_output_metadata: dict[str, Any],
+        output: object,
+    ) -> DuplexOutputDecision | None:
+        del stage_id, final_stage_id, segment_finished
+        del segment_token_ids, segment_output_metadata, output
+        return None
+
+    # ---- session policy ----
 
     def create_session_state(self) -> PersonaPlexServingSessionState:
         return PersonaPlexServingSessionState()
 
-    def session_state(self, session_id: str) -> PersonaPlexServingSessionState:
-        return self.session_states.setdefault(session_id, self.create_session_state())
-
-    def remove_session_state(self, session_id: str) -> None:
-        self.session_states.pop(session_id, None)
-
-    @staticmethod
-    def is_enabled(config: object) -> bool:
-        del config
-        return True
-
-    @staticmethod
-    def capabilities(*, max_sessions: int) -> DuplexCapabilities:
+    def capabilities(self, *, max_sessions: int) -> DuplexCapabilities:
         supports_multi_session = max_sessions > 1
         return DuplexCapabilities(
             supports_model_native_turn_policy=True,
@@ -147,28 +256,20 @@ class PersonaPlexServingRuntimeAdapter:
             target_barge_in_latency_ms=None,
         )
 
-    @staticmethod
-    def validate_client_extra_body(extra_body: object) -> None:
+    def validate_client_extra_body(self, extra_body: object) -> None:
         if not isinstance(extra_body, dict):
             return
         private = sorted(_PRIVATE_RUNTIME_CONFIG_KEYS.intersection(extra_body))
         if private:
-            raise ServingRuntimeConfigError("PersonaPlex runtime configuration is server-owned: " + ", ".join(private))
+            raise DuplexRuntimeConfigError("PersonaPlex runtime configuration is server-owned: " + ", ".join(private))
 
-    @classmethod
-    async def prepare_runtime_config(
-        cls,
-        config: object,
-        *,
-        model_config: Any,
-    ) -> dict[str, object]:
-        extra_body = getattr(config, "extra_body", None)
-        cls.validate_client_extra_body(extra_body)
+    async def prepare_runtime_config(self, config: DuplexSessionConfig, *, model_config: Any) -> dict[str, object]:
+        self.validate_client_extra_body(config.extra_body)
         model_path = getattr(model_config, "model", None)
         if not isinstance(model_path, str) or not model_path:
-            raise ServingRuntimeConfigError("PersonaPlex model path is unavailable")
-        voice = cls._voice_name(getattr(config, "voice", None))
-        instructions = getattr(config, "instructions", None) or DEFAULT_PERSONA
+            raise DuplexRuntimeConfigError("PersonaPlex model path is unavailable")
+        voice = self._voice_name(config.voice)
+        instructions = config.instructions or DEFAULT_PERSONA
         from vllm_omni.model_executor.models.personaplex.duplex.stage0 import (
             personaplex_prefill_slots,
         )
@@ -181,7 +282,7 @@ class PersonaPlexServingRuntimeAdapter:
                 str(instructions),
             )
         except Exception as exc:
-            raise ServingRuntimeConfigError(f"PersonaPlex voice/persona prefill could not be prepared: {exc}") from exc
+            raise DuplexRuntimeConfigError(f"PersonaPlex voice/persona prefill could not be prepared: {exc}") from exc
         return {
             "personaplex_model_path": model_path,
             "personaplex_voice_prompt": voice,
@@ -189,21 +290,20 @@ class PersonaPlexServingRuntimeAdapter:
             "personaplex_prefill_slots": prefill_slots,
         }
 
-    @classmethod
     def runtime_config_for_update(
-        cls,
-        config: object,
+        self,
+        config: DuplexSessionConfig,
         current: Mapping[str, object],
     ) -> dict[str, object]:
-        cls.validate_client_extra_body(getattr(config, "extra_body", None))
-        new_persona = str(getattr(config, "instructions", None) or DEFAULT_PERSONA)
+        self.validate_client_extra_body(config.extra_body)
+        new_persona = str(config.instructions or DEFAULT_PERSONA)
         reject_changed_runtime_value(
             new_persona,
             current.get("personaplex_persona"),
             message="PersonaPlex persona (instructions) cannot be changed after the session is created",
             code="persona_update_unsupported",
         )
-        new_voice = cls._voice_name(getattr(config, "voice", None))
+        new_voice = self._voice_name(config.voice)
         reject_changed_runtime_value(
             new_voice,
             current.get("personaplex_voice_prompt"),
@@ -215,8 +315,8 @@ class PersonaPlexServingRuntimeAdapter:
         runtime_config["personaplex_persona"] = new_persona
         return runtime_config
 
-    @staticmethod
     def data_plane_context(
+        self,
         *,
         epoch: int,
         turn_id: int,
@@ -243,11 +343,8 @@ class PersonaPlexServingRuntimeAdapter:
         voice = value if isinstance(value, str) and value else "NATF2.pt"
         path = PurePath(voice)
         if path.name != voice or path.suffix != ".pt" or any(part == ".." for part in path.parts):
-            raise ServingRuntimeConfigError("PersonaPlex voice must be a bundled .pt basename")
+            raise DuplexRuntimeConfigError("PersonaPlex voice must be a bundled .pt basename")
         return voice
 
 
-__all__ = [
-    "PersonaPlexServingRuntimeAdapter",
-    "PersonaPlexServingSessionState",
-]
+__all__ = ["PersonaPlexDuplexPlugin", "PersonaPlexServingSessionState"]

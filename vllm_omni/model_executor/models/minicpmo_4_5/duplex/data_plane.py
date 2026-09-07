@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_belongs_to_session,
 )
+from vllm_omni.engine.duplex.plugin import DuplexDataPlane
 from vllm_omni.outputs.duplex import get_duplex_output_decision
 
 logger = init_logger(__name__)
@@ -53,7 +54,7 @@ class _RequestState:
         return self.turns.setdefault(turn_id, _TurnState())
 
 
-class MiniCPMO45DataPlaneSession:
+class MiniCPMO45DataPlaneSession(DuplexDataPlane):
     """MiniCPM output projector and request/turn cursor owner.
 
     The scheduler request owns cumulative Stage1 audio, while model turns own
