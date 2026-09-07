@@ -104,10 +104,15 @@ is why "End session = new server session".
   dict; commit/discard become runner-side ledger updates keyed by
   `(epoch, turn_id)`, exactly what the existing `ConversationHistory` and
   `PlaybackLedger` in `engine/duplex/session.py` already do for MiniCPM-o.
-- **Baseline:** the session is already described three times, in two
-  processes; AURA's registry would be a fourth copy, and the fence protocol
-  (`next_fence`, `expected_epoch`, `operation_id` idempotency) would have to
-  be extended to carry history commits across the RPC boundary.
+- **Baseline:** the session is already described three times across two
+  event loops in one process (the API loop and the orchestrator thread,
+  joined by the RPC boundary); AURA's registry would be a fourth copy, and
+  the fence protocol (`next_fence`, `expected_epoch`, `operation_id`
+  idempotency) would have to be extended to carry history commits across
+  that boundary. AURA's own history crossing today is a real process
+  boundary: the API server process registers it, the Stage 1 worker process
+  looks it up again by id (`aura_session_history.py` keeps one registry for
+  each side).
 
 ### 3.2 Interrupt, cancel and barge-in come for free, and reach all four stages
 
@@ -424,12 +429,24 @@ plugins, versus editing five serving/engine files on the baseline.
 
 ## 7. Bottom line
 
-For AURA the decisive advantages of the refactored framework are (1) one
-in-process session object that can own AURA's history instead of a
-cross-process global registry, (2) interrupt / cancel / barge-in / resume /
-multi-session behaviour inherited from the runner and reaching all four
-stages, and (3) a single, validated plugin seam where AURA's turn, silent and
-tool rules live in AURA's own file. The baseline offers the same feature
-list on paper, but AURA would become the fourth model to spread its policy
-across two Protocols, two processes and the serving mixins, and would still
-have to solve history and cancellation itself.
+For AURA the decisive advantages of the refactored framework are:
+
+1. **One in-process session object** that can own AURA's history, instead of
+   today's registry that is written in the API server process and read again
+   in the Stage 1 worker process.
+2. **Interrupt, cancel, barge-in, resume and multi-session with less to wire
+   and debug.** The baseline duplex framework implements the same behaviours
+   and also binds forwarded stage requests to the session, so AURA would
+   inherit the same feature list on either tree once it is ported off the
+   streaming-video handler (which has none of them). The difference is where
+   they live: one handler in the runner reaching all four stages, versus the
+   serving mixins, the RPC boundary and the engine control plane with fence
+   re-validation on both sides.
+3. **A single, validated plugin seam** (the one `DuplexModelPlugin` the engine
+   loads and hands to the orchestrator) where AURA's turn, silent and tool
+   rules live in AURA's own file, instead of the baseline's engine extension
+   plus serving adapter pair.
+
+On the baseline AURA would become the fourth model to spread its policy
+across two Protocols, two event loops and the serving mixins, and would
+still have to move its history out of the stage-worker registry itself.
