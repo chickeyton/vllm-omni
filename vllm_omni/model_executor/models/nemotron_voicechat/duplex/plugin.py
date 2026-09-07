@@ -18,7 +18,6 @@ from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConf
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
     DuplexFence,
-    DuplexInputMode,
     DuplexOutputAction,
     DuplexOutputDecision,
 )
@@ -257,14 +256,11 @@ class NemotronVoiceChatDuplexPlugin(DuplexModelPlugin):
         runtime_config: dict[str, Any],
         seq: int,
         turn_seq: int,
-        mode: DuplexInputMode,
         payload: object,
         final: bool,
         sampling_params: object,
     ) -> DuplexAppendPlan:
         del sampling_params, turn_seq
-        if mode is not DuplexInputMode.APPEND_AUDIO_CHUNK:
-            raise ValueError(f"Nemotron VoiceChat does not support duplex input mode {mode.value!r}")
         decode_pcm_f32le(payload, exact_frame=True)
         normalized_payload = dict(payload)
         prompt_ids = _plain_token_ids(
@@ -302,7 +298,7 @@ class NemotronVoiceChatDuplexPlugin(DuplexModelPlugin):
                         "epoch": fence.epoch,
                         "source_input_seq": seq,
                         "seq": seq,
-                        "mode": mode.value,
+                        "mode": "append_audio_chunk",
                         "payload": normalized_payload,
                         "final": final,
                         "session_config": dict(session_config),
@@ -375,9 +371,7 @@ class NemotronVoiceChatDuplexPlugin(DuplexModelPlugin):
             supports_audio_truncate=False,
             requires_model_runner_kv=True,
             requires_native_stage_role=True,
-            implementation_level="model_native_duplex",
             adapter_patterns=["scheduler_data_plane"],
-            input_modes=["append_audio_chunk"],
             signal_sources=["model_native", "client_event"],
             stage_handoff_transport="scheduler_data_plane",
             chunk_period_ms=80,

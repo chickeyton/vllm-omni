@@ -28,11 +28,9 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex.commands import AppendAudio, Commit, DuplexCommand
-from vllm_omni.engine.duplex.config import DuplexSessionConfig, DuplexSessionState
+from vllm_omni.engine.duplex.config import DuplexSessionState
 from vllm_omni.engine.duplex.contracts import (
     DuplexFence,
-    DuplexInputMode,
-    DuplexRuntimeCapabilities,
     DuplexStagePort,
     DuplexStageRequestContext,
     duplex_resource_request_belongs_to_session,
@@ -42,7 +40,6 @@ from vllm_omni.engine.duplex.events import DuplexEvent, ErrorEvent, error_event
 from vllm_omni.engine.duplex.lease import DuplexLeaseActivity, DuplexLeaseConfig, DuplexLeaseState
 from vllm_omni.engine.duplex.messages import (
     CloseDuplexSessionMessage,
-    DuplexControlError,
     DuplexControlResultMessage,
     DuplexSessionCommandMessage,
     DuplexSessionError,
@@ -52,11 +49,7 @@ from vllm_omni.engine.duplex.messages import (
     TouchDuplexSessionMessage,
 )
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, DuplexRuntimeConfigError, validate_duplex_plugin_sampling
-from vllm_omni.engine.duplex.session import (
-    DuplexEngineSession,
-    DuplexFenceMismatchError,
-    DuplexSessionResources,
-)
+from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
 
 if TYPE_CHECKING:
     from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
@@ -324,6 +317,9 @@ class DuplexSessionManager:
         session: DuplexEngineSession | None = None,
         error: BaseException | None = None,
     ) -> None:
+        error_code, error_message, error_retryable = (
+            self._control_error(error) if error is not None else (None, None, False)
+        )
         result = DuplexControlResultMessage(
             control_id=message.control_id,
             operation=operation,
@@ -331,14 +327,17 @@ class DuplexSessionManager:
             ok=ok,
             incarnation=session.incarnation if session is not None else int(getattr(message, "incarnation", 0) or 0),
             lease_generation=session.lease_generation if session is not None else None,
-            capabilities=session.capabilities.as_dict() if session is not None and ok else None,
+            capabilities=session.capabilities if session is not None and ok else None,
             public_session=session.as_public_dict() if session is not None and ok else None,
-            error=self._control_error(error) if error is not None else None,
+            error_code=error_code,
+            error_message=error_message,
+            error_retryable=error_retryable,
         )
         await self._result_sink.put(result)
 
     @staticmethod
-    def _control_error(error: BaseException) -> DuplexControlError:
+    def _control_error(error: BaseException) -> tuple[str, str, bool]:
+        """Map an exception to ``(code, message, retryable)`` for a control result."""
         message = str(error)
         retryable = False
         if isinstance(error, DuplexSessionError):
@@ -360,7 +359,7 @@ class DuplexSessionManager:
             retryable = True
         else:
             code = "failed_precondition"
-        return DuplexControlError(code=code, message=message, retryable=retryable)
+        return code, message, retryable
 
     # ------------------------------------------------------------------ #
     # Sampling / stage request helpers shared with the runner            #
@@ -394,7 +393,7 @@ class DuplexSessionManager:
             return None
         effective_fence = fence or session.fence
         request_id = self.stage_request_id(effective_fence, stage_id=stage_id)
-        session.resources.reserve_stage_request(stage_id, request_id, fence=effective_fence)
+        session.reserve_stage_request(stage_id, request_id, fence=effective_fence)
         context = DuplexStageRequestContext(
             request_id=request_id,
             session_id=session.session_id,
@@ -403,25 +402,12 @@ class DuplexSessionManager:
             final_stage_id=self.stage_port.stage_count - 1,
             config_generation=session.config_generation,
             sampling_params=self.sampling_params_for(session),
-            session_config=session.resources.session_config,
-            runtime_config=session.resources.runtime_config,
+            session_config=session.config.as_dict(),
+            runtime_config=session.runtime_config,
         )
         self.stage_port.ensure_request(context)
         self.register_request(request_id, session.session_id)
         return context
-
-    @staticmethod
-    def _engine_capabilities(capabilities: Any) -> DuplexRuntimeCapabilities:
-        input_modes: set[DuplexInputMode] = set()
-        for value in getattr(capabilities, "input_modes", None) or []:
-            try:
-                input_modes.add(DuplexInputMode(value))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"unknown duplex input mode: {value!r}") from exc
-        return DuplexRuntimeCapabilities(
-            input_modes=input_modes or {DuplexInputMode.TURN_COMMIT_ONLY},
-            implementation_level=str(getattr(capabilities, "implementation_level", None) or "model_native_duplex"),
-        )
 
     # ------------------------------------------------------------------ #
     # Control operations                                                 #
@@ -446,7 +432,7 @@ class DuplexSessionManager:
                     code="resource_exhausted",
                     retryable=True,
                 )
-            config = DuplexSessionConfig.from_event({"session": dict(message.session_config)})
+            config = message.session_config
             self.plugin.validate_client_extra_body(config.extra_body)
             try:
                 runtime_config = await self.plugin.prepare_runtime_config(config, model_config=self.model_config)
@@ -456,21 +442,14 @@ class DuplexSessionManager:
                 raise DuplexRuntimeConfigError(str(exc), code="unsupported_ref_audio_path") from exc
             capabilities = self.plugin.capabilities(max_sessions=max_sessions)
             incarnation = self._next_incarnation_by_session_id.get(session_id, 0)
-            fence = DuplexFence(session_id, incarnation=incarnation)
-            resources = DuplexSessionResources(
-                fence=fence,
-                lease=DuplexLeaseState(config=self._lease_config, generation=0, last_activity=self._clock()),
-                _clock=self._clock,
-                capabilities=self._engine_capabilities(capabilities),
-                session_config=config.as_dict(),
-                runtime_config=dict(runtime_config),
-            )
             session = DuplexEngineSession(
                 session_id=session_id,
                 config=config,
                 capabilities=capabilities,
                 incarnation=incarnation,
-                resources=resources,
+                lease=DuplexLeaseState(config=self._lease_config, generation=0, last_activity=self._clock()),
+                _clock=self._clock,
+                _runtime_config=dict(runtime_config),
             )
             # Validates the plugin's sampling policy for this runtime config before admission.
             self.sampling_params_for(session)
@@ -489,8 +468,8 @@ class DuplexSessionManager:
             runner.start()
             await self._put_result(message, operation="open", ok=True, session=session)
         except Exception as exc:
-            control_error = self._control_error(exc)
-            if control_error.code in {"resource_exhausted", "session_exists"}:
+            error_code, _, _ = self._control_error(exc)
+            if error_code in {"resource_exhausted", "session_exists"}:
                 logger.info("open_duplex_session rejected: %s", exc)
             else:
                 logger.exception("open_duplex_session failed: %s", exc)
@@ -501,13 +480,12 @@ class DuplexSessionManager:
                 except Exception:
                     logger.exception("duplex open rollback: runner shutdown failed for %s", session_id)
             if session is not None:
-                reserved = session.resources.resource_request_ids()
+                reserved = session.release_all_requests()
                 if reserved:
                     try:
                         await self.stage_port.cleanup(list(reserved))
                     except Exception:
                         logger.warning("duplex open rollback: request cleanup pending for %s", session_id)
-                session.resources.close()
                 self._unregister_session_requests(session_id)
             await self._put_result(message, operation="open", ok=False, error=exc)
 
@@ -547,10 +525,9 @@ class DuplexSessionManager:
         succeeded; a failed cleanup is retried by the reaper.
         """
         session = runner.session
-        resources = session.resources
-        submitted = tuple(resources.resource_request_ids(submitted=True))
-        reserved = tuple(resources.resource_request_ids(submitted=False))
-        resources.begin_close(session.fence, reason=reason)
+        submitted = tuple(session.resource_request_ids(submitted=True))
+        reserved = tuple(session.resource_request_ids(submitted=False))
+        session.begin_close(reason=reason)
         pending = _PendingSessionCleanup(
             kind=kind,
             session_id=session.session_id,
@@ -583,7 +560,7 @@ class DuplexSessionManager:
         if pending.reserved_request_ids:
             await self.stage_port.cleanup(list(pending.reserved_request_ids))
         if session is not None:
-            session.resources.finalize_close()
+            session.release_all_requests()
         self._unregister_session_requests(pending.session_id)
         if self._closing.get(pending.session_id) is pending:
             self._closing.pop(pending.session_id, None)
@@ -595,10 +572,7 @@ class DuplexSessionManager:
             runner = self._require_runner(message.session_id, message.incarnation)
             session = runner.session
             try:
-                session.resources.resume(
-                    session.fence,
-                    expected_lease_generation=message.expected_lease_generation,
-                )
+                session.resume_lease(expected_lease_generation=message.expected_lease_generation)
             except ValueError as exc:
                 raise DuplexSessionError(str(exc), code="session_resume_conflict") from exc
             await self._put_result(message, operation="resume", ok=True, session=session)
@@ -613,9 +587,9 @@ class DuplexSessionManager:
             session = runner.session
             activity = DuplexLeaseActivity(message.activity)
             if activity is DuplexLeaseActivity.DETACH:
-                session.resources.detach(session.fence)
+                session.detach_lease()
             else:
-                session.resources.touch(session.fence, activity)
+                session.touch_lease(activity)
             await self._put_result(message, operation="touch", ok=True, session=session)
         except Exception as exc:
             logger.exception("touch_duplex_session failed: %s", exc)
@@ -665,7 +639,7 @@ class DuplexSessionManager:
             completed += 1
         # Expire leases.
         for session_id, runner in list(self.runners.items()):
-            lease = runner.session.resources.lease
+            lease = runner.session.lease
             if lease.disconnect_grace_expired(effective_now):
                 reason = "disconnect_grace_expired"
             elif lease.idle_expired(effective_now):
@@ -696,10 +670,10 @@ class DuplexSessionManager:
         closed: dict[str, list[str]] = {}
         for session_id, runner in list(self.runners.items()):
             session = runner.session
-            stale = session.resources.resource_request_ids()
+            stale = session.resource_request_ids()
             if request_id_set.isdisjoint(stale):
                 continue
-            if not session.resources.begin_close(session.fence, reason="request_cleanup"):
+            if not session.begin_close(reason="request_cleanup"):
                 continue
             closed[session_id] = stale
             key = (session_id, session.incarnation, session.lease_generation)
@@ -745,8 +719,8 @@ class DuplexSessionManager:
             self._request_cleanups_in_progress.discard(key)
         for session_id in session_id_set:
             session = self._session_snapshots.pop(session_id, None)
-            if session is not None and session.resources.lease.terminal_reason is not None:
-                session.resources.finalize_close()
+            if session is not None and session.lease.terminal_reason is not None:
+                session.release_all_requests()
                 session.close()
             self._closing.pop(session_id, None)
             self._unregister_session_requests(session_id)

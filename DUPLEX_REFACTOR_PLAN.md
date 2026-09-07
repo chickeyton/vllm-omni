@@ -1,10 +1,14 @@
 # Duplex Refactor Design Plan
 
 Branch: `duplex_refactor1` (follow-up to vllm-project/vllm-omni#6196).
-Status: design only, no code changed yet. Revision 3: alternatives A
-(engine-resident sessions), B (typed command/event contract) and C (single
-model plugin) applied; `DuplexOmniEngine` kept as a thin, clearly named
-engine sibling (see §7 D10-D13).
+Revision 3: alternatives A (engine-resident sessions), B (typed
+command/event contract) and C (single model plugin) applied; `DuplexOmniEngine`
+kept as a thin, clearly named engine sibling (see §7 D10-D13). Revision 4
+(API design update, not yet implemented in code): session ids are always
+allocated by the server and the `incarnation` counter is dropped (§3.9, §7 D16).
+Revision 5 (implemented): the simplification pass of §7 D17: one session object
+without a separate resources holder, no input-mode mechanism, typed objects
+across the engine queue, and typed construction of stateless events.
 
 This document records (1) what the current duplex code does and where its
 problems are, (2) the target architecture, (3) the public API design of
@@ -224,7 +228,7 @@ Design rules:
    ledgers, lease, stage bindings, model state, projection ids) is one object,
    `DuplexEngineSession`, owned by one `DuplexSessionRunner` on the
    orchestrator loop. Nothing above the engine keeps session state beyond a
-   handle (session id, incarnation, event queue).
+   handle (session id, event queue).
 2. **Typed contract.** Commands into a session are `DuplexCommand` dataclasses;
    outputs are `DuplexEvent` dataclasses. Both carry `from_realtime()` /
    `to_realtime()` so the OpenAI Realtime JSON is derived, never hand-built,
@@ -263,11 +267,11 @@ Design rules:
 - Collapses P7: `DuplexSession` + `DuplexSessionRuntimeState` +
   `ServingRuntimeSessionState` + projector state -> `DuplexEngineSession`.
   The `DuplexFence` becomes an internal identity value (session_id,
-  incarnation, epoch, turn_id) used for stage request ids and stale-output
+  epoch, turn_id) used for stage request ids and stale-output
   filtering. The cross-boundary fence *protocol* disappears (`DuplexFence`
   in messages and results, `next_fence` handshake, `accepted_fence`,
   `operation_id` idempotency cache, `runtime_contract_invalid`) because there
-  is no second copy to reconcile. Epoch/incarnation re-validation after an
+  is no second copy to reconcile. Epoch re-validation after an
   `await` inside the runner stays (§3.8); it is a local check, not a protocol.
 - Data-plane outputs no longer take the request-state preregistration and
   `collect_outputs` hop: `DuplexOrchestrator._intercept_stage_output` hands
@@ -351,7 +355,7 @@ It becomes:
 | --- | --- |
 | `OmniEngineBase` (`engine/omni_engine_base.py`, generic base) | config resolution, `_initialize_stages`, `_bootstrap_orchestrator` calling the abstract `_create_orchestrator(**generic_kwargs)`, queues + `RpcResultRouter` + `CorrelatedRpcClient`, `try_get_output*`, `get_output_blocking_async`, `get_stage_metadata`, `abort*`, `collective_rpc*`, `is_alive`, `shutdown`, `get_diffusion_od_config` |
 | `AsyncOmniEngine(OmniEngineBase)` | `_create_orchestrator(**kw) -> Orchestrator(**kw)`; `add_request*`, `add_streaming_update*`, `_build_add_request_message`, CFG companions, multimodal UUID / replica cache scoping, `submit_interaction*` |
-| `DuplexOmniEngine(OmniEngineBase)` (`engine/duplex_omni_engine.py`, thin) | `__init__` imports and instantiates the plugin from `pipeline_config.duplex_plugin` (validation against stage sampling defaults happens in `DuplexSessionManager.__init__`, which has the stage pools) and reads `deploy_config.duplex_session`; `_create_orchestrator(**kw) -> DuplexOrchestrator(plugin=self.plugin, duplex_session_config=self.duplex_session_config, **kw)`; the session message surface: `open_session_async(config, session_id) -> DuplexControlResult`, `close_session_async(session_id, incarnation, reason)`, `resume_session_async(session_id, incarnation, expected_lease_generation)`, `touch_session_async(...)` (correlated RPC through the base's `CorrelatedRpcClient`, executor-wrapped like today's `*_async` methods) and `submit_command(session_id, incarnation, command)` (one-way `request_queue.put_nowait(DuplexSessionCommandMessage)`); `duplex_session_config` and `duplex_capabilities` read from `deploy_config` / the loaded plugin |
+| `DuplexOmniEngine(OmniEngineBase)` (`engine/duplex_omni_engine.py`, thin) | `__init__` imports and instantiates the plugin from `pipeline_config.duplex_plugin` (validation against stage sampling defaults happens in `DuplexSessionManager.__init__`, which has the stage pools) and reads `deploy_config.duplex_session`; `_create_orchestrator(**kw) -> DuplexOrchestrator(plugin=self.plugin, duplex_session_config=self.duplex_session_config, **kw)`; the session message surface: `open_session_async(session_id, config) -> DuplexControlResult` (the id is allocated by `DuplexOmni`, §3.9), `close_session_async(session_id, reason)`, `resume_session_async(session_id, expected_lease_generation)`, `touch_session_async(session_id, activity)` (correlated RPC through the base's `CorrelatedRpcClient`; the blocking `_open_session` ... `_submit_command` bodies are private, only the `*_async` surface is public) and `submit_command_async(session_id, command)` (one-way `request_queue.put_nowait(DuplexSessionCommandMessage)`). `open_session_async` takes the already normalized `DuplexSessionConfig` object and `DuplexControlResult` carries `capabilities: DuplexCapabilities`, `public_session` (wire dict) and plain `error_code` / `error_message` / `error_retryable` fields: the queue is in-process, so nothing is serialized to dicts and re-parsed (D17). `duplex_session_config` and `duplex_capabilities` read from `deploy_config` / the loaded plugin |
 
 `DuplexOmniEngine` is deliberately small (message construction and queue
 access only); it exists so the engine layer has the same clearly named
@@ -439,8 +443,10 @@ vllm_omni/
 │       ├── messages.py              queue envelopes: OpenDuplexSession, CloseDuplexSession, ResumeDuplexSession,
 │       │                            TouchDuplexSession, DuplexSessionCommand, DuplexControlResult, DuplexSessionEvent
 │       ├── config.py                DuplexSessionConfig, DuplexCapabilities, ResponseCreateOptions  (new; from protocol.py)
-│       ├── contracts.py             DuplexFence, enums, stage request/submission records, DuplexStagePort ABC (trimmed)
-│       ├── session.py               DuplexEngineSession (merged state) + ledgers + DuplexTurnController  [A]
+│       ├── contracts.py             DuplexFence (session_id, epoch, turn_id, incarnation), DuplexOutputAction,
+│       │                            stage request/submission records, DuplexStagePort ABC (trimmed)
+│       ├── session.py               DuplexEngineSession: ledgers, lease, fence, stage request resources,
+│       │                            append sequencing, model/projection state, signal_turn()  [A]
 │       ├── session_runner.py        DuplexSessionRunner (per-session mailbox on the orchestrator loop)   (new) [A]
 │       ├── session_manager.py       DuplexSessionManager (admission, backpressure, reaper, dispatch)    (new) [A]
 │       ├── plugin.py                DuplexModelPlugin, DuplexModelSessionState, DuplexDataPlane,
@@ -513,15 +519,17 @@ class DuplexOmni(AsyncOmniBase):
     @property sessions -> Mapping[str, DuplexSessionHandle]
 
     async def open_session(self, config: DuplexSessionConfig | Mapping | None = None, *,
-                           session_id: str | None = None, timeout: float | None = 10.0) -> DuplexSessionHandle
-        # 1. session_id = session_id or f"duplex-{uuid4().hex}" (generated HERE, not in the engine)
+                           timeout: float | None = 10.0) -> DuplexSessionHandle
+        # 1. session_id = f"duplex-{uuid4().hex}"  (ALWAYS allocated here, §3.9; callers cannot choose it;
+        #    a "session_id" key inside a Mapping config is ignored)
         # 2. register a pending handle under session_id so no event can arrive before it exists
-        # 3. engine.open_session_async(...) -> DuplexControlResult(incarnation, capabilities, public_session)
+        # 3. engine.open_session_async(session_id, config: DuplexSessionConfig)
+        #    -> DuplexControlResult(capabilities: DuplexCapabilities, public_session, error_*)
         #    on failure: drop the pending handle, raise DuplexSessionError(code) with today's codes
         #    (resource_exhausted, invalid_duplex_runtime_config, ...)
-        # 4. adopt incarnation; the runner's first emitted event is SessionCreated
+        # 4. the runner's first emitted event is SessionCreated (carries the allocated session id)
     def get_session(self, session_id: str) -> DuplexSessionHandle | None
-    async def resume_session(self, session_id: str, *, incarnation: int,
+    async def resume_session(self, session_id: str, *,
                              expected_lease_generation: int) -> DuplexSessionHandle
         # engine.resume_session_async (lease CAS); returns the EXISTING handle, whose events() may be
         # re-entered by the new consumer (buffered events are delivered in order)
@@ -544,13 +552,12 @@ registry.
 
 ```python
 class DuplexSessionHandle:
-    session_id: str
-    incarnation: int
+    session_id: str                      # server-allocated, unique for the engine's lifetime (§3.9)
     capabilities: DuplexCapabilities
     @property closed -> bool
 
     async def submit(self, command: DuplexCommand) -> None
-        # one-way: engine.submit_command(session_id, incarnation, command)
+        # one-way: engine.submit_command_async(session_id, command)
         # caller order == mailbox order; rejections come back as ErrorEvent on events()
     # convenience wrappers, all == submit(...):
     async def append_audio(...), append_text(text), commit(*, final=True, create_response=None, is_speech=None),
@@ -598,10 +605,19 @@ Heartbeat()   CreateItem(item, previous_item_id)   DeleteItem(item_id)   Truncat
 
 `engine/duplex/events.py`:
 
+Stateless events (`error`, `session.expired`, `session.heartbeat_ack`,
+`overlap.decision`, `input_audio_buffer.cleared`, `playback.acknowledged`,
+`turn.event`) are constructed typed at the runner's emit site
+(`_emit_error`, `session.signal_turn()`). Only events with domain effects
+(`response.done`, `response.listen`, `audio.cancelled`, `input.cancelled`,
+`session.closed`) or Realtime projection state (response / item / content
+part bookkeeping, model output) still travel as internal dictionaries through
+`DuplexSessionRunner.emit` and `realtime_events.project_internal_event` (D17).
+
 ```python
 @dataclass(frozen=True, slots=True)
 class DuplexEvent:
-    session_id: str; incarnation: int; epoch: int; event_id: str
+    session_id: str; epoch: int; event_id: str
     def to_realtime(self) -> list[dict[str, object]]           # 0..n wire events (e.g. ResponseDone -> output_audio.done,
                                                                # output_item.done, response.done, rate_limits.updated)
 SessionCreated(public_session, resume_supported)   SessionUpdated   SessionResumed   SessionClosed(reason)   SessionExpired(reason)
@@ -629,10 +645,13 @@ exactly what the websocket handler does.
 ### 3.4 Engine-side session internals (not public API)
 
 ```python
-class DuplexEngineSession:            # engine/duplex/session.py — the ONE session state
-    session_id, incarnation, epoch, turn_id, state, turn_state, config: DuplexSessionConfig, capabilities
-    runtime_config, config_generation, sampling_params (per stage)         # from DuplexSessionRuntimeState
-    lease: DuplexLeaseState, stage_bindings, reserved_requests, append_seq  # from DuplexSessionRuntimeState
+class DuplexEngineSession:            # engine/duplex/session.py — the ONE session state (no resources sub-object)
+    session_id, epoch, turn_id, state, turn_state, config: DuplexSessionConfig, capabilities
+    runtime_config, config_generation                                       # from DuplexSessionRuntimeState
+    lease: DuplexLeaseState, request_resources[(stage_id, request_id)], accepted_fence (monotonic high-water
+    mark for stage requests), input_seq / input_turn_seq                    # from DuplexSessionRuntimeState
+    touch_lease / detach_lease / resume_lease / begin_close / release_all_requests / prepare_append / commit_append
+    signal_turn(event, payload) -> TurnEvent                                # was DuplexTurnController
     _input / _response / _playback / _conversation ledgers                  # from DuplexSession
     model_state: DuplexModelSessionState                                    # from ServingRuntimeSessionState
     projection: ResponseProjectionState                                     # from _RealtimeResponseState
@@ -656,9 +675,10 @@ class DuplexSessionRunner:            # engine/duplex/session_runner.py — one 
     async _offload(fn, *args)                                         # run_in_executor for audio decode, VAD, base64
 
 class DuplexSessionManager:           # engine/duplex/session_manager.py — from DuplexControlPlane + DuplexSessionRuntimeManager
-    sessions: dict[str, DuplexSessionRunner]; incarnations; admission (max_sessions, closing sessions retain capacity)
+    sessions: dict[str, DuplexSessionRunner]; admission (max_sessions, closing sessions retain capacity)
     async open(msg) / close(msg) / resume(msg) / touch(msg)          # RPC results via result_sink
-    def dispatch(msg: DuplexSessionCommandMessage)                    # incarnation check, byte / pending-turn reservation
+    def dispatch(msg: DuplexSessionCommandMessage)                    # session lookup (unknown_session), byte / pending-turn reservation
+    # (no DuplexRuntimeCapabilities / input-mode conversion: every duplex model appends audio chunks, D17)
                                                                       # -> runner.mailbox.put_nowait (or ErrorEvent)
     executor: ThreadPoolExecutor                                      # dedicated pool for runner _offload work
     async reaper_loop() / reap_expired()                              # lease expiry -> SessionExpired event + cleanup
@@ -680,8 +700,11 @@ class DuplexModelPlugin(ABC):         # engine/duplex/plugin.py
 1. accept; build `RealtimeEnvelope` (autostart / default session payload from
    query params, `event_id` correlation, error-type map, `conversation.item.*`
    echo events);
-2. handshake: first message `session.update` -> `omni.open_session(payload["session"])`;
-   `session.resume` -> `attachment.authenticate_resume` -> `omni.resume_session`;
+2. handshake: first message `session.update` -> `omni.open_session(payload["session"])`
+   (any `session_id` / `id` the client puts in the payload is ignored; the
+   server-allocated id is announced in `session.created`);
+   `session.resume` (`session_id`, `resume_token`, `last_received_server_event_seq`)
+   -> `attachment.authenticate_resume` -> `omni.resume_session`;
 3. reader loop: JSON -> `DuplexCommand.from_realtime` -> `handle.submit`;
    envelope-level errors (invalid JSON, oversize frame, unknown type) are
    answered locally;
@@ -695,7 +718,8 @@ Target size: serving.py < 400 lines, realtime_input.py < 300 lines.
 
 ```python
 class DuplexClientBase(ABC):                              # vllm_omni/clients/duplex.py
-    def __init__(self, *, model: str, config: SessionConfig | None = None, session_id: str | None = None)
+    def __init__(self, *, model: str, config: SessionConfig | None = None)
+    session_id: str | None        # None until session.created; assigned by the server, never chosen by the client
     # shared public API (unchanged signatures): __aenter__/__aexit__/close, append_audio, stream_pcm, commit,
     # cancel_response, clear_input, ack_playback, __aiter__/events/responses/wait_for, send(event: dict) -> str
     # shared internals: _dispatch, _adopt_session, _announce, subscribers, _wait_on_queue, _finalize
@@ -703,8 +727,8 @@ class DuplexClientBase(ABC):                              # vllm_omni/clients/du
 
 class DuplexClient(DuplexClientBase):                      # websockets; reconnect / resume / heartbeat / event_ack
 class InlineDuplexClient(DuplexClientBase):                # vllm_omni/clients/inline_duplex.py
-    def __init__(self, omni: "DuplexOmni", *, model, config=None, session_id=None, handshake_timeout_s=30.0)
-    # _open(): handle = await omni.open_session(config.to_session_payload(model=..., session_id=...)); pump handle.events()
+    def __init__(self, omni: "DuplexOmni", *, model, config=None, handshake_timeout_s=30.0)
+    # _open(): handle = await omni.open_session(config.to_session_payload(model=...)); pump handle.events()
     #          -> for payload in ev.to_realtime(): self._dispatch(payload)
     # _send_command(payload): await handle.submit(DuplexCommand.from_realtime(payload))   (session.close -> handle.close())
 ```
@@ -733,7 +757,7 @@ Everything below runs on the orchestrator asyncio loop; there is no lock.
   per-session append tail. The worker returns to the mailbox immediately, so
   a later `CancelResponse` is not blocked behind an in-flight append.
 - **Re-validation after every `await`.** A tracked task captures
-  `(incarnation, epoch, turn_id)` when it starts and re-checks them before
+  `(epoch, turn_id)` when it starts and re-checks them before
   the stage submit and before committing ledgers (today's `expected_epoch` /
   `_native_silence_continuation_is_stale` checks, moved verbatim). A task
   that finds the epoch advanced rolls back its PCM reservation and exits.
@@ -787,6 +811,51 @@ Everything below runs on the orchestrator asyncio loop; there is no lock.
 
 ---
 
+### 3.9 Session identity: server-allocated ids, no incarnation (§7 D16)
+
+Rules:
+
+1. **The server allocates every session id.** `DuplexOmni.open_session`
+   generates `duplex-<uuid4 hex>`; there is no `session_id` parameter on
+   `open_session`, on `DuplexClientBase.__init__`, or on `InlineDuplexClient`.
+   A `session_id` / `id` key in a `session.update` open payload is ignored
+   (Realtime clients echo the session object back, so rejecting it would
+   break them). The allocated id reaches the client in `session.created`
+   and is the only handle for `session.resume`, `close`, and every command.
+2. **A session id is never reused** within an engine's lifetime, so the id
+   alone identifies a session. The `incarnation` counter, which only existed
+   to tell apart successive sessions opened under the same client-chosen id,
+   is dropped everywhere: `DuplexFence` becomes `(session_id, epoch, turn_id,
+   response_seq)`; stage request ids become `duplex-s.<id>.e.<epoch>.r.<role>`;
+   model-side per-session state is keyed by `session_id` alone; events,
+   messages and the attachment registry lose the field; the `stale_incarnation`
+   error code disappears.
+3. **Stale detection.** A command, close, touch or resume for an id the
+   manager no longer holds is answered with `ErrorEvent(code="unknown_session")`
+   (or `DuplexSessionError("unknown_session")` on the RPC path). Within a live
+   session, staleness is still `epoch`-based (§3.7): appends and continuations
+   captured under an older epoch roll back and exit.
+4. **Resume identity** is `(session_id, resume_token, expected_lease_generation)`:
+   the token is bound to the attachment state, the lease generation is the
+   engine-side compare-and-swap. Neither needs an incarnation to be unique.
+5. **Correlation.** Clients that need their own identifier keep it in
+   `DuplexSessionConfig.metadata` (echoed in `public_session`), not in the id.
+
+Wire changes: `session.created` no longer carries `incarnation`;
+`session.resume` no longer requires it. Message changes:
+`DuplexSessionCommandMessage(session_id, command)`,
+`CloseDuplexSessionMessage(session_id, reason)`,
+`ResumeDuplexSessionMessage(session_id, expected_lease_generation)`,
+`TouchDuplexSessionMessage(session_id, activity)`, `DuplexControlResult`
+without `incarnation`.
+
+Expected effect: about 150 references across the engine, serving, attachment
+registry, three model plugins and the sampler go away; one identity dimension
+fewer to explain. The size reduction is modest (roughly 1-2% of the duplex
+engine + serving layers); the gain is conceptual.
+
+---
+
 ## 4. Removals
 
 | Item | Where | Replacement |
@@ -797,13 +866,16 @@ Everything below runs on the orchestrator asyncio loop; there is no lock.
 | `PipelineConfig.duplex_control_enabled`, `duplex_runtime_extension`, `duplex_serving_adapter` (§7 D3, D12) | `stage_config.py:312-320`, three `pipeline.py`, `async_omni_engine.py`, `orchestrator.py`, `tests/config/test_config_factory.py` | `PipelineConfig.duplex_plugin` |
 | `entrypoints/duplex/capability.py` | `api_server.py:1159` | `duplex_plugin is not None` check |
 | **`/v1/chat/completions` (and all other turn-based HTTP routes) on MiniCPM-o 4.5 servers** (§7 D9, breaking change) | `api_server.py` chat/speech/batch wiring for duplex deployments, MiniCPM-o online chat tests/examples (§2.7), deploy YAML header comments | duplex client over `/v1/realtime?duplex=1`; offline `Omni`/`AsyncOmni` for turn-based use |
-| Cross-boundary fence protocol: `DuplexFence` in messages/results, `next_fence`, `expected_epoch`, `operation_id` idempotency cache, `accepted_fence`, `runtime_contract_invalid`, request-state preregistration, `collect_duplex_data_plane_outputs`, `DuplexRequestClient`, `DuplexEnginePort`, `DuplexRequestOutputPort`, `duplex_lifecycle_events` queue | `engine/duplex/messages.py`, `control_client.py` (`DuplexControlClient`, deleted), `control_plane.py:344-512`, `duplex_request_client.py`, `runtime_bridge.py:34-226`, `async_omni.py` | typed `DuplexSessionCommandMessage` (session_id, incarnation, command) and `DuplexSessionEventMessage`; identity checked once in `DuplexSessionManager.dispatch`; `DuplexOmniEngine` builds messages directly; `DuplexControlRequestError` -> `DuplexSessionError` |
+| Cross-boundary fence protocol: `DuplexFence` in messages/results, `next_fence`, `expected_epoch`, `operation_id` idempotency cache, `accepted_fence`, `runtime_contract_invalid`, request-state preregistration, `collect_duplex_data_plane_outputs`, `DuplexRequestClient`, `DuplexEnginePort`, `DuplexRequestOutputPort`, `duplex_lifecycle_events` queue | `engine/duplex/messages.py`, `control_client.py` (`DuplexControlClient`, deleted), `control_plane.py:344-512`, `duplex_request_client.py`, `runtime_bridge.py:34-226`, `async_omni.py` | typed `DuplexSessionCommandMessage` (session_id, command) and `DuplexSessionEventMessage`; identity checked once in `DuplexSessionManager.dispatch`; `DuplexOmniEngine` builds messages directly; `DuplexControlRequestError` -> `DuplexSessionError` |
 | API-side `DuplexSession`, `DuplexSessionRegistry`, `DuplexTurnController`, `ServingRuntimeSessionState`/`ServingRuntimeAdapter` Protocols, `NativeRealtimeSessionProtocol`, `RealtimeOutputProjector`, `RealtimeSessionState` | `entrypoints/duplex/{protocol,runtime_adapter,realtime_session,realtime_output,realtime_state}.py` | `DuplexEngineSession`, `DuplexModelPlugin`, `DuplexEvent.to_realtime()` |
 | `AsyncOmni` / `AsyncOmniEngine` / `Orchestrator` duplex members | §2.4-§2.6 | `DuplexOmni`, `DuplexOrchestrator`, `DuplexSessionManager` |
+| Simplification pass (§7 D17): `DuplexSessionResources`, `DuplexStageBinding`, `stage_request_ids`, `DuplexRuntimeCapabilities`, `DuplexInputMode` and the `mode` parameter of `plan_append` / `prepare_append`, `DuplexCapabilities.input_modes` / `implementation_level` fields (wire values kept as constants), `DuplexFence.response_seq`, `DuplexTurnController`, `DuplexControlError`, the dict round trips of session config / capabilities across the engine queue, `held_events`, the internal-dict form of stateless events, the public blocking engine methods | `engine/duplex/{session,contracts,plugin,config,session_manager,session_runner,messages,realtime_events}.py`, `duplex_omni.py`, `duplex_omni_engine.py`, three model plugins | one `DuplexEngineSession`; typed queue objects; `_emit_error` / `session.signal_turn()`; `*_async` engine surface only |
+| Client-chosen session ids and the `incarnation` counter (§3.9, §7 D16): `open_session(session_id=...)`, `DuplexClientBase(session_id=...)`, `session_id` in the `session.update` open payload, `incarnation` in `DuplexFence`, events, messages, `session.created` / `session.resume`, attachment registry, model-side session keys, `stale_incarnation` | `duplex_omni.py`, `session_manager.py`, `session_runner.py`, `session.py`, `contracts.py`, `messages.py`, `events.py`, `realtime_input.py`, `serving.py`, `session_attachment.py`, `clients/duplex.py`, model `duplex/` packages, `duplex_sampling.py` | server-allocated `duplex-<uuid4 hex>` ids; identity = `session_id`; `unknown_session` error |
 | `typing.Protocol` classes (`DuplexRuntimeExtension`, `DuplexStagePort`, `DuplexControlPlanePort`, `CorrelatedRpcTransport`, `PcmAppendBuffer`, `PcmAppendReservation`, `RuntimeDataPlane`, `WebSocketTransport`) (§7 D5) | `engine/duplex/contracts.py`, `runtime_adapter.py`, `clients/duplex.py:601` | ABCs (`DuplexModelPlugin`, `DuplexDataPlane`, `DuplexModelSessionState`, `PcmAppendBuffer`, `WebSocketTransport`); the stage port is `DuplexOrchestrator` itself |
 
 Not removed: `?duplex=1`, `session_mode: duplex` (scheduler contract),
-`DuplexInputMode.TURN_COMMIT_ONLY`, `implementation_level="model_native_duplex"`,
+the `session_mode: duplex` scheduler contract, the wire constants
+`implementation_level="model_native_duplex"` / `input_modes=["append_audio_chunk"]`,
 `DuplexSessionAttachmentRegistry`, `experimental/fullduplex/`.
 
 ---
@@ -961,6 +1033,8 @@ suites, offline MiniCPM-o tests, `test_duplex_lease.py`,
 | D13 | Alternative B applied: typed `DuplexCommand` / `DuplexEvent` contract. |
 | D14 | Collaborators are constructed explicitly: `DuplexOmni._create_engine()` returns `DuplexOmniEngine`, `DuplexOmniEngine._create_orchestrator()` returns `DuplexOrchestrator` with duplex-specific constructor arguments. No `engine_cls` / `orchestrator_cls` attributes. |
 | D15 | `DuplexControlClient` is deleted; `DuplexOmniEngine` builds messages directly; `DuplexControlRequestError` becomes `DuplexSessionError`. |
+| D16 | Session ids are always allocated by the server (`DuplexOmni.open_session`); clients cannot pick one. Because ids are never reused, the `incarnation` counter is dropped from the fence, events, messages, wire protocol and model-side session keys (§3.9). Revision 4; not yet implemented in code. |
+| D17 | Simplification pass (revision 5, implemented): (1) `DuplexEngineSession` absorbs the former `DuplexSessionResources` (lease, accepted fence, stage request resources, append sequencing); the duplicate config / capability copies and the second request tracker are gone. (2) The input-mode mechanism (`DuplexInputMode`, `input_modes`, `implementation_level`) is removed: every duplex model is model-native and appends audio chunks. (3) `DuplexSessionConfig` and `DuplexCapabilities` cross the in-process engine queue as objects; control errors are plain fields on the result. (4) Stateless events are constructed typed at the emit site; the projector keeps only the stateful and domain-terminal projections. Constraint recorded: queue messages now carry dataclasses, so a future out-of-process orchestrator would need an encoding step. |
 
 ---
 

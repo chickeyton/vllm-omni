@@ -17,6 +17,7 @@ from vllm_omni.engine.messages import EngineQueueMessage
 
 if TYPE_CHECKING:
     from vllm_omni.engine.duplex.commands import DuplexCommand
+    from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
     from vllm_omni.engine.duplex.events import DuplexEvent
 
 
@@ -37,17 +38,12 @@ class DuplexSessionError(RuntimeError):
         self.session_id = session_id
 
 
-class DuplexControlError(EngineQueueMessage, kw_only=True):
-    code: str
-    message: str
-    retryable: bool = False
-
-
 class OpenDuplexSessionMessage(EngineQueueMessage, kw_only=True):
     type: Literal["open_duplex_session"] = "open_duplex_session"
     control_id: str
     session_id: str
-    session_config: dict[str, object]
+    #: Already normalized by ``DuplexOmni``; the queue is in-process, so the object crosses as is.
+    session_config: DuplexSessionConfig
 
 
 class CloseDuplexSessionMessage(EngineQueueMessage, kw_only=True):
@@ -91,9 +87,12 @@ class DuplexControlResultMessage(EngineQueueMessage, kw_only=True):
     ok: bool
     incarnation: int = 0
     lease_generation: int | None = None
-    capabilities: dict[str, object] | None = None
+    capabilities: DuplexCapabilities | None = None
+    #: The Realtime ``session`` object of the session (wire payload, already a dict).
     public_session: dict[str, object] | None = None
-    error: DuplexControlError | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    error_retryable: bool = False
 
     @property
     def rpc_correlation_key(self) -> tuple[str, str]:
@@ -111,7 +110,6 @@ class DuplexSessionEventMessage(EngineQueueMessage, kw_only=True):
 
 __all__ = [
     "CloseDuplexSessionMessage",
-    "DuplexControlError",
     "DuplexControlResultMessage",
     "DuplexSessionCommandMessage",
     "DuplexSessionError",

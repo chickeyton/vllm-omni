@@ -1,11 +1,11 @@
 # Duplex Refactor: Line Counts and Maintainability, Baseline vs Refactored
 
-Measured 2026-09-05.
+Measured 2026-09-05; refactored side re-measured after the D17 simplification pass.
 
 | Tree | Path | Revision |
 | --- | --- | --- |
 | Baseline | `D:\repo\github\chickeyton\vllm-omni_duplex_refactor_baseline` | `7112347f` (`duplex_refactor1`, clean checkout, before the refactor) |
-| Refactored | `D:\repo\github\chickeyton\vllm-omni_duplex_refactor` | `7112347f` + the uncommitted `duplex_refactor1` working tree (after the refactor) |
+| Refactored | `D:\repo\github\chickeyton\vllm-omni_duplex_refactor` | `duplex_refactor1` after the refactor (`6a151f9f`) and the simplification pass of plan revision 5 (D17) |
 
 Scope and method, identical for both trees:
 
@@ -35,7 +35,7 @@ Scope and method, identical for both trees:
 
 | # | Scope | Baseline | Refactored | Delta |
 | --- | --- | ---: | ---: | ---: |
-| 1 | All `vllm_omni/**/*.py` excluding `vllm_omni/experimental/` and `vllm_omni/clients/` (1292 / 1289 files) | 356,499 | 354,932 | -1,567 (-0.4%) |
+| 1 | All `vllm_omni/**/*.py` excluding `vllm_omni/experimental/` and `vllm_omni/clients/` (1292 / 1289 files) | 356,499 | 354,549 | -1,950 (-0.5%) |
 | 2 | `vllm_omni/entrypoints/async_omni.py` | 1,252 | 746 | -506 (-40.4%) |
 | 3 | `vllm_omni/engine/async_omni_engine.py` | 1,748 | 516 | -1,232 (-70.5%) |
 | 4 | `vllm_omni/engine/orchestrator.py` | 2,375 | 2,073 | -302 (-12.7%) |
@@ -52,60 +52,60 @@ New shared base files in the refactored tree (not present in the baseline; effec
 
 | Group | Baseline files | Baseline effective | Refactored files | Refactored effective | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Engine side (`engine/duplex/**`, `engine/duplex_omni_engine.py`, `engine/duplex_orchestrator.py`) | 9 | 2,224 | 20 | 10,888 | +8,664 (+389.6%) |
-| API + serving (`entrypoints/duplex/**`, `entrypoints/duplex_omni.py`, `entrypoints/duplex_request_client.py`) | 18 | 10,769 | 6 | 1,283 | -9,486 (-88.1%) |
-| MiniCPM-o 4.5 (`model_executor/models/minicpmo_4_5/duplex/**`) | 11 | 2,785 | 9 | 2,743 | -42 (-1.5%) |
-| PersonaPlex (`model_executor/models/personaplex/duplex/**`) | 8 | 1,188 | 7 | 1,163 | -25 (-2.1%) |
-| **Duplex logic incl. MiniCPM-o and PersonaPlex** | **46** | **16,966** | **42** | **16,077** | **-889 (-5.2%)** |
-| Nemotron VoiceChat (`model_executor/models/nemotron_voicechat/duplex/**`), for reference | 5 | 982 | 4 | 966 | -16 (-1.6%) |
-| Duplex logic incl. all three model plugins | 51 | 17,948 | 46 | 17,043 | -905 (-5.0%) |
+| Engine side (`engine/duplex/**`, `engine/duplex_omni_engine.py`, `engine/duplex_orchestrator.py`) | 9 | 2,224 | 20 | 10,532 | +8,308 (+373.6%) |
+| API + serving (`entrypoints/duplex/**`, `entrypoints/duplex_omni.py`, `entrypoints/duplex_request_client.py`) | 18 | 10,769 | 6 | 1,276 | -9,493 (-88.2%) |
+| MiniCPM-o 4.5 (`model_executor/models/minicpmo_4_5/duplex/**`) | 11 | 2,785 | 9 | 2,736 | -49 (-1.8%) |
+| PersonaPlex (`model_executor/models/personaplex/duplex/**`) | 8 | 1,188 | 7 | 1,156 | -32 (-2.7%) |
+| **Duplex logic incl. MiniCPM-o and PersonaPlex** | **46** | **16,966** | **42** | **15,700** | **-1,266 (-7.5%)** |
+| Nemotron VoiceChat (`model_executor/models/nemotron_voicechat/duplex/**`), for reference | 5 | 982 | 4 | 960 | -22 (-2.2%) |
+| Duplex logic incl. all three model plugins | 51 | 17,948 | 46 | 16,660 | -1,288 (-7.2%) |
 
 ## Duplex logic: Maintainability Index
 
 | Scope | | Baseline | Refactored | Delta |
 | --- | --- | ---: | ---: | ---: |
-| **Duplex logic incl. MiniCPM-o and PersonaPlex** | MI, LLOC-weighted mean | 12.6 | 14.8 | +2.3 |
-| | MI, plain mean over files | 42.0 | 43.7 | +1.7 |
+| **Duplex logic incl. MiniCPM-o and PersonaPlex** | MI, LLOC-weighted mean | 12.6 | 15.1 | +2.5 |
+| | MI, plain mean over files | 42.0 | 43.9 | +1.8 |
 | | files ranked A / B / C | 35 / 1 / 10 | 32 / 3 / 7 | |
-| | cyclomatic complexity, total | 4,198 | 4,176 | -22 (-0.5%) |
-| | Halstead volume, total | 85,962 | 83,448 | -2.9% |
-| | logical lines (radon LLOC), total | 11,773 | 12,135 | +362 (+3.1%) |
-| | comment + docstring lines / SLOC | 3.5% | 5.6% | |
-| Engine side | MI, LLOC-weighted mean | 20.3 | 11.8 | -8.4 |
-| | MI, plain mean over files | 45.1 | 35.4 | -9.8 |
+| | cyclomatic complexity, total | 4,198 | 4,113 | -85 (-2.0%) |
+| | Halstead volume, total | 85,962 | 82,203 | -4.4% |
+| | logical lines (radon LLOC), total | 11,773 | 11,936 | +163 (+1.4%) |
+| | comment + docstring lines / SLOC | 3.5% | 5.8% | |
+| Engine side | MI, LLOC-weighted mean | 20.3 | 12.1 | -8.1 |
+| | MI, plain mean over files | 45.1 | 35.6 | -9.5 |
 | | files ranked A / B / C | 7 / 0 / 2 | 14 / 1 / 5 | |
-| | cyclomatic complexity, total | 442 | 2,821 | +2,379 (+538.2%) |
-| | Halstead volume, total | 6,563 | 60,557 | +822.7% |
-| | logical lines (radon LLOC), total | 1,497 | 8,191 | +6,694 (+447.2%) |
-| | comment + docstring lines / SLOC | 1.8% | 4.6% | |
-| API + serving | MI, LLOC-weighted mean | 7.5 | 34.1 | +26.6 |
-| | MI, plain mean over files | 30.4 | 53.7 | +23.3 |
+| | cyclomatic complexity, total | 442 | 2,763 | +2,321 (+525.1%) |
+| | Halstead volume, total | 6,563 | 59,340 | +804.2% |
+| | logical lines (radon LLOC), total | 1,497 | 8,001 | +6,504 (+434.5%) |
+| | comment + docstring lines / SLOC | 1.8% | 5.0% | |
+| API + serving | MI, LLOC-weighted mean | 7.5 | 34.3 | +26.9 |
+| | MI, plain mean over files | 30.4 | 53.8 | +23.4 |
 | | files ranked A / B / C | 12 / 0 / 6 | 6 / 0 / 0 | |
-| | cyclomatic complexity, total | 2,686 | 305 | -2,381 (-88.6%) |
-| | Halstead volume, total | 60,218 | 3,213 | -94.7% |
-| | logical lines (radon LLOC), total | 7,260 | 981 | -6,279 (-86.5%) |
+| | cyclomatic complexity, total | 2,686 | 301 | -2,385 (-88.8%) |
+| | Halstead volume, total | 60,218 | 3,208 | -94.7% |
+| | logical lines (radon LLOC), total | 7,260 | 974 | -6,286 (-86.6%) |
 | | comment + docstring lines / SLOC | 2.6% | 10.1% | |
 | MiniCPM-o 4.5 | MI, LLOC-weighted mean | 15.9 | 10.9 | -5.0 |
-| | MI, plain mean over files | 48.6 | 46.5 | -2.0 |
+| | MI, plain mean over files | 48.6 | 46.6 | -2.0 |
 | | files ranked A / B / C | 9 / 0 / 2 | 6 / 1 / 2 | |
 | | cyclomatic complexity, total | 827 | 811 | -16 (-1.9%) |
 | | Halstead volume, total | 15,408 | 15,862 | +2.9% |
 | | logical lines (radon LLOC), total | 2,143 | 2,106 | -37 (-1.7%) |
 | | comment + docstring lines / SLOC | 6.6% | 6.8% | |
-| PersonaPlex | MI, LLOC-weighted mean | 33.6 | 31.2 | -2.4 |
-| | MI, plain mean over files | 55.8 | 55.3 | -0.5 |
+| PersonaPlex | MI, LLOC-weighted mean | 33.6 | 31.3 | -2.3 |
+| | MI, plain mean over files | 55.8 | 55.3 | -0.4 |
 | | files ranked A / B / C | 7 / 1 / 0 | 6 / 1 / 0 | |
-| | cyclomatic complexity, total | 243 | 239 | -4 (-1.6%) |
-| | Halstead volume, total | 3,773 | 3,816 | +1.1% |
-| | logical lines (radon LLOC), total | 873 | 857 | -16 (-1.8%) |
-| | comment + docstring lines / SLOC | 6.6% | 6.5% | |
-| Nemotron VoiceChat, for reference | MI, LLOC-weighted mean | 31.6 | 28.2 | -3.5 |
-| | MI, plain mean over files | 50.5 | 48.1 | -2.3 |
+| | cyclomatic complexity, total | 243 | 238 | -5 (-2.1%) |
+| | Halstead volume, total | 3,773 | 3,792 | +0.5% |
+| | logical lines (radon LLOC), total | 873 | 855 | -18 (-2.1%) |
+| | comment + docstring lines / SLOC | 6.6% | 6.6% | |
+| Nemotron VoiceChat, for reference | MI, LLOC-weighted mean | 31.6 | 28.3 | -3.4 |
+| | MI, plain mean over files | 50.5 | 48.2 | -2.2 |
 | | files ranked A / B / C | 4 / 1 / 0 | 3 / 1 / 0 | |
-| | cyclomatic complexity, total | 221 | 217 | -4 (-1.8%) |
-| | Halstead volume, total | 2,931 | 2,988 | +1.9% |
-| | logical lines (radon LLOC), total | 664 | 646 | -18 (-2.7%) |
-| | comment + docstring lines / SLOC | 3.9% | 4.1% | |
+| | cyclomatic complexity, total | 221 | 216 | -5 (-2.3%) |
+| | Halstead volume, total | 2,931 | 2,962 | +1.0% |
+| | logical lines (radon LLOC), total | 664 | 644 | -20 (-3.0%) |
+| | comment + docstring lines / SLOC | 3.9% | 4.2% | |
 
 ## Duplex engine + serving layers only (model plugins excluded)
 
@@ -113,17 +113,17 @@ Scope: `engine/duplex/**`, `engine/duplex_omni_engine.py`, `engine/duplex_orches
 
 | Metric | Baseline | Refactored | Delta |
 | --- | ---: | ---: | ---: |
-| Engine side, effective lines | 2,224 | 10,888 | +8,664 (+389.6%) |
-| Serving side, effective lines | 10,769 | 1,283 | -9,486 (-88.1%) |
-| **Engine + serving, effective lines** | **12,993** | **12,171** | **-822 (-6.3%)** |
+| Engine side, effective lines | 2,224 | 10,532 | +8,308 (+373.6%) |
+| Serving side, effective lines | 10,769 | 1,276 | -9,493 (-88.2%) |
+| **Engine + serving, effective lines** | **12,993** | **11,808** | **-1,185 (-9.1%)** |
 | Engine + serving, files | 27 | 26 | -1 (-3.7%) |
-| MI, LLOC-weighted mean | 9.7 | 14.2 | +4.6 |
-| MI, plain mean over files | 35.3 | 39.6 | +4.3 |
+| MI, LLOC-weighted mean | 9.7 | 14.5 | +4.9 |
+| MI, plain mean over files | 35.3 | 39.8 | +4.5 |
 | Files ranked A / B / C | 19 / 0 / 8 | 20 / 1 / 5 | |
-| Cyclomatic complexity, total | 3,128 | 3,126 | -2 (-0.1%) |
-| Halstead volume, total | 66,781 | 63,769 | -4.5% |
-| Logical lines (radon LLOC), total | 8,757 | 9,172 | +415 (+4.7%) |
-| Comment + docstring lines / SLOC | 2.5% | 5.2% | |
+| Cyclomatic complexity, total | 3,128 | 3,064 | -64 (-2.0%) |
+| Halstead volume, total | 66,781 | 62,549 | -6.3% |
+| Logical lines (radon LLOC), total | 8,757 | 8,975 | +218 (+2.5%) |
+| Comment + docstring lines / SLOC | 2.5% | 5.5% | |
 
 ## Appendix A: per-file numbers (duplex logic)
 
@@ -135,25 +135,25 @@ Effective lines and radon MI per file. A dash means the file does not exist in t
 | `vllm_omni/engine/duplex/audio.py` | — | — | 159 | 32.6 |
 | `vllm_omni/engine/duplex/commands.py` | — | — | 215 | 46.4 |
 | `vllm_omni/engine/duplex/commit_policy.py` | — | — | 26 | 69.5 |
-| `vllm_omni/engine/duplex/config.py` | — | — | 687 | 0.0 |
-| `vllm_omni/engine/duplex/contracts.py` | 205 | 38.1 | 162 | 40.1 |
+| `vllm_omni/engine/duplex/config.py` | — | — | 680 | 0.0 |
+| `vllm_omni/engine/duplex/contracts.py` | 205 | 38.1 | 148 | 41.4 |
 | `vllm_omni/engine/duplex/control_client.py` | 205 | 47.8 | — | — |
 | `vllm_omni/engine/duplex/control_plane.py` | 982 | 0.0 | — | — |
 | `vllm_omni/engine/duplex/events.py` | — | — | 528 | 31.4 |
 | `vllm_omni/engine/duplex/intermediate.py` | 75 | 60.0 | 75 | 60.0 |
 | `vllm_omni/engine/duplex/lease.py` | 101 | 41.7 | 101 | 41.7 |
-| `vllm_omni/engine/duplex/messages.py` | 98 | 46.4 | 81 | 62.4 |
-| `vllm_omni/engine/duplex/plugin.py` | — | — | 238 | 42.2 |
+| `vllm_omni/engine/duplex/messages.py` | 98 | 46.4 | 79 | 63.8 |
+| `vllm_omni/engine/duplex/plugin.py` | — | — | 236 | 42.2 |
 | `vllm_omni/engine/duplex/realtime_commands.py` | — | — | 750 | 0.0 |
-| `vllm_omni/engine/duplex/realtime_events.py` | — | — | 1,366 | 0.0 |
+| `vllm_omni/engine/duplex/realtime_events.py` | — | — | 1,319 | 0.0 |
 | `vllm_omni/engine/duplex/runtime.py` | 94 | 65.7 | — | — |
-| `vllm_omni/engine/duplex/session.py` | 464 | 6.7 | 1,334 | 0.0 |
-| `vllm_omni/engine/duplex/session_manager.py` | — | — | 674 | 13.8 |
-| `vllm_omni/engine/duplex/session_runner.py` | — | — | 3,573 | 0.0 |
+| `vllm_omni/engine/duplex/session.py` | 464 | 6.7 | 1,241 | 0.0 |
+| `vllm_omni/engine/duplex/session_manager.py` | — | — | 648 | 15.3 |
+| `vllm_omni/engine/duplex/session_runner.py` | — | — | 3,409 | 0.0 |
 | `vllm_omni/engine/duplex/turn_detection.py` | — | — | 210 | 42.8 |
 | `vllm_omni/engine/duplex/vad.py` | — | — | 156 | 34.8 |
-| `vllm_omni/engine/duplex_omni_engine.py` | — | — | 276 | 46.3 |
-| `vllm_omni/engine/duplex_orchestrator.py` | — | — | 277 | 43.5 |
+| `vllm_omni/engine/duplex_omni_engine.py` | — | — | 276 | 47.3 |
+| `vllm_omni/engine/duplex_orchestrator.py` | — | — | 276 | 43.5 |
 | `vllm_omni/entrypoints/duplex/__init__.py` | 2 | 100.0 | 2 | 100.0 |
 | `vllm_omni/entrypoints/duplex/audio.py` | 159 | 32.6 | — | — |
 | `vllm_omni/entrypoints/duplex/capability.py` | 25 | 79.7 | — | — |
@@ -171,15 +171,15 @@ Effective lines and radon MI per file. A dash means the file does not exist in t
 | `vllm_omni/entrypoints/duplex/session_runner.py` | 1,990 | 0.0 | — | — |
 | `vllm_omni/entrypoints/duplex/vad.py` | 156 | 34.8 | — | — |
 | `vllm_omni/entrypoints/duplex/websocket.py` | 224 | 30.3 | 31 | 79.6 |
-| `vllm_omni/entrypoints/duplex_omni.py` | — | — | 358 | 32.8 |
+| `vllm_omni/entrypoints/duplex_omni.py` | — | — | 351 | 33.7 |
 | `vllm_omni/entrypoints/duplex_request_client.py` | 337 | 28.1 | — | — |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/__init__.py` | 11 | 100.0 | 11 | 100.0 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/adapter.py` | 283 | 34.7 | — | — |
-| `vllm_omni/model_executor/models/minicpmo_4_5/duplex/capabilities.py` | 37 | 94.7 | 37 | 94.7 |
+| `vllm_omni/model_executor/models/minicpmo_4_5/duplex/capabilities.py` | 37 | 94.7 | 35 | 95.1 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/compat.py` | 35 | 66.8 | 35 | 66.8 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/data_plane.py` | 735 | 0.0 | 736 | 0.0 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/input.py` | 374 | 26.4 | 375 | 26.3 |
-| `vllm_omni/model_executor/models/minicpmo_4_5/duplex/plugin.py` | — | — | 633 | 10.0 |
+| `vllm_omni/model_executor/models/minicpmo_4_5/duplex/plugin.py` | — | — | 628 | 10.1 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/policy.py` | 112 | 61.4 | 112 | 61.4 |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/runtime.py` | 313 | 24.1 | — | — |
 | `vllm_omni/model_executor/models/minicpmo_4_5/duplex/serving_adapter.py` | 82 | 66.4 | — | — |
@@ -189,7 +189,7 @@ Effective lines and radon MI per file. A dash means the file does not exist in t
 | `vllm_omni/model_executor/models/personaplex/duplex/config.py` | 20 | 78.9 | 20 | 78.9 |
 | `vllm_omni/model_executor/models/personaplex/duplex/data_plane.py` | 184 | 28.7 | 185 | 28.7 |
 | `vllm_omni/model_executor/models/personaplex/duplex/input.py` | 181 | 35.5 | 182 | 35.4 |
-| `vllm_omni/model_executor/models/personaplex/duplex/plugin.py` | — | — | 310 | 33.6 |
+| `vllm_omni/model_executor/models/personaplex/duplex/plugin.py` | — | — | 303 | 34.0 |
 | `vllm_omni/model_executor/models/personaplex/duplex/policy.py` | 33 | 92.3 | 33 | 92.3 |
 | `vllm_omni/model_executor/models/personaplex/duplex/runtime_extension.py` | 112 | 52.5 | — | — |
 | `vllm_omni/model_executor/models/personaplex/duplex/serving_adapter.py` | 223 | 40.0 | — | — |
@@ -197,7 +197,7 @@ Effective lines and radon MI per file. A dash means the file does not exist in t
 | `vllm_omni/model_executor/models/nemotron_voicechat/duplex/__init__.py` | 0 | 100.0 | 0 | 100.0 |
 | `vllm_omni/model_executor/models/nemotron_voicechat/duplex/data_plane.py` | 347 | 17.8 | 348 | 17.7 |
 | `vllm_omni/model_executor/models/nemotron_voicechat/duplex/input.py` | 183 | 42.5 | 184 | 42.4 |
-| `vllm_omni/model_executor/models/nemotron_voicechat/duplex/plugin.py` | — | — | 434 | 32.4 |
+| `vllm_omni/model_executor/models/nemotron_voicechat/duplex/plugin.py` | — | — | 428 | 32.8 |
 | `vllm_omni/model_executor/models/nemotron_voicechat/duplex/runtime.py` | 139 | 56.6 | — | — |
 | `vllm_omni/model_executor/models/nemotron_voicechat/duplex/serving_adapter.py` | 313 | 35.4 | — | — |
 

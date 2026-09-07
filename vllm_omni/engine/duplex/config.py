@@ -105,9 +105,7 @@ class DuplexCapabilities:
     supports_audio_truncate: bool = False
     requires_model_runner_kv: bool = False
     requires_native_stage_role: bool = False
-    implementation_level: str = "serving_session_adapter"
     adapter_patterns: list[str] = field(default_factory=lambda: ["chunk_group_append"])
-    input_modes: list[str] = field(default_factory=lambda: ["turn_commit_only", "reencode_context"])
     signal_sources: list[str] = field(default_factory=lambda: ["client_event", "server_policy", "model_native"])
     stage_handoff_transport: str | None = None
     chunk_period_ms: int | None = 1000
@@ -143,9 +141,11 @@ class DuplexCapabilities:
             "supports_audio_truncate": self.supports_audio_truncate,
             "requires_model_runner_kv": self.requires_model_runner_kv,
             "requires_native_stage_role": self.requires_native_stage_role,
-            "implementation_level": self.implementation_level,
+            # Every duplex model is model-native and appends audio chunks (§7 D4);
+            # kept on the wire as constants for clients that still read them.
+            "implementation_level": "model_native_duplex",
             "adapter_patterns": self.adapter_patterns,
-            "input_modes": self.input_modes,
+            "input_modes": ["append_audio_chunk"],
             "signal_sources": self.signal_sources,
             "stage_handoff_transport": self.stage_handoff_transport,
             "chunk_period_ms": self.chunk_period_ms,
@@ -602,13 +602,12 @@ class ResponseCreateOptions:
         response_payload: Mapping[str, Any],
         *,
         private_runtime_config_keys: frozenset[str] = frozenset(),
-        model_native: bool = True,
     ) -> ResponseCreateOptions:
         """Parse an OpenAI Realtime ``response`` object into response-scoped options.
 
         Raises :class:`DuplexConfigError` (``code="unsupported_native_response_options"``)
-        when a model-native session receives options the runtime cannot apply
-        per response. Private runtime keys in ``extra_body`` are dropped.
+        for options a model-native duplex session cannot apply per response.
+        Private runtime keys in ``extra_body`` are dropped.
         """
         from vllm_omni.engine.duplex.realtime_commands import (
             REALTIME_OUTPUT_AUDIO_FORMATS,
@@ -620,25 +619,24 @@ class ResponseCreateOptions:
         payload: dict[str, Any] = dict(response_payload)
         audio_config = payload.get("audio")
         audio_output = audio_config.get("output") if isinstance(audio_config, dict) else None
-        if model_native:
-            nested_voice = audio_output.get("voice") if isinstance(audio_output, dict) else None
-            unsupported = (
-                payload.get("instructions") is not None
-                or payload.get("voice") is not None
-                or nested_voice is not None
-                or payload.get("temperature") is not None
-                or any(
-                    payload.get(field_name) is not None
-                    for field_name in ("max_response_output_tokens", "max_output_tokens", "max_tokens")
-                )
-                or payload.get("tools") is not None
-                or payload.get("tool_choice") is not None
+        nested_voice = audio_output.get("voice") if isinstance(audio_output, dict) else None
+        unsupported = (
+            payload.get("instructions") is not None
+            or payload.get("voice") is not None
+            or nested_voice is not None
+            or payload.get("temperature") is not None
+            or any(
+                payload.get(field_name) is not None
+                for field_name in ("max_response_output_tokens", "max_output_tokens", "max_tokens")
             )
-            if unsupported:
-                raise DuplexConfigError(
-                    "response.create options are not supported by a model-native duplex session",
-                    code="unsupported_native_response_options",
-                )
+            or payload.get("tools") is not None
+            or payload.get("tool_choice") is not None
+        )
+        if unsupported:
+            raise DuplexConfigError(
+                "response.create options are not supported by a model-native duplex session",
+                code="unsupported_native_response_options",
+            )
         instructions = str(payload["instructions"]) if isinstance(payload.get("instructions"), str) else None
         voice = payload.get("voice")
         if not isinstance(voice, str) and isinstance(audio_output, dict):
@@ -689,12 +687,9 @@ class ResponseCreateOptions:
             response_extra["realtime_response_tool_choice"] = payload["tool_choice"]
         extra_body = payload.get("extra_body")
         if isinstance(extra_body, dict):
-            if model_native:
-                response_extra.update(
-                    (key, value) for key, value in extra_body.items() if key not in private_runtime_config_keys
-                )
-            else:
-                response_extra.update(extra_body)
+            response_extra.update(
+                (key, value) for key, value in extra_body.items() if key not in private_runtime_config_keys
+            )
         return cls(
             instructions=instructions,
             voice=voice,

@@ -28,7 +28,6 @@ from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConf
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
     DuplexFence,
-    DuplexInputMode,
     DuplexOutputAction,
     DuplexOutputDecision,
 )
@@ -177,7 +176,6 @@ def build_duplex_data_plane_prompt(
     runtime_config: dict[str, Any],
     seq: int,
     turn_seq: int,
-    mode: DuplexInputMode,
     payload: object,
     final: bool,
 ) -> dict[str, Any]:
@@ -218,9 +216,8 @@ def build_duplex_data_plane_prompt(
                 "epoch": fence.epoch,
                 "seq": seq,
                 "turn_id": fence.turn_id,
-                "response_seq": fence.response_seq,
                 "turn_seq": turn_seq,
-                "mode": mode.value,
+                "mode": "append_audio_chunk",
                 "payload": payload,
                 "final": final,
                 "data_plane": True,
@@ -559,7 +556,6 @@ class MiniCPMO45DuplexPlugin(DuplexModelPlugin):
         runtime_config: dict[str, Any],
         seq: int,
         turn_seq: int,
-        mode: DuplexInputMode,
         payload: object,
         final: bool,
         sampling_params: object,
@@ -573,7 +569,6 @@ class MiniCPMO45DuplexPlugin(DuplexModelPlugin):
                 runtime_config=runtime_config,
                 seq=seq,
                 turn_seq=turn_seq,
-                mode=mode,
                 payload=payload,
                 final=final,
             )

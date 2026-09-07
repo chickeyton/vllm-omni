@@ -3,14 +3,14 @@
 
 """The one duplex session state, owned by the engine-side ``DuplexSessionRunner``.
 
-``DuplexEngineSession`` merges what used to be three objects: the serving
-aggregate (``entrypoints/duplex/protocol.py::DuplexSession`` with its input /
-response / playback / conversation ledgers), the engine runtime state
-(``DuplexSessionRuntimeState``: lease, identity fence, stage bindings, append
-sequencing, now ``DuplexSessionResources``) and the model plugin's per-session
-state (``model_state``). There is no cross-boundary fence protocol any more;
-``session.fence`` is derived from the session's own epoch/turn and published to
-the resources with ``sync_fence()``.
+``DuplexEngineSession`` is the single session object: the input / response /
+playback / conversation ledgers, the lease, the identity fence, the stage
+request resources, the append sequencing, the model plugin's per-session state
+(``model_state``) and the Realtime projection state (``projector``). There is
+no cross-boundary fence protocol; ``session.fence`` is derived from the
+session's own epoch/turn and ``accepted_fence`` is the monotonic high-water
+mark of fences accepted for stage requests (``sync_fence()`` publishes the
+current identity there).
 """
 
 from __future__ import annotations
@@ -37,11 +37,8 @@ from vllm_omni.engine.duplex.config import (
     DuplexTurnState,
     ResponseCreateOptions,
 )
-from vllm_omni.engine.duplex.contracts import (
-    DuplexFence,
-    DuplexInputMode,
-    DuplexRuntimeCapabilities,
-)
+from vllm_omni.engine.duplex.contracts import DuplexFence
+from vllm_omni.engine.duplex.events import TurnEvent
 from vllm_omni.engine.duplex.lease import (
     DuplexLeaseActivity,
     DuplexLeaseConfig,
@@ -50,10 +47,11 @@ from vllm_omni.engine.duplex.lease import (
 
 if TYPE_CHECKING:
     from vllm_omni.engine.duplex.plugin import DuplexModelSessionState
+    from vllm_omni.engine.duplex.realtime_events import RealtimeProjectionState
 
 
-def _default_capabilities() -> DuplexRuntimeCapabilities:
-    return DuplexRuntimeCapabilities()
+def _default_lease() -> DuplexLeaseState:
+    return DuplexLeaseState(config=DuplexLeaseConfig(), generation=0, last_activity=time.monotonic())
 
 
 @dataclass
@@ -116,12 +114,6 @@ class DuplexFenceMismatchError(RuntimeError):
 
 
 @dataclass
-class DuplexStageBinding:
-    request_id: str
-    fence: DuplexFence
-
-
-@dataclass
 class DuplexRequestResource:
     stage_id: int
     request_id: str
@@ -139,7 +131,6 @@ class DuplexInputAppend:
 @dataclass(frozen=True)
 class DuplexAppendReservation:
     fence: DuplexFence
-    mode: DuplexInputMode
     base_fence: DuplexFence
     base_input_seq: int
     base_input_turn_seq: int
@@ -148,97 +139,106 @@ class DuplexAppendReservation:
 
 
 @dataclass
-class DuplexSessionResources:
-    """Engine resources of one session: lease, identity fence, stage bindings, append sequencing."""
+class DuplexEngineSession:
+    """The one session state (see module docstring).
 
-    fence: DuplexFence
-    lease: DuplexLeaseState
-    _clock: Callable[[], float] = field(repr=False)
-    capabilities: DuplexRuntimeCapabilities = field(default_factory=_default_capabilities)
-    session_config: dict[str, Any] = field(default_factory=dict)
-    runtime_config: dict[str, Any] = field(default_factory=dict)
+    Owned and mutated only by its ``DuplexSessionRunner`` on the orchestrator loop.
+    """
+
+    session_id: str
+    config: DuplexSessionConfig
+    capabilities: DuplexCapabilities = field(default_factory=DuplexCapabilities)
+    incarnation: int = 0
+    state: DuplexSessionState = DuplexSessionState.OPEN
+    turn_state: DuplexTurnState = DuplexTurnState.IDLE
+    epoch: int = 0
+    turn_id: int = 0
+    lease: DuplexLeaseState = field(default_factory=_default_lease, repr=False)
+    _clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _runtime_config: dict[str, Any] = field(default_factory=dict, repr=False)
+    #: Bumped on every published session / runtime config change.
     config_generation: int = 0
-    stage_bindings: dict[int, DuplexStageBinding] = field(default_factory=dict)
-    request_resources: dict[tuple[int, str], DuplexRequestResource] = field(default_factory=dict)
+    #: Stage request ids reserved or submitted for this session, keyed by ``(stage_id, request_id)``.
+    request_resources: dict[tuple[int, str], DuplexRequestResource] = field(default_factory=dict, repr=False)
+    #: Highest fence accepted for a stage request (monotonic; reset of the append
+    #: sequence happens when its epoch advances).
+    accepted_fence: DuplexFence = field(default=None, repr=False)  # type: ignore[assignment]
     input_seq: int = 0
     input_turn_seq: int = 0
-    _append_turn_key: tuple[int, int, int] | None = None
+    _append_turn_key: tuple[int, int, int] | None = field(default=None, repr=False)
+    _input: InputBufferState = field(default_factory=InputBufferState, repr=False)
+    _response: ResponseState = field(default_factory=ResponseState, repr=False)
+    _playback: PlaybackLedger = field(default_factory=PlaybackLedger, repr=False)
+    _conversation: ConversationHistory = field(default_factory=ConversationHistory, repr=False)
+    model_state: DuplexModelSessionState | None = field(default=None, repr=False)
+    projector: RealtimeProjectionState | None = field(default=None, repr=False)
+    created_monotonic: float = field(default_factory=time.monotonic)
+
+    def __post_init__(self) -> None:
+        if self.accepted_fence is None:
+            self.accepted_fence = self.fence
+        else:
+            self.accept_fence(self.fence)
+
+    # ---- identity / fence ----
 
     @property
-    def session_id(self) -> str:
-        return self.fence.session_id
+    def fence(self) -> DuplexFence:
+        return DuplexFence(
+            self.session_id,
+            epoch=self.epoch,
+            turn_id=self.turn_id,
+            incarnation=self.incarnation,
+        )
 
-    @property
-    def epoch(self) -> int:
-        return self.fence.epoch
-
-    @property
-    def turn_id(self) -> int:
-        return self.fence.turn_id
+    def sync_fence(self) -> DuplexFence:
+        """Publish the current (epoch, turn_id) identity as the accepted fence."""
+        fence = self.fence
+        self.accept_fence(fence)
+        return fence
 
     def _validate_fence(self, fence: DuplexFence) -> None:
-        if fence.session_id != self.session_id or fence.incarnation != self.fence.incarnation:
-            raise DuplexFenceMismatchError(self.fence, fence)
-        current = self.fence
-        if fence.epoch < current.epoch or (
-            fence.epoch == current.epoch
-            and (fence.turn_id < current.turn_id or fence.response_seq < current.response_seq)
-        ):
+        current = self.accepted_fence
+        if fence.session_id != self.session_id or fence.incarnation != current.incarnation:
+            raise DuplexFenceMismatchError(current, fence)
+        if fence.epoch < current.epoch or (fence.epoch == current.epoch and fence.turn_id < current.turn_id):
             raise DuplexFenceMismatchError(current, fence)
 
     def accept_fence(self, fence: DuplexFence) -> None:
         self._validate_fence(fence)
-        if fence.epoch != self.fence.epoch:
+        if fence.epoch != self.accepted_fence.epoch:
             self.input_seq = 0
             self.input_turn_seq = 0
             self._append_turn_key = None
-        self.fence = fence
+        self.accepted_fence = fence
 
-    def touch(self, fence: DuplexFence, activity: DuplexLeaseActivity) -> None:
-        self._validate_fence(fence)
+    # ---- lease ----
+
+    @property
+    def lease_generation(self) -> int:
+        return self.lease.generation
+
+    def touch_lease(self, activity: DuplexLeaseActivity) -> None:
+        self._validate_fence(self.fence)
         self.lease.touch(self._clock(), activity)
 
-    def detach(self, fence: DuplexFence) -> None:
-        self._validate_fence(fence)
+    def detach_lease(self) -> None:
+        self._validate_fence(self.fence)
         self.lease.detach(self._clock())
 
-    def resume(self, fence: DuplexFence, *, expected_lease_generation: int) -> int:
-        self._validate_fence(fence)
-        return self.lease.resume(
-            self._clock(),
-            expected_generation=expected_lease_generation,
-        )
+    def resume_lease(self, *, expected_lease_generation: int) -> int:
+        self._validate_fence(self.fence)
+        return self.lease.resume(self._clock(), expected_generation=expected_lease_generation)
 
-    def begin_operation(self, fence: DuplexFence, operation_id: str) -> None:
+    def begin_lease_operation(self, fence: DuplexFence, operation_id: str) -> None:
         self._validate_fence(fence)
         self.lease.begin_operation(self._clock(), operation_id)
 
-    def end_operation(self, fence: DuplexFence, operation_id: str) -> None:
-        self._validate_fence(fence)
+    def end_lease_operation(self, operation_id: str) -> None:
+        self._validate_fence(self.fence)
         self.lease.end_operation(self._clock(), operation_id)
 
-    def replace_session_config(self, session_config: dict[str, Any]) -> None:
-        self.session_config = dict(session_config)
-        self.config_generation += 1
-
-    def replace_runtime_config(self, runtime_config: dict[str, Any]) -> None:
-        self.runtime_config = dict(runtime_config)
-        self.config_generation += 1
-
-    def replace_configs(
-        self,
-        *,
-        session_config: dict[str, Any] | None = None,
-        runtime_config: dict[str, Any] | None = None,
-    ) -> None:
-        """Atomically publish one validated configuration generation."""
-        if session_config is None and runtime_config is None:
-            return
-        next_session_config = self.session_config if session_config is None else dict(session_config)
-        next_runtime_config = self.runtime_config if runtime_config is None else dict(runtime_config)
-        self.session_config = next_session_config
-        self.runtime_config = next_runtime_config
-        self.config_generation += 1
+    # ---- stage request resources ----
 
     def reserve_stage_request(self, stage_id: int, request_id: str, *, fence: DuplexFence) -> None:
         self._validate_fence(fence)
@@ -264,12 +264,10 @@ class DuplexSessionResources:
         resource = self.request_resources[(stage_id, request_id)]
         resource.fence = fence
         resource.submitted = True
-        self.stage_bindings[stage_id] = DuplexStageBinding(request_id=request_id, fence=fence)
 
-    def stage_request_ids(self, fence: DuplexFence | None = None) -> list[str]:
-        return [
-            binding.request_id for binding in self.stage_bindings.values() if fence is None or binding.fence == fence
-        ]
+    def stage_request_submitted(self, stage_id: int, request_id: str) -> bool:
+        resource = self.request_resources.get((stage_id, request_id))
+        return resource is not None and resource.submitted
 
     def resource_request_ids(
         self,
@@ -289,28 +287,31 @@ class DuplexSessionResources:
         released = set(request_ids)
         if not released:
             return
-        self.stage_bindings = {
-            stage_id: binding for stage_id, binding in self.stage_bindings.items() if binding.request_id not in released
-        }
         self.request_resources = {
             resource_key: resource
             for resource_key, resource in self.request_resources.items()
             if resource.request_id not in released
         }
 
-    def prepare_append(self, *, mode: DuplexInputMode, fence: DuplexFence) -> DuplexAppendReservation:
-        if mode not in self.capabilities.input_modes:
-            raise ValueError(f"Duplex input mode {mode.value!r} is not supported by session {self.session_id}")
+    def release_all_requests(self) -> list[str]:
+        """Drop every reserved/submitted stage request; returns their ids for stage cleanup."""
+        stale = self.resource_request_ids()
+        self.request_resources.clear()
+        return stale
+
+    # ---- append sequencing ----
+
+    def prepare_append(self, fence: DuplexFence) -> DuplexAppendReservation:
         self._validate_fence(fence)
-        input_seq = 0 if fence.epoch != self.fence.epoch else self.input_seq
-        input_turn_seq = 0 if fence.epoch != self.fence.epoch else self.input_turn_seq
-        append_turn_key = None if fence.epoch != self.fence.epoch else self._append_turn_key
-        turn_key = (fence.epoch, fence.turn_id, fence.response_seq)
+        same_epoch = fence.epoch == self.accepted_fence.epoch
+        input_seq = self.input_seq if same_epoch else 0
+        input_turn_seq = self.input_turn_seq if same_epoch else 0
+        append_turn_key = self._append_turn_key if same_epoch else None
+        turn_key = (fence.epoch, fence.turn_id, 0)
         turn_seq = input_turn_seq + 1 if turn_key == append_turn_key else 1
         return DuplexAppendReservation(
             fence=fence,
-            mode=mode,
-            base_fence=self.fence,
+            base_fence=self.accepted_fence,
             base_input_seq=self.input_seq,
             base_input_turn_seq=self.input_turn_seq,
             base_append_turn_key=self._append_turn_key,
@@ -323,7 +324,7 @@ class DuplexSessionResources:
 
     def commit_append(self, reservation: DuplexAppendReservation) -> DuplexInputAppend:
         if (
-            self.fence != reservation.base_fence
+            self.accepted_fence != reservation.base_fence
             or self.input_seq != reservation.base_input_seq
             or self.input_turn_seq != reservation.base_input_turn_seq
             or self._append_turn_key != reservation.base_append_turn_key
@@ -332,21 +333,13 @@ class DuplexSessionResources:
         self.accept_fence(reservation.fence)
         self.input_seq = reservation.update.seq
         self.input_turn_seq = reservation.update.turn_seq
-        self._append_turn_key = (
-            reservation.fence.epoch,
-            reservation.fence.turn_id,
-            reservation.fence.response_seq,
-        )
+        self._append_turn_key = (reservation.fence.epoch, reservation.fence.turn_id, 0)
         return reservation.update
 
-    def append_input(self, *, mode: DuplexInputMode, fence: DuplexFence) -> DuplexInputAppend:
-        return self.commit_append(self.prepare_append(mode=mode, fence=fence))
+    # ---- cancel / close of stage resources ----
 
     def release_fence(self, fence: DuplexFence) -> list[str]:
         stale = self.resource_request_ids(fence)
-        self.stage_bindings = {
-            stage_id: binding for stage_id, binding in self.stage_bindings.items() if binding.fence != fence
-        }
         self.request_resources = {
             resource_key: resource
             for resource_key, resource in self.request_resources.items()
@@ -361,106 +354,32 @@ class DuplexSessionResources:
 
     def prepare_cancel_fence(self, cancelled_fence: DuplexFence, next_fence: DuplexFence) -> list[str]:
         """Advance the cancellation fence without dropping cleanup records."""
-        if cancelled_fence.session_id != self.session_id or cancelled_fence.incarnation != self.fence.incarnation:
-            raise DuplexFenceMismatchError(self.fence, cancelled_fence)
+        current = self.accepted_fence
+        if cancelled_fence.session_id != self.session_id or cancelled_fence.incarnation != current.incarnation:
+            raise DuplexFenceMismatchError(current, cancelled_fence)
         if (
             next_fence.session_id != self.session_id
-            or next_fence.incarnation != self.fence.incarnation
+            or next_fence.incarnation != current.incarnation
             or next_fence.epoch <= cancelled_fence.epoch
         ):
             raise DuplexFenceMismatchError(cancelled_fence, next_fence)
-        current_key = (self.fence.epoch, self.fence.turn_id, self.fence.response_seq)
-        cancelled_key = (cancelled_fence.epoch, cancelled_fence.turn_id, cancelled_fence.response_seq)
-        next_key = (next_fence.epoch, next_fence.turn_id, next_fence.response_seq)
+        current_key = (current.epoch, current.turn_id)
+        cancelled_key = (cancelled_fence.epoch, cancelled_fence.turn_id)
+        next_key = (next_fence.epoch, next_fence.turn_id)
         if cancelled_key > current_key:
-            raise DuplexFenceMismatchError(self.fence, cancelled_fence)
+            raise DuplexFenceMismatchError(current, cancelled_fence)
         if next_key > current_key:
             self.accept_fence(next_fence)
         return self.resource_request_ids(cancelled_fence)
 
-    def begin_close(self, fence: DuplexFence, *, reason: str) -> bool:
-        """Make close irreversible while retaining resources for cleanup retry."""
-        self.accept_fence(fence)
+    def begin_close(self, *, reason: str) -> bool:
+        """Make close irreversible while retaining stage resources for cleanup retry."""
+        self.accept_fence(self.fence)
         if self.lease.terminal_reason is not None:
             return True
         return self.lease.mark_terminal(reason)
 
-    def finalize_close(self) -> list[str]:
-        return self.close()
-
-    def close(self, fence: DuplexFence | None = None) -> list[str]:
-        if fence is not None:
-            self.accept_fence(fence)
-        stale = self.resource_request_ids()
-        self.stage_bindings.clear()
-        self.request_resources.clear()
-        return stale
-
-    def terminate(self, fence: DuplexFence, *, reason: str) -> bool:
-        if not self.begin_close(fence, reason=reason):
-            return False
-        self.finalize_close()
-        return True
-
-
-@dataclass
-class DuplexEngineSession:
-    """The one session state: serving-side ledgers plus engine-side resources.
-
-    Owned and mutated only by its ``DuplexSessionRunner`` on the orchestrator loop.
-    """
-
-    session_id: str
-    config: DuplexSessionConfig
-    capabilities: DuplexCapabilities = field(default_factory=DuplexCapabilities)
-    incarnation: int = 0
-    state: DuplexSessionState = DuplexSessionState.OPEN
-    turn_state: DuplexTurnState = DuplexTurnState.IDLE
-    epoch: int = 0
-    turn_id: int = 0
-    _input: InputBufferState = field(default_factory=InputBufferState, repr=False)
-    _response: ResponseState = field(default_factory=ResponseState, repr=False)
-    _playback: PlaybackLedger = field(default_factory=PlaybackLedger, repr=False)
-    _conversation: ConversationHistory = field(default_factory=ConversationHistory, repr=False)
-    resources: DuplexSessionResources = field(default=None, repr=False)  # type: ignore[assignment]
-    model_state: DuplexModelSessionState | None = field(default=None, repr=False)
-    projector: object | None = field(default=None, repr=False)
-    created_monotonic: float = field(default_factory=time.monotonic)
-
-    def __post_init__(self) -> None:
-        if self.resources is None:
-            self.resources = DuplexSessionResources(
-                fence=self.fence,
-                lease=DuplexLeaseState(config=DuplexLeaseConfig(), generation=0, last_activity=time.monotonic()),
-                _clock=time.monotonic,
-            )
-        else:
-            self.resources.accept_fence(self.fence)
-
-    # ---- identity ----
-
-    @property
-    def fence(self) -> DuplexFence:
-        return DuplexFence(
-            self.session_id,
-            epoch=self.epoch,
-            turn_id=self.turn_id,
-            incarnation=self.incarnation,
-        )
-
-    def sync_fence(self) -> DuplexFence:
-        """Publish the current (epoch, turn_id) identity to the engine resources."""
-        fence = self.fence
-        self.resources.accept_fence(fence)
-        return fence
-
-    @property
-    def lease_generation(self) -> int:
-        return self.resources.lease.generation
-
-    @property
-    def config_generation(self) -> int:
-        return self.resources.config_generation
+    # ---- configuration ----
 
     @property
     def response_config(self) -> DuplexSessionConfig:
@@ -474,10 +393,11 @@ class DuplexEngineSession:
 
     @property
     def runtime_config(self) -> Mapping[str, object]:
-        return MappingProxyType(dict(self.resources.runtime_config))
+        return MappingProxyType(dict(self._runtime_config))
 
     def replace_runtime_config(self, runtime_config: Mapping[str, object]) -> None:
-        self.resources.replace_configs(runtime_config=dict(runtime_config))
+        self._runtime_config = dict(runtime_config)
+        self.config_generation += 1
 
     @property
     def input_commit_seq(self) -> int:
@@ -630,7 +550,7 @@ class DuplexEngineSession:
 
     def replace_config(self, config: DuplexSessionConfig) -> None:
         self.config = config
-        self.resources.replace_configs(session_config=config.as_dict())
+        self.config_generation += 1
 
     def replace_capabilities(self, capabilities: DuplexCapabilities) -> None:
         self.capabilities = capabilities
@@ -1430,6 +1350,30 @@ class DuplexEngineSession:
         self._clear_response_metrics()
         self._restore_response_config()
 
+    def signal_turn(self, event_type: str, payload: Mapping[str, object] | None = None) -> TurnEvent:
+        """Apply one external turn signal and return the typed ``turn.event``."""
+        payload = payload or {}
+        if event_type == DuplexTurnEventType.USER_STARTED.value:
+            self.transition_turn(DuplexTurnState.USER_SPEAKING)
+        elif event_type == DuplexTurnEventType.USER_COMMITTED.value:
+            self.transition_turn(DuplexTurnState.USER_COMMITTED)
+        elif event_type == DuplexTurnEventType.ASSISTANT_STARTED.value:
+            self.transition_turn(DuplexTurnState.ASSISTANT_GENERATING)
+        elif event_type == DuplexTurnEventType.ASSISTANT_DONE.value:
+            self.transition_turn(DuplexTurnState.IDLE)
+        elif event_type == DuplexTurnEventType.PLAYBACK_ACK.value:
+            played_ms = int(payload.get("played_ms", 0) or 0)
+            committed_ms = payload.get("committed_ms")
+            self.acknowledge_playback(
+                played_ms,
+                int(committed_ms) if isinstance(committed_ms, int | float) else None,
+            )
+        elif event_type == DuplexTurnEventType.BARGE_IN.value:
+            self.transition_turn(DuplexTurnState.BARGE_IN)
+        elif event_type in {DuplexTurnEventType.CLOSE.value, DuplexTurnEventType.TIMEOUT.value}:
+            self.transition_session(DuplexSessionState.CLOSING)
+        return TurnEvent(event=event_type, turn_state=self.turn_state.value)
+
     def as_public_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "id": self.session_id,
@@ -1485,44 +1429,6 @@ class DuplexEngineSession:
         return payload
 
 
-class DuplexTurnController:
-    """Interaction controller that accepts signals from multiple sources."""
-
-    def signal(
-        self,
-        session: DuplexEngineSession,
-        event_type: str,
-        payload: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        payload = payload or {}
-        if event_type == DuplexTurnEventType.USER_STARTED.value:
-            session.transition_turn(DuplexTurnState.USER_SPEAKING)
-        elif event_type == DuplexTurnEventType.USER_COMMITTED.value:
-            session.transition_turn(DuplexTurnState.USER_COMMITTED)
-        elif event_type == DuplexTurnEventType.ASSISTANT_STARTED.value:
-            session.transition_turn(DuplexTurnState.ASSISTANT_GENERATING)
-        elif event_type == DuplexTurnEventType.ASSISTANT_DONE.value:
-            session.transition_turn(DuplexTurnState.IDLE)
-        elif event_type == DuplexTurnEventType.PLAYBACK_ACK.value:
-            played_ms = int(payload.get("played_ms", 0) or 0)
-            committed_ms = payload.get("committed_ms")
-            session.acknowledge_playback(
-                played_ms,
-                int(committed_ms) if isinstance(committed_ms, int | float) else None,
-            )
-        elif event_type == DuplexTurnEventType.BARGE_IN.value:
-            session.transition_turn(DuplexTurnState.BARGE_IN)
-        elif event_type in {DuplexTurnEventType.CLOSE.value, DuplexTurnEventType.TIMEOUT.value}:
-            session.transition_session(DuplexSessionState.CLOSING)
-        return {
-            "type": "turn.event",
-            "session_id": session.session_id,
-            "event": event_type,
-            "turn_state": session.turn_state.value,
-            "epoch": session.epoch,
-        }
-
-
 __all__ = [
     "ConversationHistory",
     "DuplexAppendReservation",
@@ -1530,9 +1436,6 @@ __all__ = [
     "DuplexFenceMismatchError",
     "DuplexInputAppend",
     "DuplexRequestResource",
-    "DuplexSessionResources",
-    "DuplexStageBinding",
-    "DuplexTurnController",
     "InputBufferState",
     "PlaybackLedger",
     "ResponseState",

@@ -41,7 +41,6 @@ from vllm_omni.engine.duplex.events import (
     ContentPartDone,
     DuplexEvent,
     DuplexRawEvent,
-    ErrorEvent,
     FunctionCallArgumentsDelta,
     FunctionCallArgumentsDone,
     InputCleared,
@@ -57,16 +56,12 @@ from vllm_omni.engine.duplex.events import (
     OutputAudioCleared,
     OutputItemAdded,
     OutputItemDone,
-    OverlapDecision,
-    PlaybackAcknowledged,
     RateLimitsUpdated,
     ResponseCreated,
     ResponseDone,
     RuntimeControl,
     SessionClosed,
     SessionCreated,
-    SessionExpired,
-    SessionHeartbeatAck,
     SessionReplaced,
     SessionResumed,
     SessionResyncRequired,
@@ -78,7 +73,6 @@ from vllm_omni.engine.duplex.events import (
     TextDone,
     TranscriptDelta,
     TranscriptDone,
-    TurnEvent,
     error_event,
 )
 from vllm_omni.engine.duplex.realtime_commands import (
@@ -143,8 +137,6 @@ class RealtimeProjectionState:
     defaults: RealtimeInputDefaults = field(default_factory=RealtimeInputDefaults)
     #: The first ``session.created`` also emits ``session.updated`` (client sent session.update to open).
     initial_session_update: bool = False
-    hold_output_until_session_created: bool = True
-    held_events: list[DuplexEvent] = field(default_factory=list)
     # ---- response / item projection ----
     response_states: dict[str | int, _ResponseProjection] = field(default_factory=dict)
     item_truncation_cursors: dict[str, tuple[int, int]] = field(default_factory=dict)
@@ -749,24 +741,6 @@ def project_internal_event(state: RealtimeProjectionState, event: Mapping[str, A
     return _project(state, dict(event))
 
 
-def _error_from_internal(event: Mapping[str, Any]) -> ErrorEvent:
-    raw_error = event.get("error")
-    if isinstance(raw_error, Mapping):
-        # Already shaped like the wire ``error`` object.
-        known = {"type", "code", "message", "event_id", "param"}
-        return error_event(
-            str(raw_error.get("code") or event.get("code") or "duplex_error"),
-            str(raw_error.get("message") or "Duplex runtime error"),
-            event_id=raw_error.get("event_id") or event.get("realtime_event_id"),
-            param=raw_error.get("param"),
-            extra={k: v for k, v in raw_error.items() if k not in known},
-        )
-    message = str(raw_error or event.get("message") or "Duplex runtime error")
-    code = str(event.get("code") or "duplex_error")
-    extra = {k: event[k] for k in ("retryable", "runtime_control") if k in event}
-    return error_event(code, message, event_id=event.get("realtime_event_id"), param=event.get("param"), extra=extra)
-
-
 def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[DuplexEvent]:
     event_type = event.get("type")
     if event_type == "session.created":
@@ -783,15 +757,10 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
         if state.initial_session_update:
             events.append(SessionUpdated(session=session))
             state.initial_session_update = False
-        state.hold_output_until_session_created = False
-        if state.held_events:
-            events.extend(state.held_events)
-            state.held_events = []
         return events
     if event_type == "session.updated":
         return [SessionUpdated(session=realtime_session_payload(state, event.get("session")))]
     if event_type == "session.resumed":
-        state.hold_output_until_session_created = False
         return [
             SessionResumed(
                 session=realtime_session_payload(state, event.get("session")),
@@ -801,20 +770,14 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
                 resume_token=_str_or_none(event.get("resume_token")),
             )
         ]
-    if event_type == "session.heartbeat_ack":
-        return [SessionHeartbeatAck()]
     if event_type == "session.replaced":
         return [SessionReplaced(attachment_generation=_int_or(event.get("attachment_generation")))]
     if event_type == "session.resync_required":
         return [SessionResyncRequired(reason=str(event.get("reason") or "journal_gap"))]
-    if event_type == "session.expired":
-        return [SessionExpired(reason=str(event.get("reason") or "expired"), details=event)]
     if event_type == "session.closed":
         return [SessionClosed(reason=str(event.get("reason") or "closed"), details=event)]
     if event_type == "runtime.control":
         return [RuntimeControl(details=event)]
-    if event_type == "turn.event":
-        return [TurnEvent(event=str(event.get("event") or ""), turn_state=str(event.get("turn_state") or ""))]
     if event_type == "response.created":
         response_id = event.get("response_id")
         if isinstance(response_id, str) and response_id:
@@ -854,15 +817,6 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
                 response_id=_str_or_none(response_id),
                 item_id=_response_item_id(state, response_id),
                 metadata=_response_speak_metadata(event),
-            )
-        ]
-    if event_type == "overlap.decision":
-        return [
-            OverlapDecision(
-                policy=_str_or_none(event.get("policy")),
-                action=_str_or_none(event.get("action")),
-                reason=_str_or_none(event.get("reason")),
-                details=event,
             )
         ]
     if event_type == "response.output_audio.delta":
@@ -961,7 +915,7 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
             events.append(transcription_event)
         events.append(_conversation_item_done_event(state, item))
         return events
-    if event_type in {"input.cancelled", "input_audio_buffer.cleared"}:
+    if event_type == "input.cancelled":
         return [InputCleared()]
     if event_type == "audio.cancelled":
         response_id = event.get("response_id")
@@ -999,8 +953,6 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
         if isinstance(response_id, str) and response_id == state.active_response_id:
             state.active_response_id = None
         return events
-    if event_type == "playback.acknowledged":
-        return [PlaybackAcknowledged(details=event)]
     if event_type == "conversation.item.created":
         item = event.get("item")
         if isinstance(item, dict) and isinstance(item.get("id"), str):
@@ -1055,8 +1007,6 @@ def _project(state: RealtimeProjectionState, event: dict[str, Any]) -> list[Dupl
         )
     if event_type == "function_call.done":
         return _function_call_done_events(state, event)
-    if event_type == "error":
-        return [_error_from_internal(event)]
     if event_type == "input_audio_buffer.speech_started":
         return [
             SpeechStarted(

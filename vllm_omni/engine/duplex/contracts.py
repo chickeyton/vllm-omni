@@ -25,7 +25,6 @@ class DuplexFence:
     session_id: str
     epoch: int = 0
     turn_id: int = 0
-    response_seq: int = 0
     incarnation: int = 0
 
 
@@ -34,23 +33,8 @@ class SessionMode(str, Enum):
     DUPLEX = "duplex"
 
 
-class DuplexInputMode(str, Enum):
-    APPEND_TOKENS = "append_tokens"
-    APPEND_AUDIO_CHUNK = "append_audio_chunk"
-    REPLACE_LATEST_CHUNK = "replace_latest_chunk"
-    REENCODE_CONTEXT = "reencode_context"
-    ROLLBACK_TO_CHECKPOINT = "rollback_to_checkpoint"
-    TURN_COMMIT_ONLY = "turn_commit_only"
-
-
 class DuplexOutputAction(str, Enum):
     DIRECT_RESPONSE = "direct_response"
-
-
-@dataclass
-class DuplexRuntimeCapabilities:
-    input_modes: set[DuplexInputMode] = field(default_factory=lambda: {DuplexInputMode.TURN_COMMIT_ONLY})
-    implementation_level: str = "serving_session_adapter"
 
 
 @dataclass(frozen=True)
@@ -205,12 +189,10 @@ def duplex_resource_request_belongs_to_session(request_id: str, session_id: str)
 __all__ = [
     "DuplexFence",
     "DuplexAppendPlan",
-    "DuplexInputMode",
     "DuplexOutputAction",
     "DuplexOutputContext",
     "DuplexOutputDecision",
     "DuplexRequestIdentity",
-    "DuplexRuntimeCapabilities",
     "DuplexStagePort",
     "DuplexStageRequestContext",
     "DuplexStageSubmission",

@@ -15,14 +15,13 @@ from __future__ import annotations
 import asyncio
 import queue
 import uuid
-from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 from vllm.logger import init_logger
 
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.engine.duplex.config import DuplexCapabilities
+from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
 from vllm_omni.engine.duplex.messages import (
     CloseDuplexSessionMessage,
     DuplexControlResultMessage,
@@ -91,7 +90,8 @@ class DuplexOmniEngine(OmniEngineBase):
     """Engine for full-duplex models; sessions run inside ``DuplexOrchestrator``."""
 
     plugin: DuplexModelPlugin | None = None
-    duplex_session_config: DuplexSessionRuntimeConfig = DuplexSessionRuntimeConfig()
+    #: Set by ``_validate_deployment`` from the deploy config before any stage starts.
+    duplex_session_config: DuplexSessionRuntimeConfig
 
     # ---- orchestrator construction (orchestrator thread) ----
 
@@ -162,17 +162,18 @@ class DuplexOmniEngine(OmniEngineBase):
                 session_id=session_id,
             )
         if not result.ok:
-            error = result.error
-            code = error.code if error is not None else "internal_error"
-            text = error.message if error is not None else f"duplex {operation} failed"
-            retryable = bool(error.retryable) if error is not None else False
-            raise DuplexSessionError(text, code=code, retryable=retryable, session_id=session_id)
+            raise DuplexSessionError(
+                result.error_message or f"duplex {operation} failed",
+                code=result.error_code or "internal_error",
+                retryable=result.error_retryable,
+                session_id=session_id,
+            )
         return result
 
-    def open_session(
+    def _open_session(
         self,
         session_id: str,
-        session_config: Mapping[str, object],
+        session_config: DuplexSessionConfig,
         *,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
@@ -181,7 +182,7 @@ class DuplexOmniEngine(OmniEngineBase):
             OpenDuplexSessionMessage(
                 control_id=control_id,
                 session_id=session_id,
-                session_config=dict(session_config),
+                session_config=session_config,
             ),
             control_id=control_id,
             operation="open",
@@ -192,14 +193,14 @@ class DuplexOmniEngine(OmniEngineBase):
     async def open_session_async(
         self,
         session_id: str,
-        session_config: Mapping[str, object],
+        session_config: DuplexSessionConfig,
         *,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: self.open_session(session_id, session_config, timeout=timeout))
+        return await loop.run_in_executor(None, lambda: self._open_session(session_id, session_config, timeout=timeout))
 
-    def close_session(
+    def _close_session(
         self,
         session_id: str,
         incarnation: int,
@@ -232,10 +233,10 @@ class DuplexOmniEngine(OmniEngineBase):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self.close_session(session_id, incarnation, reason=reason, timeout=timeout),
+            lambda: self._close_session(session_id, incarnation, reason=reason, timeout=timeout),
         )
 
-    def resume_session(
+    def _resume_session(
         self,
         session_id: str,
         incarnation: int,
@@ -268,7 +269,7 @@ class DuplexOmniEngine(OmniEngineBase):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self.resume_session(
+            lambda: self._resume_session(
                 session_id,
                 incarnation,
                 expected_lease_generation=expected_lease_generation,
@@ -276,7 +277,7 @@ class DuplexOmniEngine(OmniEngineBase):
             ),
         )
 
-    def touch_session(
+    def _touch_session(
         self,
         session_id: str,
         incarnation: int,
@@ -309,10 +310,10 @@ class DuplexOmniEngine(OmniEngineBase):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self.touch_session(session_id, incarnation, activity=activity, timeout=timeout),
+            lambda: self._touch_session(session_id, incarnation, activity=activity, timeout=timeout),
         )
 
-    def submit_command(self, session_id: str, incarnation: int, command: DuplexCommand) -> None:
+    def _submit_command(self, session_id: str, incarnation: int, command: DuplexCommand) -> None:
         """One-way: enqueue a session command in caller order (blocks only on queue backpressure)."""
         if not self.is_alive():
             raise DuplexSessionError("engine is not alive", code="engine_dead", session_id=session_id)
@@ -326,7 +327,7 @@ class DuplexOmniEngine(OmniEngineBase):
 
     async def submit_command_async(self, session_id: str, incarnation: int, command: DuplexCommand) -> None:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: self.submit_command(session_id, incarnation, command))
+        await loop.run_in_executor(None, lambda: self._submit_command(session_id, incarnation, command))
 
 
 __all__ = ["DuplexOmniEngine", "encode_audio"]

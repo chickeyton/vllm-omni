@@ -20,7 +20,6 @@ from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConf
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
     DuplexFence,
-    DuplexInputMode,
     DuplexOutputDecision,
 )
 from vllm_omni.engine.duplex.plugin import (
@@ -159,14 +158,11 @@ class PersonaPlexDuplexPlugin(DuplexModelPlugin):
         runtime_config: dict[str, Any],
         seq: int,
         turn_seq: int,
-        mode: DuplexInputMode,
         payload: object,
         final: bool,
         sampling_params: object,
     ) -> DuplexAppendPlan:
         del sampling_params
-        if mode is not DuplexInputMode.APPEND_AUDIO_CHUNK:
-            raise ValueError(f"PersonaPlex does not support duplex input mode {mode.value!r}")
         normalized_payload = _validated_frame_payload(payload)
         prefill_slots = runtime_config.get("personaplex_prefill_slots", 0)
         try:
@@ -187,10 +183,9 @@ class PersonaPlexDuplexPlugin(DuplexModelPlugin):
                         "incarnation": fence.incarnation,
                         "epoch": fence.epoch,
                         "turn_id": fence.turn_id,
-                        "response_seq": fence.response_seq,
                         "seq": seq,
                         "turn_seq": turn_seq,
-                        "mode": mode.value,
+                        "mode": "append_audio_chunk",
                         "payload": normalized_payload,
                         "final": final,
                         "session_config": dict(session_config),
@@ -247,9 +242,7 @@ class PersonaPlexDuplexPlugin(DuplexModelPlugin):
             supports_audio_truncate=False,
             requires_model_runner_kv=True,
             requires_native_stage_role=True,
-            implementation_level="model_native_duplex",
             adapter_patterns=["scheduler_data_plane"],
-            input_modes=["append_audio_chunk"],
             signal_sources=["model_native", "client_event"],
             stage_handoff_transport="scheduler_data_plane",
             chunk_period_ms=80,

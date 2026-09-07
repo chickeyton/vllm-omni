@@ -72,7 +72,6 @@ from vllm_omni.engine.duplex.config import (
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
     DuplexFence,
-    DuplexInputMode,
     DuplexOutputContext,
     DuplexOutputDecision,
     DuplexStagePort,
@@ -80,7 +79,18 @@ from vllm_omni.engine.duplex.contracts import (
     duplex_data_plane_request_info,
     duplex_resource_request_id,
 )
-from vllm_omni.engine.duplex.events import DOMAIN_TERMINAL_EVENTS, MODEL_OUTPUT_EVENTS, DuplexEvent
+from vllm_omni.engine.duplex.events import (
+    DOMAIN_TERMINAL_EVENTS,
+    MODEL_OUTPUT_EVENTS,
+    DuplexEvent,
+    ErrorEvent,
+    InputCleared,
+    OverlapDecision,
+    PlaybackAcknowledged,
+    SessionExpired,
+    SessionHeartbeatAck,
+    error_event,
+)
 from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.plugin import (
     DuplexModelPlugin,
@@ -103,11 +113,7 @@ from vllm_omni.engine.duplex.realtime_events import (
     resolve_truncate_item,
     retrieve_item_events,
 )
-from vllm_omni.engine.duplex.session import (
-    DuplexEngineSession,
-    DuplexFenceMismatchError,
-    DuplexTurnController,
-)
+from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
     ServerTurnDetector,
@@ -134,7 +140,6 @@ logger = init_logger(__name__)
 @dataclass(frozen=True, slots=True)
 class DuplexAppendTaskMeta:
     epoch: int
-    mode: str
     final: bool
     response_bound: bool
 
@@ -152,11 +157,10 @@ class DuplexSessionTasks:
         task: asyncio.Task[bool],
         *,
         epoch: int,
-        mode: str,
         final: bool,
         response_bound: bool,
     ) -> None:
-        self.append_tasks[task] = DuplexAppendTaskMeta(epoch, mode, final, response_bound)
+        self.append_tasks[task] = DuplexAppendTaskMeta(epoch, final, response_bound)
         task.add_done_callback(self.append_tasks.pop)
 
     def has_response_bound_append_tasks(self) -> bool:
@@ -236,7 +240,6 @@ class DuplexSessionRunner:
             session.model_state = plugin.create_session_state()
         self.model_state: DuplexModelSessionState = session.model_state
         self.tasks = DuplexSessionTasks()
-        self._turn_controller = DuplexTurnController()
         self._mailbox: asyncio.Queue[DuplexCommand | _StageOutput | _StageFailure | _Internal] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -250,9 +253,7 @@ class DuplexSessionRunner:
         self._turn_detection_config: TurnDetectionConfig | None = None
         self._turn_detector: ServerTurnDetector | None = None
         self._pending_turn_detection: PendingTurnDetectionUpdate | None = None
-        self._projector: RealtimeProjectionState | None = (
-            session.projector if isinstance(session.projector, RealtimeProjectionState) else None
-        )
+        self._projector: RealtimeProjectionState | None = session.projector
 
     # ------------------------------------------------------------------ #
     # Public interface                                                   #
@@ -348,14 +349,7 @@ class DuplexSessionRunner:
         self._begin_close(reason)
         if not self._closed_emitted:
             self._closed_emitted = True
-            self.emit(
-                {
-                    "type": "session.expired",
-                    "session_id": session.session_id,
-                    "incarnation": session.incarnation,
-                    "reason": reason,
-                }
-            )
+            self._emit_events([SessionExpired(reason=reason)])
         await self.tasks.cancel_append_tasks()
         await self._cancel_data_plane_stream()
         active_response_task = self.tasks.active_response_task
@@ -394,7 +388,7 @@ class DuplexSessionRunner:
                 raise
             except Exception as exc:
                 logger.exception("Duplex session %s failed handling %r: %s", self.session.session_id, item, exc)
-                self.emit({"type": "error", "error": str(exc), "code": "internal_error"})
+                self._emit_error("internal_error", str(exc))
 
     async def _stop_worker(self) -> None:
         worker = self._worker
@@ -475,7 +469,7 @@ class DuplexSessionRunner:
         elif event_type == "turn.signal":
             await self._on_turn_signal(payload)
         else:
-            self.emit({"type": "error", "error": f"Unknown duplex event: {event_type}", "code": "unknown_event"})
+            self._emit_error("unknown_event", f"Unknown duplex event: {event_type}")
 
     # ------------------------------------------------------------------ #
     # Commands                                                           #
@@ -488,15 +482,10 @@ class DuplexSessionRunner:
             await self._on_append_audio(command.payload())
         elif isinstance(command, AppendText):
             session.mark_user_input_activity()
-            self.emit(
-                self._with_event_id(
-                    {
-                        "type": "error",
-                        "error": "The selected native duplex runtime accepts audio append only",
-                        "code": "native_text_append_unsupported",
-                    },
-                    command,
-                )
+            self._emit_error(
+                "native_text_append_unsupported",
+                "The selected native duplex runtime accepts audio append only",
+                event_id=command.event_id,
             )
         elif isinstance(command, Commit):
             session.release_pending_turn()
@@ -566,9 +555,7 @@ class DuplexSessionRunner:
         elif isinstance(command, CloseSession):
             await self._on_close_command(command.reason)
         else:
-            self.emit(
-                {"type": "error", "error": f"Unknown duplex command: {type(command).__name__}", "code": "unknown_event"}
-            )
+            self._emit_error("unknown_event", f"Unknown duplex command: {type(command).__name__}")
 
     async def _on_close_command(self, reason: str) -> None:
         session = self.session
@@ -577,20 +564,17 @@ class DuplexSessionRunner:
         # control RPC) releases the admission slot through the manager's
         # request-cleanup path; the runner is torn down and the stage resources
         # are cleaned up by the orchestrator/reaper.
-        stale = session.resources.resource_request_ids()
+        stale = session.resource_request_ids()
         if stale:
             self.manager.close_sessions_for_request_ids(stale, abort=True)
 
     def _on_heartbeat(self, command: Heartbeat) -> None:
-        session = self.session
         try:
-            session.resources.touch(session.fence, DuplexLeaseActivity.HEARTBEAT)
+            self.session.touch_lease(DuplexLeaseActivity.HEARTBEAT)
         except Exception as exc:
-            self.emit(
-                self._with_event_id({"type": "error", "error": str(exc), "code": "runtime_touch_failed"}, command)
-            )
+            self._emit_error("runtime_touch_failed", str(exc), event_id=command.event_id)
             return
-        self.emit({"type": "session.heartbeat_ack", "session_id": session.session_id})
+        self._emit_events([SessionHeartbeatAck()])
 
     def _on_clear_input(self) -> None:
         session = self.session
@@ -600,27 +584,13 @@ class DuplexSessionRunner:
         model_state.input_since_commit = False
         model_state.speech_since_commit = False
         model_state.clear_committed_audio()
-        cancelled = session.cancel_pending_input()
+        session.cancel_pending_input()
         projector = self._projector
         if projector is not None:
             from vllm_omni.engine.duplex.realtime_events import clear_input_buffer
 
             clear_input_buffer(projector)
-        self.emit(
-            {
-                "type": "input_audio_buffer.cleared",
-                "session_id": session.session_id,
-                "epoch": session.epoch,
-                "drained_input_events": 0,
-                "cancelled": cancelled,
-            }
-        )
-
-    @staticmethod
-    def _with_event_id(payload: dict[str, object], command: DuplexCommand | None) -> dict[str, object]:
-        if command is not None and command.event_id is not None:
-            payload = {**payload, "realtime_event_id": command.event_id}
-        return payload
+        self._emit_events([InputCleared()])
 
     # ------------------------------------------------------------------ #
     # Emission (was emit_event + _apply_outbound_session_event + writer) #
@@ -640,8 +610,26 @@ class DuplexSessionRunner:
         for event in events:
             self.manager.emit(self.session, event)
 
+    def _emit_error(
+        self,
+        code: str,
+        message: str,
+        *,
+        event_id: object | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        """Send one typed ``error`` event (``event_id`` is the client event it answers)."""
+        extra = {} if retryable is None else {"retryable": retryable}
+        self._emit_events([error_event(code, message, event_id=event_id, extra=extra)])
+
     def emit(self, payload: dict[str, object]) -> None:
-        """Apply the domain effects of an internal event, then project it to typed events and send them."""
+        """Apply the domain effects of an internal event, then project it to typed events and send them.
+
+        Only events with domain effects (response / cancel / close terminals) or
+        Realtime projection state (response items, content parts) still travel as
+        internal dictionaries; stateless events are constructed typed at the
+        emit site.
+        """
         accepted, deferred_overlap_payload = self._apply_outbound_session_event(payload)
         if not accepted:
             return
@@ -880,13 +868,8 @@ class DuplexSessionRunner:
         return payload
 
     @staticmethod
-    def _barge_in_unsupported_error(session: DuplexEngineSession) -> dict[str, object]:
-        return {
-            "type": "error",
-            "session_id": session.session_id,
-            "code": "barge_in_unsupported",
-            "error": "Barge-in is not supported by this duplex model",
-        }
+    def _barge_in_unsupported_error() -> ErrorEvent:
+        return error_event("barge_in_unsupported", "Barge-in is not supported by this duplex model")
 
     @staticmethod
     def _audio_payload_size_bytes(payload: Mapping[str, object]) -> int:
@@ -1331,14 +1314,24 @@ class DuplexSessionRunner:
 
     def _emit_overlap_decision(self, decision: dict[str, object]) -> None:
         session = self.session
-        self.emit(
-            {
-                "type": "overlap.decision",
-                "session_id": session.session_id,
-                "epoch": session.epoch,
-                "policy": session.config.overlap_policy,
-                **decision,
-            }
+        details: dict[str, object] = {
+            "type": "overlap.decision",
+            "session_id": session.session_id,
+            "epoch": session.epoch,
+            "policy": session.config.overlap_policy,
+            **decision,
+        }
+        action = decision.get("action")
+        reason = decision.get("reason")
+        self._emit_events(
+            [
+                OverlapDecision(
+                    policy=session.config.overlap_policy,
+                    action=action if isinstance(action, str) else None,
+                    reason=reason if isinstance(reason, str) else None,
+                    details=details,
+                )
+            ]
         )
 
     # ------------------------------------------------------------------ #
@@ -1378,11 +1371,11 @@ class DuplexSessionRunner:
                 audio_end_ms=event.get("audio_end_ms") if isinstance(event.get("audio_end_ms"), int) else None,
             )
         except ServerVADUnavailableError as exc:
-            self.emit({"type": "error", "code": "server_vad_unavailable", "error": str(exc)})
+            self._emit_error("server_vad_unavailable", str(exc))
             self._turn_detector = None
             return None
         except ValueError as exc:
-            self.emit({"type": "error", "code": "bad_audio", "error": str(exc)})
+            self._emit_error("bad_audio", str(exc))
             return None
         apply_turn_detection_result(event, result)
         return result
@@ -1397,10 +1390,10 @@ class DuplexSessionRunner:
         session.mark_user_input_activity()
         audio = event.get("audio") or event.get("data")
         if not isinstance(audio, str):
-            self.emit({"type": "error", "error": "input.audio.append requires audio", "code": "bad_event"})
+            self._emit_error("bad_event", "input.audio.append requires audio")
             return
         if not session.capabilities.supports_barge_in and self._event_requests_barge_in(event):
-            self.emit(self._barge_in_unsupported_error(session))
+            self._emit_events([self._barge_in_unsupported_error()])
             event = dict(event)
             event.pop("force_barge_in", None)
             for key in ("overlap_action", "overlap"):
@@ -1418,16 +1411,10 @@ class DuplexSessionRunner:
                 sample_rate_hz=sample_rate_hz,
             )
         except ValueError as exc:
-            self.emit({"type": "error", "error": str(exc), "code": "bad_event"})
+            self._emit_error("bad_event", str(exc))
             return
         if isinstance(fmt, str) and fmt.lower() in {"pcm16", "pcm_s16le", "s16le"}:
-            self.emit(
-                {
-                    "type": "error",
-                    "error": "input_audio_buffer.append pcm16 audio could not be decoded",
-                    "code": "bad_audio",
-                }
-            )
+            self._emit_error("bad_audio", "input_audio_buffer.append pcm16 audio could not be decoded")
             return
         event["audio"] = audio
         event["format"] = fmt
@@ -1569,13 +1556,7 @@ class DuplexSessionRunner:
                 raw_audio_bytes,
                 limit=int(self.manager.runtime_config.max_pending_input_bytes_per_session),
             ):
-                self.emit(
-                    {
-                        "type": "error",
-                        "error": "Duplex session pending input exceeds server limit",
-                        "code": "input_backpressure",
-                    }
-                )
+                self._emit_error("input_backpressure", "Duplex session pending input exceeds server limit")
                 return
             # Full-duplex: emit each ~chunk_period of audio so the model runs
             # per-chunk generation without an explicit response.create.
@@ -1588,7 +1569,7 @@ class DuplexSessionRunner:
             )
         except ValueError as exc:
             session.release_input_bytes(raw_audio_bytes)
-            self.emit({"type": "error", "error": str(exc), "code": "bad_event"})
+            self._emit_error("bad_event", str(exc))
             return
         if pcm_reservation is None:
             self._maybe_schedule_vad_commit(vad_result)
@@ -1715,7 +1696,7 @@ class DuplexSessionRunner:
                     if session.active_request_id == self._stage0_request_id(append_epoch):
                         session.clear_request(request_id)
                     if final:
-                        self.emit(self._turn_controller.signal(session, DuplexTurnEventType.USER_STARTED.value))
+                        self._emit_events([session.signal_turn(DuplexTurnEventType.USER_STARTED.value)])
                 return append_ok
             except asyncio.CancelledError:
                 if pcm_reservation is not None:
@@ -1790,7 +1771,6 @@ class DuplexSessionRunner:
         self.tasks.track_append_task(
             task,
             epoch=append_epoch,
-            mode="append_audio_chunk",
             final=final,
             response_bound=final or precreate_response,
         )
@@ -1954,10 +1934,8 @@ class DuplexSessionRunner:
     ) -> dict[str, object] | None:
         """In-process equivalent of ``DuplexControlPlane.handle_append`` + ``append_via_data_plane``."""
         session = self.session
-        resources = session.resources
         if self.stage_port.stage_count == 0:
             raise RuntimeError("duplex_data_plane_has_no_stage")
-        mode = DuplexInputMode.APPEND_AUDIO_CHUNK
         payload_turn = payload_turn_id(payload)
         fence = DuplexFence(
             session.session_id,
@@ -1976,11 +1954,10 @@ class DuplexSessionRunner:
         stage_id = 0
         request_id = self.manager.stage_request_id(fence, stage_id=stage_id)
         try:
-            resources.begin_operation(fence, lease_operation_id)
+            session.begin_lease_operation(fence, lease_operation_id)
             operation_started = True
-            reservation = resources.prepare_append(mode=mode, fence=fence)
-            existing_binding = resources.stage_bindings.get(stage_id)
-            already_submitted = existing_binding is not None and existing_binding.request_id == request_id
+            reservation = session.prepare_append(fence)
+            already_submitted = session.stage_request_submitted(stage_id, request_id)
             request_context = self.manager.ensure_stage_request(session, stage_id=stage_id, fence=fence)
             if request_context is None:
                 raise RuntimeError("duplex_data_plane_has_no_stage")
@@ -1991,7 +1968,6 @@ class DuplexSessionRunner:
                 runtime_config=dict(request_context.runtime_config),
                 seq=reservation.update.seq,
                 turn_seq=reservation.update.turn_seq,
-                mode=mode,
                 payload=payload,
                 final=final,
                 sampling_params=request_context.stage_sampling_params,
@@ -2011,8 +1987,8 @@ class DuplexSessionRunner:
                     expected_epoch is not None and session.epoch != expected_epoch
                 ):
                     raise DuplexFenceMismatchError(session.fence, fence)
-                update = resources.commit_append(reservation)
-                resources.bind_stage_request(stage_id, request_id, fence=fence)
+                update = session.commit_append(reservation)
+                session.bind_stage_request(stage_id, request_id, fence=fence)
             except BaseException:
                 try:
                     await self.stage_port.cleanup([request_id])
@@ -2023,7 +1999,7 @@ class DuplexSessionRunner:
                         cleanup_exc,
                     )
                 raise
-            resources.touch(session.fence, DuplexLeaseActivity.APPEND)
+            session.touch_lease(DuplexLeaseActivity.APPEND)
             return {
                 "ok": True,
                 "operation": "append",
@@ -2034,26 +2010,23 @@ class DuplexSessionRunner:
                         "replica_id": submission_result.replica_id,
                         "result": {
                             "supported": True,
-                            "implementation_level": session.capabilities.implementation_level,
                             "data_plane_append": True,
                             "request_id": request_id,
                             "response_stage_id": request_context.final_stage_id,
                             "seq": update.seq,
                             "turn_id": update.turn_id,
-                            "response_seq": fence.response_seq,
                             "turn_seq": update.turn_seq,
-                            "mode": mode.value,
                             "resumable": True,
                         },
                     }
                 ],
             }
         finally:
-            if operation_started and lease_operation_id in resources.lease.active_operations:
+            if operation_started and lease_operation_id in session.lease.active_operations:
                 try:
-                    resources.end_operation(session.fence, lease_operation_id)
+                    session.end_lease_operation(lease_operation_id)
                 except Exception:
-                    resources.lease.active_operations.discard(lease_operation_id)
+                    session.lease.active_operations.discard(lease_operation_id)
 
     def _start_data_plane_stream(self, result: object) -> bool:
         """Bind the resumable stage request as the session's active data-plane stream."""
@@ -2077,16 +2050,15 @@ class DuplexSessionRunner:
     async def _signal_cancel_fence(self, cancelled_fence: DuplexFence) -> bool:
         """In-process equivalent of the old ``barge_in`` control signal."""
         session = self.session
-        resources = session.resources
         try:
             next_fence = session.sync_fence()
             if next_fence.epoch > cancelled_fence.epoch:
-                stale_request_ids = resources.cancel_fence(cancelled_fence, next_fence)
+                stale_request_ids = session.cancel_fence(cancelled_fence, next_fence)
             else:
                 stale_request_ids = []
             if stale_request_ids:
                 await self.stage_port.cleanup(list(stale_request_ids), abort=True)
-            resources.touch(session.fence, DuplexLeaseActivity.SIGNAL)
+            session.touch_lease(DuplexLeaseActivity.SIGNAL)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2107,25 +2079,14 @@ class DuplexSessionRunner:
             self._closed_emitted = True
             self.emit({"type": "session.closed", "session_id": session.session_id, "reason": reason})
         session.close()
-        stale = session.resources.resource_request_ids()
+        stale = session.resource_request_ids()
         if stale:
             self.manager.close_sessions_for_request_ids(stale, abort=True)
 
     def _send_runtime_error(self, code: str, exc: BaseException) -> None:
-        session = self.session
-        retryable = False
-        message = str(exc)
         if isinstance(exc, DuplexRuntimeConfigError):
             code = exc.code
-        payload: dict[str, object] = {
-            "type": "error",
-            "code": code,
-            "error": message,
-            "retryable": retryable,
-            "session_id": session.session_id,
-            "epoch": session.epoch,
-        }
-        self.emit(payload)
+        self._emit_error(code, str(exc), retryable=False)
 
     @staticmethod
     def _data_plane_outputs_finished(result: object) -> bool:
@@ -2228,7 +2189,7 @@ class DuplexSessionRunner:
         if session.epoch != expected_epoch:
             return
         try:
-            session.resources.touch(session.fence, DuplexLeaseActivity.MODEL_OUTPUT)
+            session.touch_lease(DuplexLeaseActivity.MODEL_OUTPUT)
         except Exception:
             # Lease already closed/expired: the output belongs to a dead session.
             return
@@ -2261,14 +2222,9 @@ class DuplexSessionRunner:
 
     async def _on_stage_failure_item(self, item: _StageFailure) -> None:
         session = self.session
-        self.emit(
-            {
-                "type": "error",
-                "code": "runtime_data_plane_stream_failed",
-                "session_id": session.session_id,
-                "epoch": session.epoch,
-                "error": f"Stage-{item.stage_id} input processor failed: {type(item.exc).__name__}: {item.exc}",
-            }
+        self._emit_error(
+            "runtime_data_plane_stream_failed",
+            f"Stage-{item.stage_id} input processor failed: {type(item.exc).__name__}: {item.exc}",
         )
         response_id = session.active_response_id
         if response_id is not None:
@@ -2338,14 +2294,9 @@ class DuplexSessionRunner:
             return close_reason, emitted_response
         if isinstance(model_result.get("error_code"), str):
             response_id = session.active_response_id
-            self.emit(
-                {
-                    "type": "error",
-                    "code": model_result.get("error_code"),
-                    "session_id": session.session_id,
-                    "epoch": session.epoch,
-                    "error": str(model_result.get("error") or "Duplex native data-plane error"),
-                }
+            self._emit_error(
+                str(model_result.get("error_code")),
+                str(model_result.get("error") or "Duplex native data-plane error"),
             )
             if response_id is not None:
                 session.end_response(commit_text=False)
@@ -2885,7 +2836,7 @@ class DuplexSessionRunner:
         model_state = self.model_state
         event_type = str(event.get("type"))
         if event_type == "barge_in" and not session.capabilities.supports_barge_in:
-            self.emit(self._barge_in_unsupported_error(session))
+            self._emit_events([self._barge_in_unsupported_error()])
             return
         cancel_reason = (
             "output_audio_buffer_clear"
@@ -2903,26 +2854,12 @@ class DuplexSessionRunner:
                 and session.active_response_id is not None
                 and requested_response_id != session.active_response_id
             ):
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "code": "response_not_active",
-                        "error": f"Response is not active: {requested_response_id}",
-                    }
-                )
+                self._emit_error("response_not_active", f"Response is not active: {requested_response_id}")
                 return
             if not has_active_response_work:
                 if isinstance(requested_response_id, str):
                     return
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "code": "response_not_active",
-                        "error": "response.cancel requires an active response",
-                    }
-                )
+                self._emit_error("response_not_active", "response.cancel requires an active response")
                 return
         had_unbuffered_append = model_state.input_since_commit and not model_state.audio_buffer.has_pending()
         playback_was_active = self._assistant_playback_active()
@@ -3106,23 +3043,15 @@ class DuplexSessionRunner:
         turn_event = event.get("event")
         realtime_event_id = event.get("realtime_event_id")
         if not isinstance(turn_event, str):
-            self.emit({"type": "error", "error": "turn.signal requires event", "code": "bad_event"})
+            self._emit_error("bad_event", "turn.signal requires event")
             return
         if turn_event == "barge_in" and not session.capabilities.supports_barge_in:
-            self.emit(self._barge_in_unsupported_error(session))
+            self._emit_events([self._barge_in_unsupported_error()])
             return
         if turn_event == "session.update":
             payload = event.get("payload")
             if not isinstance(payload, dict):
-                self._emit_update_event(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "code": "bad_event",
-                        "error": "session.update requires a session payload",
-                    },
-                    realtime_event_id,
-                )
+                self._emit_error("bad_event", "session.update requires a session payload", event_id=realtime_event_id)
                 return
             await self._on_session_update(
                 payload,
@@ -3169,12 +3098,7 @@ class DuplexSessionRunner:
                 }
             )
             return
-        self.emit(self._turn_controller.signal(session, turn_event, event))
-
-    def _emit_update_event(self, update_event: dict[str, object], realtime_event_id: object) -> None:
-        if isinstance(realtime_event_id, str) and realtime_event_id:
-            update_event = {**update_event, "realtime_event_id": realtime_event_id}
-        self.emit(update_event)
+        self._emit_events([session.signal_turn(turn_event, event)])
 
     async def _on_session_update(self, payload: dict[str, Any], *, realtime_event_id: str | None) -> None:
         session = self.session
@@ -3188,34 +3112,20 @@ class DuplexSessionRunner:
         try:
             pending_turn_detection = PendingTurnDetectionUpdate.prepare(payload)
         except Exception as exc:
-            self._emit_update_event(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "code": "unsupported_turn_detection",
-                    "error": str(exc),
-                },
-                realtime_event_id,
-            )
+            self._emit_error("unsupported_turn_detection", str(exc), event_id=realtime_event_id)
             return
         if not await self._wait_for_append_tail():
-            self._emit_update_event(
-                {
-                    "type": "error",
-                    "code": "session_update_aborted",
-                    "error": "session.update was not applied because the preceding append failed",
-                },
-                realtime_event_id,
+            self._emit_error(
+                "session_update_aborted",
+                "session.update was not applied because the preceding append failed",
+                event_id=realtime_event_id,
             )
             reject_update()
             return
         try:
             self.plugin.validate_client_extra_body(payload.get("extra_body"))
         except DuplexRuntimeConfigError as exc:
-            self._emit_update_event(
-                {"type": "error", "session_id": session.session_id, "code": exc.code, "error": str(exc)},
-                realtime_event_id,
-            )
+            self._emit_error(exc.code, str(exc), event_id=realtime_event_id)
             reject_update()
             return
         candidate_config = deepcopy(session.config)
@@ -3226,18 +3136,18 @@ class DuplexSessionRunner:
             audio_started=audio_started,
         )
         if update_error is not None:
-            self._emit_update_event(update_error, realtime_event_id)
+            self._emit_error(
+                str(update_error.get("code") or "bad_event"),
+                str(update_error.get("error") or "session.update was rejected"),
+                event_id=realtime_event_id,
+            )
             reject_update()
             return
         if candidate_config.instructions != session.config.instructions and model_state.context_locked:
-            self._emit_update_event(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "code": "instructions_update_unsupported",
-                    "error": "session.update cannot change instructions after the native duplex context is initialized",
-                },
-                realtime_event_id,
+            self._emit_error(
+                "instructions_update_unsupported",
+                "session.update cannot change instructions after the native duplex context is initialized",
+                event_id=realtime_event_id,
             )
             reject_update()
             return
@@ -3247,14 +3157,8 @@ class DuplexSessionRunner:
             and "ref_audio_data" not in session.runtime_config
             and getattr(self.plugin, "requires_ref_audio", False)
         ):
-            self._emit_update_event(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "code": "ref_audio_required",
-                    "error": "Native duplex audio output requires ref_audio",
-                },
-                realtime_event_id,
+            self._emit_error(
+                "ref_audio_required", "Native duplex audio output requires ref_audio", event_id=realtime_event_id
             )
             reject_update()
             return
@@ -3269,30 +3173,24 @@ class DuplexSessionRunner:
                 defaults=tuple(self.stage_port.sampling_defaults()),
             )
         except (DuplexRuntimeConfigError, DuplexConfigError) as exc:
-            self._emit_update_event(
-                {"type": "error", "session_id": session.session_id, "code": exc.code, "error": str(exc)},
-                realtime_event_id,
-            )
+            self._emit_error(exc.code, str(exc), event_id=realtime_event_id)
             reject_update()
             return
         except Exception as exc:
-            self._emit_update_event(
-                {"type": "error", "session_id": session.session_id, "code": "runtime_signal_failed", "error": str(exc)},
-                realtime_event_id,
-            )
+            self._emit_error("runtime_signal_failed", str(exc), event_id=realtime_event_id)
             reject_update()
             return
         session.replace_config(candidate_config)
         session.replace_runtime_config(candidate_runtime_config)
         try:
-            session.resources.touch(session.fence, DuplexLeaseActivity.SIGNAL)
+            session.touch_lease(DuplexLeaseActivity.SIGNAL)
         except Exception:
             pass
         if pending_turn_detection is not None:
             self._turn_detection_config, self._turn_detector = pending_turn_detection.commit(self._turn_detector)
         projector = self._require_projector()
         projector.apply_session_defaults(payload)
-        self._emit_update_event({"type": "session.updated", "session": session.as_public_dict()}, realtime_event_id)
+        self.emit({"type": "session.updated", "session": session.as_public_dict()})
 
     async def _on_conversation_item_create(self, event: dict[str, Any]) -> None:
         session = self.session
@@ -3309,7 +3207,7 @@ class DuplexSessionRunner:
                     item,
                 )
             except DuplexRuntimeConfigError as exc:
-                self.emit({"type": "error", "session_id": session.session_id, "code": exc.code, "error": str(exc)})
+                self._emit_error(exc.code, str(exc))
                 return
             if candidate_runtime_config is not None:
                 session.replace_runtime_config(candidate_runtime_config)
@@ -3353,7 +3251,6 @@ class DuplexSessionRunner:
             options = ResponseCreateOptions.from_realtime(
                 response_payload,
                 private_runtime_config_keys=self.plugin.private_runtime_config_keys,
-                model_native=session.capabilities.implementation_level == "model_native_duplex",
             )
         except DuplexConfigError as exc:
             return exc.code
@@ -3419,20 +3316,7 @@ class DuplexSessionRunner:
                         if response_options_error == "unsupported_native_response_options"
                         else "response.create cannot reserve options while another response is active."
                     )
-                    self.emit(
-                        {
-                            "type": "error",
-                            "session_id": session.session_id,
-                            "epoch": session.epoch,
-                            "code": response_options_error,
-                            "error": error_message,
-                            **(
-                                {"realtime_event_id": event["realtime_event_id"]}
-                                if event.get("realtime_event_id")
-                                else {}
-                            ),
-                        }
-                    )
+                    self._emit_error(response_options_error, error_message, event_id=event.get("realtime_event_id"))
                     return
         if event_type == "input_audio_buffer.commit":
             has_pending_audio = (
@@ -3442,14 +3326,8 @@ class DuplexSessionRunner:
                 or realtime_validated_audio_commit
             )
             if not has_pending_audio and not self.tasks.append_tasks and self._stream_request_id is None:
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "epoch": session.epoch,
-                        "code": "input_audio_buffer_empty",
-                        "error": "input_audio_buffer.commit requires a non-empty input audio buffer.",
-                    }
+                self._emit_error(
+                    "input_audio_buffer_empty", "input_audio_buffer.commit requires a non-empty input audio buffer."
                 )
                 return
             commit_action = decide_commit_action(
@@ -3578,14 +3456,8 @@ class DuplexSessionRunner:
                     or self._stream_request_id is not None
                 ):
                     return
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "epoch": session.epoch,
-                        "code": "response_already_active",
-                        "error": "response.create cannot start while another response is active.",
-                    }
+                self._emit_error(
+                    "response_already_active", "response.create cannot start while another response is active."
                 )
                 session.discard_response_options()
                 return
@@ -3603,14 +3475,8 @@ class DuplexSessionRunner:
                     retained_committed_payload=committed_payload,
                 )
                 return
-            self.emit(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "epoch": session.epoch,
-                    "code": "response_create_without_input",
-                    "error": "Native duplex response.create requires committed audio input.",
-                }
+            self._emit_error(
+                "response_create_without_input", "Native duplex response.create requires committed audio input."
             )
             session.discard_response_options()
             return
@@ -3720,10 +3586,10 @@ class DuplexSessionRunner:
         played_ms = event.get("played_ms", event.get("audio_ms", 0))
         committed_ms = event.get("committed_ms")
         if not isinstance(played_ms, int | float):
-            self.emit({"type": "error", "error": "playback.ack requires played_ms", "code": "bad_event"})
+            self._emit_error("bad_event", "playback.ack requires played_ms")
             return
         try:
-            session.resources.touch(session.fence, DuplexLeaseActivity.PLAYBACK_ACK)
+            session.touch_lease(DuplexLeaseActivity.PLAYBACK_ACK)
         except Exception:
             pass
         committed_cursor = int(committed_ms) if isinstance(committed_ms, int | float) else int(played_ms)
@@ -3746,49 +3612,21 @@ class DuplexSessionRunner:
             if item_id is None:
                 item_id = expected_item_id
             elif item_id != expected_item_id:
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "epoch": session.epoch,
-                        "code": "playback_item_mismatch",
-                        "error": "playback.ack item_id must match item_<response_id>.",
-                    }
-                )
+                self._emit_error("playback_item_mismatch", "playback.ack item_id must match item_<response_id>.")
                 return
             if not session.has_assistant_response_item(response_id, item_id):
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "epoch": session.epoch,
-                        "code": "playback_item_not_found",
-                        "error": f"No assistant response item is registered for {response_id}.",
-                    }
+                self._emit_error(
+                    "playback_item_not_found", f"No assistant response item is registered for {response_id}."
                 )
                 return
             if session.playback_ack_is_too_late(response_id, item_id):
-                self.emit(
-                    {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "epoch": session.epoch,
-                        "code": "playback_ack_too_late",
-                        "error": "playback.ack arrived after a later user input was committed.",
-                    }
+                self._emit_error(
+                    "playback_ack_too_late", "playback.ack arrived after a later user input was committed."
                 )
                 return
             session.reserve_history_item(item_id)
         elif item_id is not None:
-            self.emit(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "epoch": session.epoch,
-                    "code": "playback_item_not_found",
-                    "error": "playback.ack requires a response-owned assistant item.",
-                }
-            )
+            self._emit_error("playback_item_not_found", "playback.ack requires a response-owned assistant item.")
             return
         hard_truncate = event.get("truncate") is True
         if hard_truncate:
@@ -3845,18 +3683,22 @@ class DuplexSessionRunner:
                     playback=playback,
                     hard=hard_truncate,
                 )
-        self.emit(
-            {
-                "type": "playback.acknowledged",
-                "session_id": session.session_id,
-                "epoch": session.epoch,
-                "item_id": item_id,
-                "played_ms": int(played_ms),
-                "committed_ms": committed_cursor,
-                "truncate": event.get("truncate") is True,
-                "playback": playback.as_dict(),
-                "history_committed": committed_history,
-            }
+        self._emit_events(
+            [
+                PlaybackAcknowledged(
+                    details={
+                        "type": "playback.acknowledged",
+                        "session_id": session.session_id,
+                        "epoch": session.epoch,
+                        "item_id": item_id,
+                        "played_ms": int(played_ms),
+                        "committed_ms": committed_cursor,
+                        "truncate": event.get("truncate") is True,
+                        "playback": playback.as_dict(),
+                        "history_committed": committed_history,
+                    }
+                )
+            ]
         )
         if committed_history and committed_cursor >= max(playback.sent_ms, playback.generated_ms):
             session.release_response_playback(response_id)

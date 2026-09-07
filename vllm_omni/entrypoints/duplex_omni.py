@@ -252,8 +252,8 @@ class DuplexSessionHandle:
 
     def _adopt(self, result: DuplexControlResultMessage) -> None:
         self.incarnation = int(result.incarnation)
-        if result.capabilities:
-            self.capabilities = _capabilities_from_dict(result.capabilities)
+        if result.capabilities is not None:
+            self.capabilities = result.capabilities
         if result.public_session:
             self.public_session = dict(result.public_session)
         if result.lease_generation is not None:
@@ -275,11 +275,6 @@ class DuplexSessionHandle:
         self._close_reason = reason
         self._closed_event.set()
         self._outbox.put_nowait(None)
-
-
-def _capabilities_from_dict(payload: Mapping[str, Any]) -> DuplexCapabilities:
-    known = {name for name in DuplexCapabilities.__dataclass_fields__}
-    return DuplexCapabilities(**{key: value for key, value in payload.items() if key in known})
 
 
 class DuplexOmni(AsyncOmniBase):
@@ -320,27 +315,25 @@ class DuplexOmni(AsyncOmniBase):
     # ---- session lifecycle ----
 
     @staticmethod
-    def _session_config_dict(
+    def _resolve_session_config(
         config: DuplexSessionConfig | Mapping[str, object] | None,
         *,
         model: str,
         session_id: str,
-    ) -> dict[str, object]:
+    ) -> DuplexSessionConfig:
+        """Build the normalized session config the engine will own (the one parse/normalize site)."""
         if config is None:
             resolved = DuplexSessionConfig(model=model)
         elif isinstance(config, DuplexSessionConfig):
             resolved = config
         elif isinstance(config, Mapping):
-            from_realtime = getattr(DuplexSessionConfig, "from_realtime", None)
-            if callable(from_realtime):
-                resolved = from_realtime(config, model=model, session_id=session_id)
-            else:  # pragma: no cover - fallback while the wire helpers land
-                resolved = DuplexSessionConfig.from_event({"session": dict(config)})
+            resolved = DuplexSessionConfig.from_realtime(config, model=model, session_id=session_id)
         else:
             raise TypeError(f"unsupported duplex session config: {type(config).__name__}")
         if resolved.model is None:
             resolved.model = model
-        return resolved.as_dict()
+        # Clamp / normalize exactly as the engine used to when it re-parsed the dict.
+        return DuplexSessionConfig.from_event({"session": resolved.as_dict()})
 
     async def open_session(
         self,
@@ -361,7 +354,7 @@ class DuplexOmni(AsyncOmniBase):
             raise DuplexSessionError(
                 f"duplex session already open: {session_id}", code="session_exists", session_id=session_id
             )
-        session_config = self._session_config_dict(config, model=self.model, session_id=session_id)
+        session_config = self._resolve_session_config(config, model=self.model, session_id=session_id)
         handle = DuplexSessionHandle(self, session_id)
         self._handles[session_id] = handle
         self._final_output_handler()

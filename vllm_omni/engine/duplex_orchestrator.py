@@ -107,7 +107,7 @@ class DuplexOrchestrator(OrchestratorBase, DuplexStagePort):
         fence = req_state.fence
         req_state.stage_fences[stage_id] = fence
         try:
-            runner.session.resources.bind_stage_request(stage_id, request_id, fence=fence)
+            runner.session.bind_stage_request(stage_id, request_id, fence=fence)
         except DuplexFenceMismatchError:
             # The session already advanced past this request's epoch (cancel
             # raced the submit); the cancel path aborts the stale request id.
@@ -248,7 +248,6 @@ class DuplexOrchestrator(OrchestratorBase, DuplexStagePort):
                 "incarnation": context.fence.incarnation,
                 "epoch": context.fence.epoch,
                 "turn_id": context.fence.turn_id,
-                "response_seq": context.fence.response_seq,
                 "session_config": dict(context.session_config),
                 "runtime_config": dict(context.runtime_config),
             }

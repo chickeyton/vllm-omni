@@ -22,7 +22,6 @@ from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConf
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
     DuplexFence,
-    DuplexInputMode,
     DuplexOutputDecision,
 )
 
@@ -205,7 +204,6 @@ class DuplexModelPlugin(ABC):
         runtime_config: dict[str, Any],
         seq: int,
         turn_seq: int,
-        mode: DuplexInputMode,
         payload: object,
         final: bool,
         sampling_params: object,
