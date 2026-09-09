@@ -826,7 +826,7 @@ def write_batch_artifacts(
     )
 
 
-def _websocket_url(config: OmniInteractBenchmarkConfig, session_id: str) -> str:
+def _websocket_url(config: OmniInteractBenchmarkConfig) -> str:
     endpoint = (
         config.endpoint
         if urlsplit(config.endpoint).scheme
@@ -834,13 +834,7 @@ def _websocket_url(config: OmniInteractBenchmarkConfig, session_id: str) -> str:
     )
     from vllm_omni.clients.duplex import build_realtime_url
 
-    return build_realtime_url(
-        endpoint,
-        config.model,
-        autostart=False,
-        native_duplex=True,
-        session_id=session_id,
-    )
+    return build_realtime_url(endpoint, config.model, autostart=False)
 
 
 class _RealtimeSession:
@@ -864,12 +858,11 @@ class _RealtimeSession:
             playback_commit_policy="ack_only",
             idle_timeout_s=float(config.timeout_s),
             extra_body={
-                "native_duplex": True,
                 "force_listen_count": 0,
                 **(config.extra_body or {}),
             },
         )
-        self.url = _websocket_url(config, session_id)
+        self.url = _websocket_url(config)
         headers = dict(config.extra_headers or {})
 
         async def connect(url: str) -> WebSocketTransport:
@@ -886,7 +879,6 @@ class _RealtimeSession:
             self.url,
             model=config.model,
             config=self.session_config,
-            session_id=session_id,
             reconnect=None,
             heartbeat_interval_s=None,
             handshake_timeout_s=min(config.timeout_s, 20.0),

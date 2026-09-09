@@ -13,7 +13,6 @@ import os
 import random
 import tempfile
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -107,8 +106,8 @@ from vllm_omni.config.endpoint_policy import (
 )
 from vllm_omni.diffusion.models.interface import ReferenceVideoDecodeSpec
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.duplex.capability import should_enable_duplex_endpoint
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
+from vllm_omni.entrypoints.duplex_omni import DuplexOmni
 from vllm_omni.entrypoints.openai.batch_serving import OmniOpenAIServingChatBatch
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
 from vllm_omni.entrypoints.openai.image_api_utils import (
@@ -455,8 +454,8 @@ async def _warmup_duplex_realtime(app, args, warmup_frames: int) -> None:
     """Run silent frames through a throwaway realtime session at startup.
 
     Self-connects over the server's own websocket endpoint so the warmup
-    exercises the exact production path (serving adapter, duplex control
-    plane, every pipeline stage). One-time costs — kernel JIT compilation,
+    exercises the exact production path (session handler, engine-resident
+    session, every pipeline stage). One-time costs — kernel JIT compilation,
     first prefill/decode paths, codec caches — are paid here instead of by
     the first real client; ``/v1/realtime`` holds other connections until
     the warmup finishes (see ``duplex_warmup_done``).
@@ -477,10 +476,11 @@ async def _warmup_duplex_realtime(app, args, warmup_frames: int) -> None:
             model_name = served
         else:
             model_name = args.model
-        adapter = getattr(getattr(app.state, "openai_serving_duplex", None), "_serving_runtime_adapter", None)
-        frame_samples = int(getattr(adapter, "silence_continuation_samples", 16000))
+        # One silence unit as the engine-side plugin defines it (DuplexOmniEngine.plugin).
+        plugin = getattr(getattr(app.state.engine_client, "engine", None), "plugin", None)
+        frame_samples = int(getattr(plugin, "silence_continuation_samples", 16000))
         silence = base64.b64encode(bytes(frame_samples * 4)).decode("ascii")
-        from vllm_omni.experimental.fullduplex.client import build_realtime_url
+        from vllm_omni.clients.duplex import build_realtime_url
 
         url = (
             build_realtime_url(f"ws://127.0.0.1:{args.port}/v1/realtime", model_name, autostart=False)
@@ -507,7 +507,6 @@ async def _warmup_duplex_realtime(app, args, warmup_frames: int) -> None:
                     {
                         "type": "session.update",
                         "session": {
-                            "session_id": f"warmup-{uuid.uuid4().hex[:8]}",
                             "model": model_name,
                             "modalities": ["audio", "text"],
                             "input_audio_format": "pcm_f32le",
@@ -792,6 +791,23 @@ async def build_async_omni(
         yield async_omni
 
 
+def _is_duplex_model(model: str, kwargs: dict[str, Any]) -> bool:
+    """Whether ``model``'s pipeline declares a ``duplex_plugin`` (served by ``DuplexOmni``).
+
+    Resolution errors propagate: a duplex model whose pipeline or deploy
+    config cannot be resolved must fail startup rather than silently start a
+    turn-based server.
+    """
+    from vllm_omni.config.config_factory import StageConfigFactory
+
+    pipeline_config = StageConfigFactory.get_pipeline_config(
+        model=model,
+        trust_remote_code=bool(kwargs.get("trust_remote_code")),
+        deploy_config_path=kwargs.get("deploy_config"),
+    )
+    return bool(pipeline_config is not None and getattr(pipeline_config, "duplex_plugin", None))
+
+
 @asynccontextmanager
 async def build_async_omni_from_stage_config(
     args: TrackingNamespace,
@@ -851,7 +867,12 @@ async def build_async_omni_from_stage_config(
         kwargs = args.get_explicit_kwargs_dict()
         model = kwargs.pop("model", None) or args.model
         kwargs.setdefault("log_stats", not args.disable_log_stats)
-        async_omni = AsyncOmni(model=model, **kwargs)
+        if _is_duplex_model(model, kwargs):
+            # A duplex model is always served in duplex mode: sessions over
+            # /v1/realtime?duplex=1, no turn-based HTTP routes.
+            async_omni = DuplexOmni(model=model, **kwargs)
+        else:
+            async_omni = AsyncOmni(model=model, **kwargs)
 
         # # Don't keep the dummy data in memory
         # await async_llm.reset_mm_cache()
@@ -860,6 +881,52 @@ async def build_async_omni_from_stage_config(
     finally:
         if async_omni:
             async_omni.shutdown()
+
+
+def _init_duplex_app_state(
+    engine_client: DuplexOmni,
+    state: State,
+    args: Namespace,
+    base_model_paths: list[BaseModelPath],
+    vllm_config: Any,
+) -> None:
+    """Minimal app state for a duplex-only server."""
+    state.vllm_config = vllm_config
+    state.diffusion_engine = None
+    state.openai_serving_models = OpenAIServingModels(
+        engine_client=engine_client,  # type: ignore[arg-type]
+        base_model_paths=base_model_paths,
+        lora_modules=None,
+    )
+    state.serving_tokenization = None
+    state.serving_tokens = None
+    state.online_renderer = None
+    for attribute in (
+        "openai_serving_chat",
+        "openai_serving_chat_batch",
+        "openai_serving_completion",
+        "openai_serving_responses",
+        "openai_serving_embedding",
+        "openai_serving_pooling",
+        "openai_serving_classification",
+        "openai_serving_scores",
+        "openai_serving_transcription",
+        "openai_serving_translation",
+        "openai_serving_speech",
+        "openai_serving_audio_generate",
+        "openai_serving_video",
+        "openai_streaming_speech",
+        "openai_streaming_video",
+        "openai_streaming_video_output",
+        "openai_serving_realtime",
+        "openai_serving_realtime_robot",
+        "anthropic_serving_messages",
+    ):
+        setattr(state, attribute, None)
+    state.openai_serving_duplex = OmniDuplexSessionHandler(duplex_omni=engine_client)
+    state.enable_server_load_tracking = getattr(args, "enable_server_load_tracking", False)
+    state.server_load_metrics = 0
+    logger.info("Duplex mode: serving %s over /v1/realtime?duplex=1 only", engine_client.model)
 
 
 async def omni_init_app_state(
@@ -911,6 +978,13 @@ async def omni_init_app_state(
     # For omni models
     state.stage_configs = engine_client.stage_configs if hasattr(engine_client, "stage_configs") else None
     model_name = served_model_names[0] if served_model_names else args.model
+
+    # Duplex mode: a duplex model is served through DuplexOmni only. Sessions
+    # run over /v1/realtime?duplex=1; every turn-based HTTP route reports
+    # "not available".
+    if isinstance(engine_client, DuplexOmni):
+        _init_duplex_app_state(engine_client, state, args, base_model_paths, vllm_config)
+        return
 
     # Pure Diffusion mode: use simplified initialization logic
     if is_pure_diffusion:
@@ -1288,15 +1362,6 @@ async def omni_init_app_state(
         else None
     )
     state.openai_serving_duplex = None
-    if state.openai_serving_chat is not None and should_enable_duplex_endpoint(
-        state.stage_configs,
-        config_path=getattr(args, "deploy_config", None),
-    ):
-        state.openai_serving_duplex = OmniDuplexSessionHandler(
-            chat_service=state.openai_serving_chat,
-            duplex_session_config=getattr(engine_client, "duplex_session_config", None),
-            serving_runtime_adapter_path=getattr(engine_client, "duplex_serving_adapter_path", None),
-        )
     state.openai_serving_realtime = OpenAIServingRealtime(
         engine_client=engine_client,
         models=state.openai_serving_models,
@@ -1840,14 +1905,7 @@ async def streaming_video_output(websocket: WebSocket):
 @router.websocket("/v1/realtime")
 async def realtime_websocket(websocket: WebSocket):
     """WebSocket endpoint for OpenAI-style realtime interactions."""
-    # Hold real clients until the startup duplex warmup finishes (the warmup
-    # connection marks itself with vllm_omni_warmup=1 and passes through).
-    warmup_done = getattr(websocket.app.state, "duplex_warmup_done", None)
-    if warmup_done is not None and not warmup_done.is_set() and websocket.query_params.get("vllm_omni_warmup") != "1":
-        try:
-            await asyncio.wait_for(warmup_done.wait(), timeout=120)
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("Duplex warmup still running after 120 s; admitting the client anyway.")
+    await _wait_for_duplex_warmup(websocket)
     duplex_handler = getattr(websocket.app.state, "openai_serving_duplex", None)
     duplex_query = websocket.query_params.get("duplex")
     use_duplex_realtime = (
@@ -1867,6 +1925,32 @@ async def realtime_websocket(websocket: WebSocket):
     await connection.handle_connection()
 
 
+async def _wait_for_duplex_warmup(websocket: WebSocket) -> None:
+    """Hold real clients until the startup duplex warmup finishes.
+
+    The warmup connection marks itself with ``vllm_omni_warmup=1`` and passes through.
+    """
+    warmup_done = getattr(websocket.app.state, "duplex_warmup_done", None)
+    if warmup_done is not None and not warmup_done.is_set() and websocket.query_params.get("vllm_omni_warmup") != "1":
+        try:
+            await asyncio.wait_for(warmup_done.wait(), timeout=120)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("Duplex warmup still running after 120 s; admitting the client anyway.")
+
+
+@router.websocket("/v1/duplex")
+async def duplex_websocket(websocket: WebSocket):
+    """Alias of ``/v1/realtime?duplex=1``: the same Realtime duplex session protocol."""
+    await _wait_for_duplex_warmup(websocket)
+    handler = getattr(websocket.app.state, "openai_serving_duplex", None)
+    if handler is None:
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "error": "Duplex API is not available", "code": "unsupported"})
+        await websocket.close()
+        return
+    await handler.handle_realtime_session(websocket)
+
+
 @router.websocket("/v1/realtime/robot/openpi")
 async def realtime_robot_openpi(websocket: WebSocket):
     """WebSocket endpoint for robot policy inference via OpenPI messages."""
@@ -1882,18 +1966,6 @@ async def realtime_robot_openpi(websocket: WebSocket):
         return
     connection = RobotRealtimeConnection(websocket, serving)
     await connection.handle_connection()
-
-
-@router.websocket("/v1/duplex")
-async def duplex_websocket(websocket: WebSocket):
-    """WebSocket endpoint for vLLM-Omni duplex session control."""
-    handler = getattr(websocket.app.state, "openai_serving_duplex", None)
-    if handler is None:
-        await websocket.accept()
-        await websocket.send_json({"type": "error", "error": "Duplex API is not available", "code": "unsupported"})
-        await websocket.close()
-        return
-    await handler.handle_session(websocket)
 
 
 # Health and Model endpoints for diffusion mode
