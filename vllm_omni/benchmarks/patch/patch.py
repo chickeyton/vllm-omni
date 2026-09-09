@@ -2101,7 +2101,7 @@ async def async_request_openai_audio_speech(
 def _realtime_websocket_url(api_url: str) -> str:
     from vllm_omni.clients.duplex import build_realtime_url
 
-    return build_realtime_url(api_url, None, native_duplex=None)
+    return build_realtime_url(api_url, None)
 
 
 def _nonnegative_number(value: object) -> bool:
@@ -2290,16 +2290,13 @@ class _RealtimeTTSProbe:
         *,
         output_audio_format: str = "pcm16",
         instructions: str | None = None,
-        native_duplex: bool = False,
         auto_response: bool = False,
         extra_body: dict[str, object] | None = None,
-        session_id: str | None = None,
         timeout_s: float = 120.0,
     ) -> None:
         from vllm_omni.clients.duplex import AudioFormat, DuplexClient, SessionConfig
 
         session_extra_body: dict[str, object] = dict(extra_body or {})
-        session_extra_body["native_duplex"] = bool(native_duplex)
         config = SessionConfig(
             output_audio=AudioFormat(output_audio_format, 24_000),
             instructions=instructions,
@@ -2312,7 +2309,6 @@ class _RealtimeTTSProbe:
             self._url,
             model=model,
             config=config,
-            session_id=session_id,
             reconnect=None,
             heartbeat_interval_s=None,
             handshake_timeout_s=timeout_s,
@@ -2376,10 +2372,8 @@ async def async_request_openai_realtime_duplex(
                     "seed_tts_system_prompt",
                     SEED_TTS_DEFAULT_OMNI_SYSTEM_PROMPT,
                 ),
-                native_duplex=False,
                 auto_response=False,
                 extra_body=speech_extra,
-                session_id=session_id,
                 timeout_s=120.0,
             )
             turn_metrics: list[dict[str, object]] = []
