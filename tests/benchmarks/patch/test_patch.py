@@ -238,7 +238,7 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
     )
 
     client = FakeRealtimeClient.last_instance
-    assert client.configure_kwargs["native_duplex"] is False
+    assert "native_duplex" not in client.configure_kwargs
     assert client.configure_kwargs["extra_body"] == {
         "ref_audio": "data:audio/wav;base64,AAAA",
         "return_stage_metrics": True,

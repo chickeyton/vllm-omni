@@ -555,7 +555,7 @@ async def test_public_runner_executes_one_prepared_session(tmp_path: Path, monke
     assert "autostart=0" in _RealtimeClient.instances[-1].url
     session_config = _RealtimeClient.instances[-1].session_config
     assert session_config.extra_body["custom"] == "value"
-    assert session_config.extra_body["native_duplex"] is True
+    assert "native_duplex" not in session_config.extra_body
     assert session_config.ref_audio == "data:audio/wav;base64,ref"
     acks = _RealtimeClient.instances[-1].acks
     # Cumulative acks for the one response: an optional 0 ms checkpoint the

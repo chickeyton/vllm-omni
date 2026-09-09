@@ -91,7 +91,7 @@ def test_stage_override_preserves_model_extras_for_default_diffusion_stage(mocke
         return None, default_stage_cfg_factory(), None
 
     mocker.patch(
-        "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+        "vllm_omni.engine.omni_engine_base.load_and_resolve_stage_configs",
         side_effect=resolve_with_default,
     )
     engine = AsyncOmniEngine.__new__(AsyncOmniEngine)
@@ -655,11 +655,11 @@ def test_default_stage_resolves_video_output_from_checkpoint(mocker):
         return ("", [stage], None)
 
     resolver = mocker.patch(
-        "vllm_omni.engine.async_omni_engine.resolve_model_class_name",
+        "vllm_omni.engine.omni_engine_base.resolve_model_class_name",
         return_value="MiniMaxH3Pipeline",
     )
     mocker.patch(
-        "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+        "vllm_omni.engine.omni_engine_base.load_and_resolve_stage_configs",
         side_effect=resolve_with_default,
     )
     engine = AsyncOmniEngine.__new__(AsyncOmniEngine)
@@ -689,7 +689,7 @@ def test_default_diffusers_stage_preserves_video_model_identity(mocker):
         return_value={"_class_name": "WanImageToVideoPipeline"},
     )
     mocker.patch(
-        "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+        "vllm_omni.engine.omni_engine_base.load_and_resolve_stage_configs",
         side_effect=resolve_with_default,
     )
     engine = AsyncOmniEngine.__new__(AsyncOmniEngine)
@@ -716,7 +716,7 @@ def test_resolve_stage_configs_injects_additional_config_into_diffusion_stage(mo
         engine_args=SimpleNamespace(),
     )
     mocker.patch(
-        "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+        "vllm_omni.engine.omni_engine_base.load_and_resolve_stage_configs",
         return_value=("dummy.yaml", [fake_llm_stage, fake_diffusion_stage], None),
     )
 
@@ -771,7 +771,7 @@ def test_resolve_stage_configs_injects_quantization_config_into_diffusion_stage(
         engine_args=SimpleNamespace(quantization_config=None),
     )
     mocker.patch(
-        "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+        "vllm_omni.engine.omni_engine_base.load_and_resolve_stage_configs",
         return_value=("dummy.yaml", [fake_diffusion_stage], None),
     )
 

@@ -147,13 +147,12 @@ async def test_registry_resume_rotates_token_replays_and_atomically_replaces_att
     async def close_b(reason):
         closes_b.append(reason)
 
-    created = await registry.create("sid", incarnation=2, send=send_a, close=close_a)
+    created = await registry.create("sid", send=send_a, close=close_a)
     await registry.send_event("sid", {"type": "event-1"})
     await registry.send_event("sid", {"type": "event-2"})
 
     resumed = await registry.resume(
         "sid",
-        incarnation=2,
         resume_token=created.resume_token.plaintext,
         last_received_server_event_seq=1,
         send=send_b,
@@ -198,13 +197,12 @@ async def test_registry_resume_sends_activation_then_replay_before_new_live_even
             activation_started.set()
             await release_activation.wait()
 
-    created = await registry.create("sid-order", incarnation=0, send=old_send, close=close)
+    created = await registry.create("sid-order", send=old_send, close=close)
     await registry.detach("sid-order", attachment_generation=1)
     await registry.send_event("sid-order", {"type": "replayed"})
     resume_task = asyncio.create_task(
         registry.resume(
             "sid-order",
-            incarnation=0,
             resume_token=created.resume_token.plaintext,
             last_received_server_event_seq=0,
             send=new_send,
@@ -238,13 +236,12 @@ async def test_registry_resume_delivery_failure_keeps_one_shot_old_token_recover
     async def close(reason):
         del reason
 
-    created = await registry.create("sid-recovery", incarnation=0, send=send, close=close)
+    created = await registry.create("sid-recovery", send=send, close=close)
     await registry.detach("sid-recovery", attachment_generation=1)
 
     with pytest.raises(RuntimeError, match="transport lost"):
         await registry.resume(
             "sid-recovery",
-            incarnation=0,
             resume_token=created.resume_token.plaintext,
             last_received_server_event_seq=0,
             send=failing_send,
@@ -258,7 +255,6 @@ async def test_registry_resume_delivery_failure_keeps_one_shot_old_token_recover
 
     recovered = await registry.resume(
         "sid-recovery",
-        incarnation=0,
         resume_token=created.resume_token.plaintext,
         last_received_server_event_seq=0,
         send=send,
@@ -269,7 +265,6 @@ async def test_registry_resume_delivery_failure_keeps_one_shot_old_token_recover
     with pytest.raises(InvalidResumeTokenError):
         await registry.resume(
             "sid-recovery",
-            incarnation=0,
             resume_token=created.resume_token.plaintext,
             last_received_server_event_seq=0,
             send=send,
@@ -290,13 +285,12 @@ async def test_registry_concurrent_resume_allows_exactly_one_rotated_token_winne
     async def close(reason):
         del reason
 
-    created = await registry.create("sid-race", incarnation=0, send=send, close=close)
+    created = await registry.create("sid-race", send=send, close=close)
 
     async def attempt():
         try:
             return await registry.resume(
                 "sid-race",
-                incarnation=0,
                 resume_token=created.resume_token.plaintext,
                 last_received_server_event_seq=0,
                 send=send,
@@ -312,7 +306,7 @@ async def test_registry_concurrent_resume_allows_exactly_one_rotated_token_winne
 
 
 @pytest.mark.asyncio
-async def test_registry_keeps_sessions_journals_and_incarnations_isolated() -> None:
+async def test_registry_keeps_sessions_journals_and_tokens_isolated() -> None:
     registry = DuplexSessionAttachmentRegistry(
         replay_ttl_s=60.0,
         replay_max_bytes_per_session=4096,
@@ -324,8 +318,8 @@ async def test_registry_keeps_sessions_journals_and_incarnations_isolated() -> N
     async def close(reason):
         del reason
 
-    created_a = await registry.create("sid-a", incarnation=1, send=send, close=close)
-    created_b = await registry.create("sid-b", incarnation=4, send=send, close=close)
+    created_a = await registry.create("sid-a", send=send, close=close)
+    created_b = await registry.create("sid-b", send=send, close=close)
     await registry.detach("sid-a", attachment_generation=1)
     await registry.detach("sid-b", attachment_generation=1)
     await registry.send_event("sid-a", {"type": "a-only"})
@@ -333,7 +327,6 @@ async def test_registry_keeps_sessions_journals_and_incarnations_isolated() -> N
 
     resumed_a = await registry.resume(
         "sid-a",
-        incarnation=1,
         resume_token=created_a.resume_token.plaintext,
         last_received_server_event_seq=0,
         send=send,
@@ -341,7 +334,6 @@ async def test_registry_keeps_sessions_journals_and_incarnations_isolated() -> N
     )
     resumed_b = await registry.resume(
         "sid-b",
-        incarnation=4,
         resume_token=created_b.resume_token.plaintext,
         last_received_server_event_seq=0,
         send=send,
@@ -350,11 +342,10 @@ async def test_registry_keeps_sessions_journals_and_incarnations_isolated() -> N
 
     assert [entry.payload["type"] for entry in resumed_a.replay_entries] == ["a-only"]
     assert [entry.payload["type"] for entry in resumed_b.replay_entries] == ["b-only"]
-    with pytest.raises(ValueError, match="incarnation mismatch"):
+    with pytest.raises(InvalidResumeTokenError):
         await registry.resume(
             "sid-a",
-            incarnation=2,
-            resume_token=resumed_a.resume_token.plaintext,
+            resume_token=resumed_b.resume_token.plaintext,
             last_received_server_event_seq=1,
             send=send,
             close=close,
@@ -374,7 +365,7 @@ async def test_registry_repr_never_contains_plaintext_tokens() -> None:
     async def close(reason):
         del reason
 
-    created = await registry.create("sid-repr", incarnation=0, send=send, close=close)
+    created = await registry.create("sid-repr", send=send, close=close)
     await registry.detach("sid-repr", attachment_generation=1)
     entry = await registry.send_event(
         "sid-repr",

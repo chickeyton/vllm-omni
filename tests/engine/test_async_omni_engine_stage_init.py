@@ -12,7 +12,7 @@ import types
 import pytest
 
 from vllm_omni.diffusion.data import AttentionConfig, AttentionSpec, normalize_omni_diffusion_kwargs
-from vllm_omni.engine import async_omni_engine as async_omni_engine_module
+from vllm_omni.engine import omni_engine_base as omni_engine_base_module
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.stage_init_utils import (
     LogicalStageInitPlan,
@@ -32,11 +32,11 @@ def test_orchestrator_startup_timeout_warns_how_to_raise_limits(monkeypatch):
     monkeypatch.setattr(engine, "_try_shutdown", lambda _message: None)
 
     ticks = iter((0.0, 1.0))
-    monkeypatch.setattr(async_omni_engine_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(omni_engine_base_module.time, "monotonic", lambda: next(ticks))
 
     warnings: list[tuple[object, ...]] = []
     monkeypatch.setattr(
-        async_omni_engine_module.logger,
+        omni_engine_base_module.logger,
         "warning",
         lambda *args: warnings.append(args),
     )
@@ -188,7 +188,7 @@ def test_stage_engine_core_client_module_reload_keeps_forward_refs_deferred():
 
 
 def test_async_omni_engine_initialize_stages_passes_log_stats_to_runtime(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     engine.stage_configs = [types.SimpleNamespace()]
@@ -1733,7 +1733,7 @@ def test_inject_kv_stage_info_infers_receiver_tp_topology():
 
 
 def test_resolve_stage_configs_injects_global_diffusion_attention_when_missing(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     stage_cfg = types.SimpleNamespace(
@@ -1766,7 +1766,7 @@ def test_resolve_stage_configs_injects_global_diffusion_attention_when_missing(m
 
 
 def test_resolve_stage_configs_preserves_stage_diffusion_attention(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     existing_attention = AttentionConfig(default=AttentionSpec(backend="TORCH_SDPA"))
@@ -1797,7 +1797,7 @@ def test_resolve_stage_configs_preserves_stage_diffusion_attention(monkeypatch):
 
 
 def test_resolve_stage_configs_does_not_inject_over_stage_diffusion_attention_backend(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     stage_cfg = types.SimpleNamespace(
@@ -1832,7 +1832,7 @@ def test_resolve_stage_configs_does_not_inject_over_stage_diffusion_attention_ba
 
 
 def test_resolve_stage_configs_does_not_inject_diffusion_attention_into_llm_stage(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     stage_cfg = types.SimpleNamespace(
