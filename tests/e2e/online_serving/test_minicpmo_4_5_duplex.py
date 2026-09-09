@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from pathlib import Path
 
 import pytest
@@ -87,25 +86,16 @@ async def _receive_protocol_events(ws, required_types: set[str], *, timeout_s: f
 
 
 async def _run_protocol_smoke(*, url: str, model: str, ref_audio: Path) -> list[dict[str, object]]:
-    session_id = f"duplex-ci-protocol-{uuid.uuid4().hex}"
-    websocket_url = build_realtime_url(
-        url,
-        model,
-        autostart=False,
-        session_id=session_id,
-        extra_query={"native_duplex": "1"},
-    )
+    websocket_url = build_realtime_url(url, model, autostart=False)
     async with websockets.connect(websocket_url, max_size=64 * 1024 * 1024) as ws:
         await ws.send(
             json.dumps(
                 {
                     "type": "session.update",
                     "session": {
-                        "session_id": session_id,
                         "model": model,
                         "modalities": ["audio", "text"],
                         "ref_audio": _ref_audio_data_url(str(ref_audio)),
-                        "extra_body": {"native_duplex": True},
                     },
                 }
             )

@@ -15,7 +15,6 @@ import hashlib
 import io
 import json
 import sys
-import uuid
 import wave
 from pathlib import Path
 
@@ -409,8 +408,6 @@ async def run_soft_interrupt(args: argparse.Namespace) -> dict[str, object]:
         str(args.chunk_ms),
         "--timeout-s",
         str(args.timeout_s),
-        "--session-id",
-        f"duplex-soft-interrupt-{uuid.uuid4().hex}",
     ]
     command.extend(["--ref-audio", str(_canonical_path(args.ref_audio))])
     temperature = getattr(args, "temperature", None)
