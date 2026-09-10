@@ -126,6 +126,7 @@ vllm_omni/
 │   │   ├── serving.py               OmniDuplexSessionHandler
 │   │   ├── realtime_input.py        RealtimeEnvelope (query rules, first message), parse_resume_request
 │   │   ├── session_attachment.py    DuplexSessionAttachmentRegistry (resume tokens, replay journal)
+│   │   ├── audio_encoding.py        encode_audio, injected into DuplexOmniEngine for the plugin's data plane
 │   │   └── websocket.py             websocket send/close/receive helpers
 │   └── openai/api_server.py         builds DuplexOmni for duplex models; duplex-only app state
 ├── engine/
@@ -194,8 +195,9 @@ output   DuplexOrchestrator._intercept_stage_output -> runner.on_stage_output ->
          -> output_sink (DuplexSessionEventMessage) -> DuplexOmni._route_engine_message -> handle.events()
 detach   DuplexOmni.detach_session -> touch(DETACH): engine-owned disconnect grace; expiry -> SessionExpired
 resume   DuplexOmni.resume_session(expected_lease_generation) -> lease CAS; the existing handle is re-entered
-close    DuplexOmni.close_session -> close RPC; runner emits SessionClosed before answering; stage cleanup
-         (abort submitted requests, release reserved ids); the admission slot is held until cleanup succeeded
+close    DuplexOmni.close_session -> close RPC; the manager tears the runner down, then the stage cleanup
+         (abort submitted requests, release reserved ids), then SessionClosed, then the RPC result: seeing
+         the event means the admission slot is free (it is held until the cleanup succeeded)
 reap     DuplexSessionManager.reaper_loop: idle TTL / disconnect grace expiry, cleanup retries
 ```
 
@@ -327,6 +329,8 @@ follow-up PRs port them (RFC vllm-omni#7181, PR 2/3).
   `tests/entrypoints/test_duplex_omni.py`,
   `tests/entrypoints/duplex/test_duplex_serving.py`,
   `tests/entrypoints/openai/test_duplex_session_attachment.py`,
+  `tests/entrypoints/openai_api/test_duplex_api_server.py` (the duplex-only
+  server: pipeline probe, app state, routes, warmup gate),
   `tests/clients/**`, `tests/engine/test_duplex_import_boundary.py`,
   `tests/model_executor/models/minicpmo_4_5/duplex/**`,
   `tests/worker/test_native_duplex_hooks.py`.

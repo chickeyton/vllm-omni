@@ -58,6 +58,7 @@ validation_paths:
   - tests/entrypoints/test_async_omni_pause_sleep_routing.py
   - tests/entrypoints/test_duplex_omni.py
   - tests/entrypoints/duplex/**
+  - tests/entrypoints/openai_api/test_duplex_api_server.py
   - tests/entrypoints/test_serve.py
   - tests/entrypoints/test_stream_finish_reason.py
   - tests/entrypoints/openai/**
