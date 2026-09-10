@@ -176,6 +176,34 @@ async def test_registry_resume_rotates_token_replays_and_atomically_replaces_att
 
 
 @pytest.mark.asyncio
+async def test_registry_detach_without_a_generation_targets_the_current_attachment_once() -> None:
+    registry = DuplexSessionAttachmentRegistry(replay_ttl_s=60.0, replay_max_bytes_per_session=4096)
+    sends: list[dict] = []
+
+    async def send(payload):
+        sends.append(payload)
+
+    async def close(reason):
+        return None
+
+    await registry.create("sid-current", send=send, close=close)
+
+    # The outbound pump outlives any one connection and only knows the session:
+    # ``None`` means "whichever socket is attached right now".
+    assert await registry.detach("sid-current", attachment_generation=None) is True
+    # A second report of the same dead socket is not a new detach, so it cannot
+    # restart the engine's disconnect grace window.
+    assert await registry.detach("sid-current", attachment_generation=None) is False
+    assert await registry.detach("sid-current", attachment_generation=1) is False
+    assert await registry.is_current_attachment("sid-current", 1) is False
+
+    # A detached session still journals for a later resume.
+    await registry.send_event("sid-current", {"type": "event-1"})
+    assert sends == []
+    assert await registry.detach("missing-session", attachment_generation=None) is False
+
+
+@pytest.mark.asyncio
 async def test_registry_resume_sends_activation_then_replay_before_new_live_events() -> None:
     registry = DuplexSessionAttachmentRegistry(
         replay_ttl_s=60.0,

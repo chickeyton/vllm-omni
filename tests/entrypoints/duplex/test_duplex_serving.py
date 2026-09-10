@@ -33,14 +33,17 @@ class FakeWebSocket:
         self.sent: list[dict[str, Any]] = []
         self.accepted = False
         self.closed: list[tuple[int, str]] = []
+        self._send_failure: str | None = None
         self._inbound: asyncio.Queue[Any] = asyncio.Queue()
 
     async def accept(self) -> None:
         self.accepted = True
 
     async def send_json(self, payload: dict[str, Any]) -> None:
-        if self.closed:
-            raise RuntimeError("Unexpected ASGI message 'websocket.send', after sending 'websocket.close'.")
+        if self.closed or self._send_failure is not None:
+            raise RuntimeError(
+                self._send_failure or "Unexpected ASGI message 'websocket.send', after sending 'websocket.close'."
+            )
         self.sent.append(json.loads(json.dumps(payload)))
 
     async def receive_text(self) -> str:
@@ -61,6 +64,10 @@ class FakeWebSocket:
 
     def disconnect(self) -> None:
         self._inbound.put_nowait(_DISCONNECT)
+
+    def break_sends(self) -> None:
+        """Kill the write half only: the reader stays parked, as it does in practice."""
+        self._send_failure = "Unexpected ASGI message 'websocket.send', after sending 'websocket.close'."
 
     def types(self) -> list[str]:
         return [payload["type"] for payload in self.sent]
@@ -310,8 +317,9 @@ async def test_transport_send_failure_detaches_the_session_instead_of_closing_it
     handler = _handler(omni)
     ws, handle, task = await _open(handler, omni)
 
-    # The socket dies under the pump: the next send raises.
-    await ws.close()
+    # Only the write half dies, so the pump's send is the one and only report
+    # of the broken socket (the reader is still parked on receive).
+    ws.break_sends()
     handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="aGk="))
     await asyncio.sleep(0.05)
 
@@ -320,9 +328,18 @@ async def test_transport_send_failure_detaches_the_session_instead_of_closing_it
     assert handle.close_reasons == []
     assert omni.detached == [handle.session_id]
     assert not handler._pumps[handle.session_id].done()
+
+    # The reader sees the same broken socket a moment later. The attachment is
+    # already gone, so this must not detach a second time: another detach would
+    # restart the engine's disconnect grace window.
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert omni.detached == [handle.session_id]
+    assert handle.close_reasons == []
+
     handle.deliver(SessionClosed(session_id=handle.session_id, reason="client_close"))
     await asyncio.sleep(0.05)
-    task.cancel()
+    assert handle.session_id not in handler._pumps
 
 
 @pytest.mark.asyncio

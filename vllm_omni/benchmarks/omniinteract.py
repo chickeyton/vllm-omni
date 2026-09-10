@@ -849,7 +849,7 @@ class _RealtimeSession:
 
     _MAX_FRAME_BYTES = 64 * 1024 * 1024
 
-    def __init__(self, config: OmniInteractBenchmarkConfig, session_id: str, reference_audio: str) -> None:
+    def __init__(self, config: OmniInteractBenchmarkConfig, reference_audio: str) -> None:
         from vllm_omni.clients.duplex import DuplexClient, EventCollector, SessionConfig
 
         self.session_config = SessionConfig(
@@ -1038,7 +1038,7 @@ async def run_omniinteract_case(
             frames = prepared_input.video_frames
         if not any(frames):
             raise ValueError(f"No video frames were decoded from {case.video_path}")
-        async with _RealtimeSession(config, session_id, reference_audio) as client:
+        async with _RealtimeSession(config, reference_audio) as client:
             session_from = 0  # the collector holds only this session's events
             pcm = _ensure_final_commit_tail(pcm, client.events.events)
             playback = _Playback()

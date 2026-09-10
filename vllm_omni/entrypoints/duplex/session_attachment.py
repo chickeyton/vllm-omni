@@ -288,11 +288,23 @@ class DuplexSessionAttachmentRegistry:
         async with self._lock:
             return self._require(session_id).journal.acknowledge(sequence)
 
-    async def detach(self, session_id: str, *, attachment_generation: int) -> bool:
-        """Drop the current transport; the engine lease owns the disconnect grace."""
+    async def detach(self, session_id: str, *, attachment_generation: int | None = None) -> bool:
+        """Drop the current transport; the engine lease owns the disconnect grace.
+
+        ``attachment_generation`` names the connection asking to detach, so a
+        socket that already lost a takeover cannot detach the winner. ``None``
+        means "whichever connection is attached right now" and is for callers
+        that only know the session (the outbound pump, whose send just failed).
+
+        Returns whether this call is the one that detached: an already-detached
+        session answers ``False`` so a second disconnect signal for the same
+        socket cannot restart the engine's disconnect grace window.
+        """
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None or state.attachment_generation != attachment_generation:
+            if state is None or state.attachment is None:
+                return False
+            if attachment_generation is not None and state.attachment_generation != attachment_generation:
                 return False
             state.attachment = None
             return True

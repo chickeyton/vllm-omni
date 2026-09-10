@@ -87,6 +87,24 @@ def test_command_from_realtime_maps_each_type_to_its_dataclass_and_propagates_ev
     assert "realtime_event_id" not in anonymous.payload()
 
 
+@pytest.mark.parametrize(
+    ("alias", "expected_cls", "body"),
+    [
+        ("push_text", AppendText, {"text": "hello"}),
+        ("input_text.append", AppendText, {"text": "hello"}),
+        ("signal_turn", SignalTurn, {"event": "user_started"}),
+        ("close_session", CloseSession, {}),
+        ("close", CloseSession, {}),
+        ("audio.playback_ack", AckPlayback, {"played_ms": 10}),
+        ("input.commit", Commit, {}),
+    ],
+)
+def test_pre_realtime_client_event_aliases_map_to_their_canonical_command(
+    alias: str, expected_cls: type[DuplexCommand], body: dict[str, object]
+):
+    assert type(command_from_realtime({"type": alias, **body})) is expected_cls
+
+
 def test_append_audio_decodes_and_converts_pcm16_to_16k_float32():
     command = command_from_realtime(
         {"type": "input_audio_buffer.append", "audio": _LOUD_PCM16, "format": "pcm16", "sample_rate_hz": 16000}
