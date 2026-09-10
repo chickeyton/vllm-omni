@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from vllm.sampling_params import SamplingParams
 
-from vllm_omni.config.stage_config import PipelineConfig
+from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig, PipelineConfig
 from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
 from vllm_omni.engine.duplex.contracts import DuplexAppendPlan
 from vllm_omni.engine.duplex.plugin import (
@@ -313,3 +313,12 @@ def test_pipeline_config_binds_one_duplex_plugin_path() -> None:
         if legacy_field in source.read_text(encoding="utf-8")
     ]
     assert readers == []
+
+    # Same rule for the runtime-config knob the framework stopped reading: the
+    # append-retry table it bounded went away with the correlated append RPC.
+    assert "completed_append_cache_size" in {f.name for f in fields(DuplexSessionRuntimeConfig)}
+    assert [
+        str(source)
+        for source in framework_sources
+        if "completed_append_cache_size" in source.read_text(encoding="utf-8")
+    ] == []
