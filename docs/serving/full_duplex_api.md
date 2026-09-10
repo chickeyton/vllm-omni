@@ -22,19 +22,22 @@ capability gates, see the [Realtime Duplex API guide](realtime_duplex_api.md).
 ## Enable Full Duplex
 
 A model is served full duplex when its registered pipeline declares a
-`duplex_plugin` (the model's `DuplexModelPlugin`) and its deploy configuration
-sets:
+`duplex_plugin` (the model's `DuplexModelPlugin`). That declaration alone
+decides it: `vllm-omni serve` constructs `DuplexOmni` instead of `AsyncOmni`,
+and the server is **duplex-only**: it exposes `/v1/realtime?duplex=1` (and its
+alias `/v1/duplex`), `/v1/models` and `/health`; every turn-based HTTP route
+(`/v1/chat/completions`, speech, batch, ...) answers "not available".
+Turn-based use of such a model stays available offline through the Python API
+(`Omni` / `AsyncOmni`).
+
+The deploy configuration of such a model must agree:
 
 ```yaml
 session_mode: duplex
 ```
 
-`vllm-omni serve` then constructs `DuplexOmni` instead of `AsyncOmni`, and the
-server is **duplex-only**: it exposes `/v1/realtime?duplex=1` (and its alias
-`/v1/duplex`), `/v1/models` and `/health`; every turn-based HTTP route
-(`/v1/chat/completions`, speech, batch, ...) answers "not available".
-Turn-based use of such a model stays available offline through the Python API
-(`Omni` / `AsyncOmni`).
+A duplex model started with a deploy configuration that does not set it fails
+at startup rather than falling back to turn-based serving.
 
 !!! warning
 
@@ -44,12 +47,11 @@ Turn-based use of such a model stays available offline through the Python API
     `session.created.session.capabilities` is present before treating the
     connection as full duplex.
 
-The current unified-runtime integrations are:
-
-- MiniCPM-o 4.5, using `vllm_omni/deploy/minicpmo_4_5.yaml`
-  (`session_mode: duplex`);
-- PersonaPlex, whose default `vllm_omni/deploy/personaplex.yaml` enables duplex;
-- Nemotron VoiceChat, via its registered duplex plugin package.
+**MiniCPM-o 4.5** (`vllm_omni/deploy/minicpmo_4_5.yaml`) is the only model
+served over this endpoint today. PersonaPlex and Nemotron VoiceChat still carry
+their pre-framework duplex code: their pipelines declare no `duplex_plugin`, so
+they run turn-based until the follow-up PRs port them to the plugin contract
+(RFC [vllm-omni#7181](https://github.com/vllm-project/vllm-omni/issues/7181)).
 
 JoyVL is a separate HTTP interaction orchestrator and does not use these
 WebSocket endpoints. See [Standalone Experimental Servers](standalone_servers.md).
@@ -102,12 +104,12 @@ deferred, treated as a short acknowledgement, or used to interrupt output.
 The `session.created` payload includes capability fields such as
 `supports_barge_in`, `supports_playback_ack`, `supports_multi_session`,
 `supports_session_resume`, and `chunk_period_ms`. Treat this payload as the
-runtime contract.
-
-For example, PersonaPlex supports native overlapping speech but currently
-advertises `supports_barge_in=false`; destructive output interruption and
-model-state rewind have not been validated for that integration. Capacity and
-session-resume behavior also depend on the selected deployment configuration.
+runtime contract and branch on the flags, never on the model name: a model
+that supports native overlapping speech may still advertise
+`supports_barge_in=false` when destructive output interruption and model-state
+rewind are not validated for it. Capacity and session-resume behavior also
+depend on the selected deployment configuration. The per-model table lives in
+the [Realtime Duplex API guide](realtime_duplex_api.md#capability-negotiation-by-model).
 
 ## Python API
 
@@ -119,7 +121,6 @@ typed `DuplexEvent` objects (each with a `to_realtime()` wire rendering).
 behind the `DuplexClient` API. See the
 [Realtime Duplex API guide](realtime_duplex_api.md#using-the-python-api).
 
-See the [MiniCPM-o example](https://github.com/vllm-project/vllm-omni/tree/main/examples/online_serving/minicpmo),
-[PersonaPlex example](https://github.com/vllm-project/vllm-omni/tree/main/examples/online_serving/personaplex),
+See the [MiniCPM-o example](https://github.com/vllm-project/vllm-omni/tree/main/examples/online_serving/minicpmo)
 and the [full-duplex runtime design](../design/fullduplex.md)
 for model-specific validation and architecture details.

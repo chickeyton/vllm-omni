@@ -439,11 +439,15 @@ Semantic divergences hidden behind shared names:
 ### Event catalogue
 
 Every event type the Realtime route accepts or emits, with a worked example in the next section: 21
-client→server and 42 server→client. Aliases (`push_chunk`,
-`input.audio.append`, `input_text.append`, `push_text`, `signal_turn`,
-`audio.playback_ack`, `close_session`, `close`, `session_close`) share the
-payload of their canonical event and are not listed separately; the alias
-table lives in the normative contract section of [Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md).
+client→server and 42 server→client. Aliases (`input_text.append`,
+`push_text`, `signal_turn`, `audio.playback_ack`, `close_session`, `close`)
+share the payload of their canonical event and are not listed
+separately; the alias table is `translate_realtime_command` in
+`vllm_omni/engine/duplex/realtime_commands.py`. The pre-Realtime WAV-append
+aliases `push_chunk` and `input.audio.append` are **not** accepted on this
+route: send `input_audio_buffer.append` with one of the supported input
+formats (`pcm16`, `pcm_s16le`, `s16le`, `pcm_f32le`, `g711_ulaw`,
+`g711_alaw`).
 
 #### Client to server
 
@@ -464,7 +468,7 @@ table lives in the normative contract section of [Full-Duplex Runtime (MiniCPM-o
 | `conversation.item.retrieve` | 1 | Fetch a stored item by id. |
 | `conversation.item.delete` | 1 | Delete a stored item by id. |
 | `conversation.item.truncate` | 1 | Truncate an assistant item's audio/transcript at `audio_end_ms`. |
-| `response.create` | 1 | Explicitly request a response with per-response overrides. |
+| `response.create` | 1 | Explicitly request a response with per-response overrides. Requires committed audio input; otherwise `response_create_without_input`. |
 | `response.cancel` | 1 | Cancel the active (or named) response; advances `epoch`. |
 | `output_audio_buffer.clear` | 1 | Discard queued output audio; advances `epoch` (OpenAI: WebRTC-only, here also WebSocket). |
 | `barge_in` | 3 | Explicit hard interrupt; requires `capabilities.supports_barge_in`. |
@@ -1248,6 +1252,14 @@ them out into typed events before they reach a client.
   barge-in, or audio truncation; Nemotron VoiceChat does not support barge-in
   or audio truncation; camera frames are consumed only by MiniCPM-o 4.5; tool
   calls are produced only by Nemotron VoiceChat.
+- A response is generated from committed **audio**, so the OpenAI text-prompt
+  shape does not drive one: `conversation.item.create` with an `input_text`
+  part adds the item to history, but a following `response.create` with no
+  committed audio is rejected with `response_create_without_input`, and
+  `input.text.append` is rejected with `native_text_append_unsupported`.
+  Text-to-speech has its own shape here — put the text in
+  `extra_body.duplex_initial_user_text` on `session.update`, then stream audio
+  units (silence is enough). The seeded turn is what the model answers.
 - `turn_detection` supports only `server_vad` with `interrupt_response=true`;
   `semantic_vad`, `interrupt_response=false`, and `create_response` are not
   supported.
@@ -1257,8 +1269,8 @@ them out into typed events before they reach a client.
 - `rate_limits.updated` is emitted for compatibility only and always carries
   an empty list.
 - Session capacity is bounded by `duplex_session.max_sessions` in the deploy
-  configuration; admission beyond it fails with `resource_exhausted` or
-  `resource_exhausted`.
+  configuration; admission beyond it fails with `resource_exhausted`
+  (`rate_limit_error`, retryable).
 - A duplex deployment serves duplex sessions only: `/v1/chat/completions`
   and the other turn-based HTTP routes report "not available" on a MiniCPM-o
   4.5 server. Turn-based use of the model stays available offline through
