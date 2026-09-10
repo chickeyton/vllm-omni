@@ -440,6 +440,9 @@ class DuplexSessionManager:
         session_id = message.session_id
         session: DuplexEngineSession | None = None
         runner: DuplexSessionRunner | None = None
+        # Only the open that put the id in ``_admitting`` may take it out again:
+        # a duplicate open must not release the slot the first one is holding.
+        holds_admission_slot = False
         try:
             if session_id in self.runners or session_id in self._closing or session_id in self._admitting:
                 raise DuplexSessionError(f"Duplex session already exists: {session_id}", code="session_exists")
@@ -453,6 +456,7 @@ class DuplexSessionManager:
             # Hold the slot across the plugin await: opens of different
             # sessions run concurrently and must not all pass the check above.
             self._admitting.add(session_id)
+            holds_admission_slot = True
             config = message.session_config
             self.plugin.validate_client_extra_body(config.extra_body)
             try:
@@ -507,7 +511,8 @@ class DuplexSessionManager:
                 self._unregister_session_requests(session_id)
             await self._put_result(message, operation="open", ok=False, error=exc)
         finally:
-            self._admitting.discard(session_id)
+            if holds_admission_slot:
+                self._admitting.discard(session_id)
 
     def _require_runner(self, session_id: str) -> DuplexSessionRunner:
         runner = self.runners.get(session_id)
@@ -660,33 +665,38 @@ class DuplexSessionManager:
         completed = 0
         effective_now = self._clock() if now is None else now
         # Retry request cleanups recorded by the orchestrator error paths.
-        for key, pending in list(self._pending_request_cleanups.items()):
+        for key, request_cleanup in list(self._pending_request_cleanups.items()):
             if key in self._request_cleanups_in_progress:
                 continue
             try:
-                await self._complete_request_cleanup(key, pending)
+                await self._complete_request_cleanup(key, request_cleanup)
             except Exception as exc:
                 logger.warning(
                     "duplex request cleanup remains pending for session %s: %s",
-                    pending.session_id,
+                    request_cleanup.session_id,
                     exc,
                 )
                 continue
             completed += 1
         # Retry closes/expiries whose stage cleanup failed.
-        for session_id, pending in list(self._closing.items()):
+        for session_id, session_cleanup in list(self._closing.items()):
             if session_id in self.runners:
                 continue
-            if pending.kind == "request_cleanup" and any(
+            if session_cleanup.kind == "request_cleanup" and any(
                 key[0] == session_id for key in self._pending_request_cleanups
             ):
                 # The stage cleanup is owned by the request-cleanup path (orchestrator
                 # or the retry above); ``finalize_closed_sessions`` releases the slot.
                 continue
             try:
-                await self._finalize_pending_cleanup(pending, self._session_snapshots.get(session_id))
+                await self._finalize_pending_cleanup(session_cleanup, self._session_snapshots.get(session_id))
             except Exception as exc:
-                logger.warning("duplex %s cleanup remains pending for session %s: %s", pending.kind, session_id, exc)
+                logger.warning(
+                    "duplex %s cleanup remains pending for session %s: %s",
+                    session_cleanup.kind,
+                    session_id,
+                    exc,
+                )
                 continue
             completed += 1
         # Expire leases.

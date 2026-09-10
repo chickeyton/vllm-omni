@@ -72,7 +72,7 @@ class DuplexOrchestrator(OrchestratorBase, DuplexStagePort):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.plugin = plugin
-        self.duplex_session_config = duplex_session_config or DuplexSessionRuntimeConfig()
+        self.duplex_session_config = duplex_session_config
         self.session_manager = DuplexSessionManager(
             plugin=plugin,
             stage_port=self,

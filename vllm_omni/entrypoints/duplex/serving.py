@@ -70,6 +70,14 @@ class _Attachment:
     generation: int
 
 
+@dataclass(frozen=True)
+class _ResumeCredentials:
+    """Transport credentials stamped onto ``session.created`` for a resumable session."""
+
+    attachment_generation: int
+    resume_token: str
+
+
 class OmniDuplexSessionHandler:
     """WebSocket transport for engine-resident duplex sessions."""
 
@@ -187,12 +195,12 @@ class OmniDuplexSessionHandler:
         )
         resume_supported = bool(handle.capabilities.supports_session_resume)
         attachment = _Attachment(handle=handle, generation=created.attachment_generation)
-        credentials: dict[str, object] | None = None
+        credentials: _ResumeCredentials | None = None
         if resume_supported:
-            credentials = {
-                "attachment_generation": created.attachment_generation,
-                "resume_token": created.resume_token.plaintext,
-            }
+            credentials = _ResumeCredentials(
+                attachment_generation=created.attachment_generation,
+                resume_token=created.resume_token.plaintext,
+            )
         self._start_pump(handle, credentials)
         return attachment
 
@@ -289,7 +297,7 @@ class OmniDuplexSessionHandler:
     # Outbound pump (session-scoped, survives reconnects)                #
     # ------------------------------------------------------------------ #
 
-    def _start_pump(self, handle: DuplexSessionHandle, credentials: dict[str, object] | None) -> None:
+    def _start_pump(self, handle: DuplexSessionHandle, credentials: _ResumeCredentials | None) -> None:
         existing = self._pumps.get(handle.session_id)
         if existing is not None and not existing.done():
             return
@@ -298,13 +306,17 @@ class OmniDuplexSessionHandler:
             name=f"duplex-session-pump-{handle.session_id}",
         )
 
-    async def _pump_events(self, handle: DuplexSessionHandle, credentials: dict[str, object] | None) -> None:
+    async def _pump_events(self, handle: DuplexSessionHandle, credentials: _ResumeCredentials | None) -> None:
         session_id = handle.session_id
         close_reason = "session_closed"
         try:
             async for event in handle.events():
-                if isinstance(event, SessionCreated) and credentials:
-                    event = replace(event, **credentials)
+                if isinstance(event, SessionCreated) and credentials is not None:
+                    event = replace(
+                        event,
+                        attachment_generation=credentials.attachment_generation,
+                        resume_token=credentials.resume_token,
+                    )
                 await self._send_event(session_id, event)
                 if isinstance(event, SessionClosed):
                     close_reason = event.reason or event.type
@@ -349,12 +361,17 @@ class OmniDuplexSessionHandler:
             await self._detach_current_attachment(session_id)
 
     async def _detach_current_attachment(self, session_id: str) -> None:
-        """Disconnect semantics for the socket currently attached to ``session_id``."""
+        """Disconnect semantics for the socket currently attached to ``session_id``.
+
+        The pump is session-scoped and outlives any one connection, so it can
+        only name the session: the registry detaches whichever socket is
+        attached, which is the one whose send just failed.
+        """
         handle = self._omni.get_session(session_id)
         if handle is None or handle.closed:
             return
         if handle.capabilities.supports_session_resume:
-            if await self._attachment_registry.detach(session_id):
+            if await self._attachment_registry.detach(session_id, attachment_generation=None):
                 with suppress(DuplexSessionError):
                     await self._omni.detach_session(session_id)
             return

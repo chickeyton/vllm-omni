@@ -495,8 +495,8 @@ class _RealtimeClient(oi._RealtimeSession):
 
     instances: list[_RealtimeClient] = []
 
-    def __init__(self, config: oi.OmniInteractBenchmarkConfig, session_id: str, reference_audio: str):
-        super().__init__(config, session_id, reference_audio)
+    def __init__(self, config: oi.OmniInteractBenchmarkConfig, reference_audio: str):
+        super().__init__(config, reference_audio)
         self.acks: list[tuple[str, int]] = []
         self.instances.append(self)
 

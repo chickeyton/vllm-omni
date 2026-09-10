@@ -390,8 +390,13 @@ class DuplexSessionRunner:
         """
         session = self.session
         self._begin_close(reason)
-        if not self._closed_emitted and not self._closed_deferred:
+        if not self._closed_emitted:
             if emit_expired:
+                # Also when the event was deferred: the manager only emits a
+                # deferred terminal for the teardown it drives itself, and an
+                # expiry that arrives first (a stage failure racing a wire
+                # ``session.close``) takes the runner away from it. Emitting
+                # here keeps "every session ends with one terminal event".
                 self._closed_emitted = True
                 self._emit_events([SessionExpired(reason=reason)])
             else:
@@ -1438,7 +1443,7 @@ class DuplexSessionRunner:
         session.mark_user_input_activity()
         audio = event.get("audio") or event.get("data")
         if not isinstance(audio, str):
-            self._emit_error("bad_event", "input.audio.append requires audio")
+            self._emit_error("bad_event", "input_audio_buffer.append requires audio")
             return
         if not session.capabilities.supports_barge_in and self._event_requests_barge_in(event):
             self._emit_events([self._barge_in_unsupported_error()])
