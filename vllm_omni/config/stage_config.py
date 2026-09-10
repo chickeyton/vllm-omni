@@ -511,6 +511,12 @@ class DuplexSessionRuntimeConfig:
     max_pending_input_bytes_per_session: int = 16 * 1024 * 1024
     max_pending_turns_per_session: int = 4
     max_sessions: int = 1
+    # Unread by the plugin framework. It used to bound the per-session
+    # completed-append table that made a retried append RPC submit once; the
+    # framework carries appends as one-way commands on the runner's ordered
+    # mailbox, so there is no client-visible retry to deduplicate. The field
+    # stays so the deploy configs of the models that are not ported yet still
+    # parse, and goes away with the PR that ports the last of them.
     completed_append_cache_size: int = 256
     # Startup warmup: run this many silent 80 ms-style frames through a
     # throwaway realtime session before real clients are admitted, so

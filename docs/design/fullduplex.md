@@ -232,7 +232,13 @@ Everything below runs on the orchestrator asyncio loop; there is no lock.
   on one loop in program order, nothing can be emitted for an old epoch after
   its terminal event; `runner.emit()` still drops a terminal carrying a stale
   epoch and stamps `epoch` on every event for clients that filter
-  defensively.
+  defensively. This is a statement about order, not about latency: the engine
+  output queue and each `DuplexSessionHandle` outbox are unbounded and FIFO,
+  so a cancellation is delivered behind whatever audio was already emitted for
+  the response it cancels. A client that must stop quickly cancels its own
+  playback on `response.done` / `audio.cancelled` rather than waiting for the
+  stream to drain. Bounding those buffers and letting an accepted invalidation
+  skip undelivered media is left to the follow-up RFC.
 - **Backpressure before the mailbox.** `DuplexSessionManager.dispatch`
   checks `max_pending_input_bytes_per_session` and reserves a pending turn for
   `Commit` before the put; a rejected command is answered with
