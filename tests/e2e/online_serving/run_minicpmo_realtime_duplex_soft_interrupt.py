@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Validate MiniCPM-o Realtime duplex soft-interrupt delta streaming.
 
 This E2E driver runs the public ``realtime_duplex_demo.py`` against a live

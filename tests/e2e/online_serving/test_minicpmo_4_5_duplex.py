@@ -110,6 +110,66 @@ async def _run_protocol_smoke(*, url: str, model: str, ref_audio: Path) -> list[
     return events
 
 
+async def _run_text_only_response_create(
+    *,
+    url: str,
+    model: str,
+    ref_audio: Path,
+    text: str,
+    timeout_s: float = 120.0,
+) -> dict[str, object]:
+    """Drive a text prompt with no audio and return the server's answer.
+
+    A Realtime client asks for speech from text with a user message item
+    followed by ``response.create``. A model-native duplex session generates
+    from audio units, so this returns whatever the server answers rather than
+    assuming a response.
+    """
+    websocket_url = build_realtime_url(url, model, autostart=False)
+    async with websockets.connect(websocket_url, max_size=64 * 1024 * 1024) as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "model": model,
+                        "modalities": ["audio", "text"],
+                        "output_audio_format": "pcm16",
+                        "turn_detection": None,
+                        "temperature": 0.0,
+                        "ref_audio": _ref_audio_data_url(str(ref_audio)),
+                        "extra_body": {"auto_response": False},
+                    },
+                }
+            )
+        )
+        await _receive_protocol_events(ws, {"session.created", "session.updated"}, timeout_s=60)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+            )
+        )
+        await ws.send(json.dumps({"type": "response.create"}))
+
+        async def receive_outcome() -> dict[str, object]:
+            while True:
+                raw = await ws.recv()
+                if not isinstance(raw, str):
+                    continue
+                event = json.loads(raw)
+                if isinstance(event, dict) and event.get("type") in {"error", "response.done"}:
+                    return event
+
+        return await asyncio.wait_for(receive_outcome(), timeout=timeout_s)
+
+
 @pytest.mark.core_model
 @hardware_test(res={"cuda": "H100", "npu": "A3"}, num_cards=1)
 @pytest.mark.parametrize("omni_server", SERVER_PARAMS, indirect=True)
@@ -183,6 +243,69 @@ def test_duplex_single_session_video_input(omni_server, tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["video_frame_count"] == 4
     assert result["video_stacked_frame_count"] == 4
+    _assert_positive_int(result["audio_delta_count"])
+    assert result["done_count"] == 2
+    assert result["error_count"] == 0
+    assert result["all_audio_responses_have_transcript"] is True
+    assert result["transcript_delta_done_ok"] is True
+    _assert_request_metrics(result["request_metrics"], expected_count=2)
+    _assert_session_metrics(result["session_metrics"], expected_count=2)
+
+
+@pytest.mark.advanced_model
+@hardware_test(res={"cuda": "H100", "npu": "A3"}, num_cards=1)
+@pytest.mark.parametrize("omni_server", SERVER_PARAMS, indirect=True)
+def test_duplex_text_only_response_create_is_rejected(omni_server) -> None:
+    """A duplex session generates from audio: a text-only prompt is refused, not ignored.
+
+    Every session on this route is model-native, so the chat-completion
+    fallback that used to answer ``conversation.item.create`` +
+    ``response.create`` with synthesized speech is gone. What a text-prompt
+    client gets instead is this typed rejection, which is the contract the
+    Seed-TTS Realtime backend has to be ported to.
+    """
+    outcome = asyncio.run(
+        _run_text_only_response_create(
+            url=realtime_url(omni_server),
+            model=omni_server.model,
+            ref_audio=resolve_ref_audio(),
+            text="Please say: the quick brown fox jumps over the lazy dog.",
+        )
+    )
+
+    assert outcome.get("type") == "error", outcome
+    error = outcome.get("error")
+    assert isinstance(error, dict), outcome
+    assert error.get("code") == "response_create_without_input", outcome
+    assert error.get("type") == "invalid_request_error", outcome
+
+
+@pytest.mark.advanced_model
+@hardware_test(res={"cuda": "H100", "npu": "A3"}, num_cards=1)
+@pytest.mark.parametrize("omni_server", SERVER_PARAMS, indirect=True)
+def test_duplex_single_session_still_image_input(omni_server, tmp_path: Path) -> None:
+    """A spoken turn with one still image attached.
+
+    The still-image case is a one-element frame list, which the client repeats
+    on every unit of the turn: unlike the camera track it never advances, so
+    this covers the image path the turn-based ``image -> text + audio`` request
+    used to cover.
+    """
+    args = demo_args(
+        omni_server=omni_server,
+        input_wav=validated_input_wav(),
+        ref_audio=resolve_ref_audio(),
+        output_dir=tmp_path / "still_image",
+    )
+    args.turns = 2
+    args.turn_duration_ms = [args.first_turn_ms] * args.turns
+    args.video_frames_b64 = duplex_camera_frames(seconds=1, cache_dir=tmp_path / "still")[:1]
+
+    result = asyncio.run(run_demo(args))
+
+    assert result["ok"] is True
+    assert result["video_frame_count"] == 1
+    assert result["video_stacked_frame_count"] == 0
     _assert_positive_int(result["audio_delta_count"])
     assert result["done_count"] == 2
     assert result["error_count"] == 0
