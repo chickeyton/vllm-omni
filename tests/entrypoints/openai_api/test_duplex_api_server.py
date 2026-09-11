@@ -275,9 +275,29 @@ def test_realtime_route_switches_to_duplex_only_for_the_documented_flag_values(f
     assert handler.queries == [{"duplex": flag}]
 
 
-@pytest.mark.parametrize("query", ["", "?duplex=0", "?duplex=yes"])
-def test_realtime_without_the_duplex_flag_stays_the_turn_based_route(query: str) -> None:
-    """Without the flag the duplex handler must not answer, even on a duplex-only server."""
+@pytest.mark.parametrize("query", ["", "?model=openbmb%2FMiniCPM-o-4_5"])
+def test_realtime_without_a_duplex_flag_reaches_the_session_handler(query: str) -> None:
+    """A bare connection to a duplex deployment is a duplex session.
+
+    ``?duplex=1`` is the spelling the server advertises, but it is not a
+    requirement: a deployment that declares a duplex plugin answers plain
+    ``/v1/realtime`` too, so a stock Realtime client needs no vendor query
+    parameter.
+    """
+    handler = _RecordingHandler()
+
+    with TestClient(_duplex_app(handler)) as client:
+        with client.websocket_connect(f"/v1/realtime{query}") as websocket:
+            assert websocket.receive_json()["type"] == "session.created"
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_text()
+
+    assert len(handler.queries) == 1
+
+
+@pytest.mark.parametrize("query", ["?duplex=0", "?duplex=false", "?duplex=off"])
+def test_realtime_opted_out_of_duplex_falls_through_to_the_turn_based_route(query: str) -> None:
+    """An explicit opt-out selects the legacy handler, which a duplex server does not mount."""
     handler = _RecordingHandler()
 
     with TestClient(_duplex_app(handler)) as client:
