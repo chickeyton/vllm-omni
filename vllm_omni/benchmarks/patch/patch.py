@@ -2098,6 +2098,14 @@ async def async_request_openai_audio_speech(
     return output
 
 
+#: Silence appended per Seed-TTS turn so a model-native duplex session has audio
+#: units to generate on. The target text rides the session context, so this only
+#: advances the clock; the model stops on its own turn_eos well before the cap.
+_SEED_TTS_SILENCE_SECONDS = 12.0
+#: MiniCPM-o emits 24 kHz mono; used to report audio_frames after the session closed.
+_SEED_TTS_OUTPUT_SAMPLE_RATE_HZ = 24_000
+
+
 def _realtime_websocket_url(api_url: str) -> str:
     from vllm_omni.clients.duplex import build_realtime_url
 
@@ -2326,6 +2334,17 @@ class _RealtimeTTSProbe:
         assert self._client is not None
         await acknowledge_collected_playback(self._client, self.events)
 
+    async def stream_silence(self, *, seconds: float, chunk_ms: int = 200) -> None:
+        """Append silent PCM16 units so a model-native session has units to speak on.
+
+        A duplex model generates per audio unit. The target text rides the
+        session context (``duplex_initial_user_text``), so the audio only has
+        to advance the clock; silence keeps it from adding content of its own.
+        """
+        assert self._client is not None
+        samples = int(16_000 * max(0.0, seconds))
+        await self._client.stream_pcm(bytes(2 * samples), chunk_ms=chunk_ms, realtime=True, is_speech=False)
+
     async def close_session(self, *, timeout_s: float = 20.0) -> None:
         assert self._client is not None
         await self._client.close(timeout_s=timeout_s)
@@ -2362,45 +2381,43 @@ async def async_request_openai_realtime_duplex(
     if not turn_prompts:
         turn_prompts = [("", request_func_input.prompt)]
     session_id = f"seed-tts-{request_func_input.request_id or uuid.uuid4().hex}"
+    silence_seconds = float(getattr(request_func_input, "seed_tts_silence_seconds", 0.0) or _SEED_TTS_SILENCE_SECONDS)
+    turn_metrics: list[dict[str, object]] = []
+    turn_timings: list[dict[str, object]] = []
+    turn_pcm_bytes: list[bytes] = []
+    turn_transcripts: list[str] = []
+    measurement_origin = {
+        "ttft": "first silence append client send to first non-empty text delta",
+        "ttfp": "first silence append client send to first audio packet",
+        "rtf": "request-start-to-last-audio receive time divided by emitted audio duration",
+    }
     try:
-        async with _RealtimeTTSProbe(_realtime_websocket_url(request_func_input.api_url)) as client:
-            await client.configure(
-                request_func_input.model_name or request_func_input.model,
-                output_audio_format="pcm16",
-                instructions=getattr(
-                    request_func_input,
-                    "seed_tts_system_prompt",
-                    SEED_TTS_DEFAULT_OMNI_SYSTEM_PROMPT,
-                ),
-                auto_response=False,
-                extra_body=speech_extra,
-                timeout_s=120.0,
-            )
-            turn_metrics: list[dict[str, object]] = []
-            turn_timings: list[dict[str, object]] = []
-            turn_pcm_bytes: list[bytes] = []
-            turn_transcripts: list[str] = []
-            measurement_origin = {
-                "ttft": "conversation.item.create client send to first non-empty text delta",
-                "ttfp": "conversation.item.create client send to first audio packet",
-                "rtf": "request-start-to-last-audio receive time divided by emitted audio duration",
-            }
-            for request_index, (utterance_id, target_text) in enumerate(turn_prompts):
+        # One session per utterance. A model-native duplex session takes its
+        # text once, in the session context (``duplex_initial_user_text``), so
+        # a session cannot be re-seeded for a second target text.
+        for request_index, (utterance_id, target_text) in enumerate(turn_prompts):
+            async with _RealtimeTTSProbe(_realtime_websocket_url(request_func_input.api_url)) as client:
+                await client.configure(
+                    request_func_input.model_name or request_func_input.model,
+                    output_audio_format="pcm16",
+                    instructions=getattr(
+                        request_func_input,
+                        "seed_tts_system_prompt",
+                        SEED_TTS_DEFAULT_OMNI_SYSTEM_PROMPT,
+                    ),
+                    auto_response=True,
+                    extra_body={
+                        **speech_extra,
+                        "duplex_initial_user_text": target_text,
+                        "force_listen_count": 0,
+                    },
+                    timeout_s=120.0,
+                )
                 response_offset = len(client.events.response_ids)
                 done_before = client.events.count("response.done")
                 errors_before = len(client.events.errors())
                 turn_started_at_s = time.monotonic()
-                await client.send(
-                    {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": target_text}],
-                        },
-                    }
-                )
-                await client.send({"type": "response.create"})
+                await client.stream_silence(seconds=silence_seconds)
                 await wait_for_condition(
                     lambda: (
                         client.events.count("response.done") > done_before
@@ -2455,43 +2472,41 @@ async def async_request_openai_realtime_duplex(
                 )
                 turn_transcripts.append(client.events.response_text(response_id))
                 await client.acknowledge_playback()
-            request_finished_at = time.perf_counter()
-            session_metrics = summarize_session_request_metrics(
-                turn_metrics,
-                session_id=session_id,
-            )
-            await client.close_session(timeout_s=30.0)
+                await client.close_session(timeout_s=30.0)
+        request_finished_at = time.perf_counter()
+        session_metrics = summarize_session_request_metrics(
+            turn_metrics,
+            session_id=session_id,
+        )
 
-            output.generated_text = " ".join(filter(None, turn_transcripts))
-            output.ttft = float(session_metrics.get("mean_ttft_ms") or 0.0) / 1000.0
-            output.audio_ttfp = float(session_metrics.get("mean_ttfp_ms") or 0.0) / 1000.0
-            output.audio_rtf = float(session_metrics.get("mean_rtf") or 0.0)
-            output.audio_duration = (
-                sum(float(metric.get("audio_duration_ms") or 0.0) for metric in turn_metrics) / 1000.0
+        output.generated_text = " ".join(filter(None, turn_transcripts))
+        output.ttft = float(session_metrics.get("mean_ttft_ms") or 0.0) / 1000.0
+        output.audio_ttfp = float(session_metrics.get("mean_ttfp_ms") or 0.0) / 1000.0
+        output.audio_rtf = float(session_metrics.get("mean_rtf") or 0.0)
+        output.audio_duration = sum(float(metric.get("audio_duration_ms") or 0.0) for metric in turn_metrics) / 1000.0
+        output.audio_frames = int(output.audio_duration * _SEED_TTS_OUTPUT_SAMPLE_RATE_HZ)
+        output.latency = request_finished_at - output.start_time
+        output.tts_turn_pcm_bytes = turn_pcm_bytes
+        output.tts_output_pcm_bytes = b"".join(turn_pcm_bytes)
+        if bool((request_func_input.extra_body or {}).get("save_duplex_request_metrics")):
+            output.duplex_request_metrics = turn_metrics
+            output.duplex_session_metrics = session_metrics
+        output.output_tokens = sum(
+            int(stage0.get("output_token_count") or 0)
+            for timing in turn_timings
+            if isinstance((stage0 := timing.get("stage0_tokens")), dict)
+        )
+        token_timing_measured = _apply_stage0_token_timings(
+            output,
+            [timing.get("stage0_tokens") for timing in turn_timings],
+            expected_output_tokens=output.output_tokens,
+        )
+        if not token_timing_measured and output.output_tokens > 1:
+            logger.warning(
+                "Realtime TTS session %s omitted complete engine token timing; standard TPOT/ITL are unavailable",
+                session_id,
             )
-            output.audio_frames = int(output.audio_duration * client.events.output_sample_rate_hz)
-            output.latency = request_finished_at - output.start_time
-            output.tts_turn_pcm_bytes = turn_pcm_bytes
-            output.tts_output_pcm_bytes = b"".join(turn_pcm_bytes)
-            if bool((request_func_input.extra_body or {}).get("save_duplex_request_metrics")):
-                output.duplex_request_metrics = turn_metrics
-                output.duplex_session_metrics = session_metrics
-            output.output_tokens = sum(
-                int(stage0.get("output_token_count") or 0)
-                for timing in turn_timings
-                if isinstance((stage0 := timing.get("stage0_tokens")), dict)
-            )
-            token_timing_measured = _apply_stage0_token_timings(
-                output,
-                [timing.get("stage0_tokens") for timing in turn_timings],
-                expected_output_tokens=output.output_tokens,
-            )
-            if not token_timing_measured and output.output_tokens > 1:
-                logger.warning(
-                    "Realtime TTS session %s omitted complete engine token timing; standard TPOT/ITL are unavailable",
-                    session_id,
-                )
-            output.success = True
+        output.success = True
     except Exception:
         output.success = False
         output.error = traceback.format_exc()
