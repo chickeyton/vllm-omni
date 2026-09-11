@@ -312,12 +312,17 @@ its protocol tests.
 
 ### Endpoint and transport
 
-The endpoint is `ws(s)://<host>/v1/realtime?duplex=1`; the `duplex` query
-parameter (`1`, `true`, or `on`) selects the duplex session handler, and
-`ws(s)://<host>/v1/duplex` is an alias of it. The handler exists only for
-deployments whose deploy configuration declares `session_mode: duplex` and
-whose pipeline declares a `duplex_plugin`. Optional query parameters are
-`model`, `autostart` (`0` means resume-only) and `resume`. Every message is one JSON object per WebSocket
+The endpoint is `ws(s)://<host>/v1/realtime`. On a deployment whose pipeline
+declares a `duplex_plugin` and whose deploy configuration declares
+`session_mode: duplex`, a bare connection is already a duplex session, so a
+stock Realtime client needs no vendor query parameter. `?duplex=1` (`1`,
+`true` or `on`) is the spelling this page uses and stays valid;
+`?duplex=0` (`0`, `false`, `off`) explicitly opts out and selects the
+turn-based Realtime handler, which a duplex-only server does not mount --
+that connection is answered with `Realtime API is not available`.
+`ws(s)://<host>/v1/duplex` is an alias that always selects the duplex
+handler. Optional query parameters are `model`, `autostart` (`0` means
+resume-only) and `resume`. Every message is one JSON object per WebSocket
 text frame, discriminated by `type`. Inbound events are applied in arrival
 order through one per-session mailbox; outbound events preserve that order
 and carry a monotonically increasing `server_event_seq`, which is the replay
