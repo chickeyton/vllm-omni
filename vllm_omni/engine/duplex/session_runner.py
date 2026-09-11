@@ -1956,6 +1956,154 @@ class DuplexSessionRunner:
                 return None, emitted_response
         return close_reason, emitted_response
 
+    def _fail_response_from_model_error(self, model_result: dict[str, object]) -> None:
+        """Report a data-plane error and fail the response it interrupted."""
+        session = self.session
+        response_id = session.active_response_id
+        self._emit_error(
+            str(model_result.get("error_code")),
+            str(model_result.get("error") or "Duplex native data-plane error"),
+        )
+        if response_id is None:
+            return
+        session.end_response(commit_text=False)
+        self.emit(
+            {
+                "type": "response.done",
+                "session_id": session.session_id,
+                "response_id": response_id,
+                "epoch": session.epoch,
+                "committed": False,
+                "status": "failed",
+                "status_details": {"type": "failed", "reason": model_result.get("error_code")},
+                "playback": session.playback.as_dict(),
+            }
+        )
+
+    def _complete_model_turn_without_output(
+        self,
+        model_result: dict[str, object],
+        *,
+        model_turn_id: int | None,
+        data_plane_request_id: object,
+    ) -> bool:
+        """The model ended its turn with nothing to say.
+
+        Returns whether an event was emitted: an auto-response session reports
+        the decision as a listen, a turn-based one simply releases the request.
+        """
+        session = self.session
+        data_plane = self.plugin.data_plane
+        auto_response = self._session_auto_responds()
+        if isinstance(data_plane_request_id, str):
+            if not auto_response and data_plane_request_id == session.active_request_id:
+                session.clear_request()
+            if not auto_response:
+                data_plane.mark_terminal(data_plane_request_id)
+        if model_turn_id is not None:
+            session.complete_model_turn(model_turn_id)
+        if not auto_response:
+            return False
+        self.model_state.clear_continuation()
+        payload = {
+            "type": "response.listen",
+            "session_id": session.session_id,
+            "epoch": session.epoch,
+            "reason": "model_turn_completed_without_output",
+            "model_listen": True,
+        }
+        self._attach_runtime_metadata(payload, model_result)
+        self.emit(payload)
+        return True
+
+    async def _on_model_listen(
+        self,
+        model_result: dict[str, object],
+        *,
+        model_turn_id: int | None,
+        data_plane_request_id: object,
+        expected_epoch: int | None,
+    ) -> tuple[str | None, bool]:
+        """The model chose to keep listening rather than speak.
+
+        Either it continues the current response with another unit, or the
+        response ends here: an auto-response session that has continuations
+        left schedules one, and anything else closes the turn out.
+        """
+        session = self.session
+        model_state = self.model_state
+        data_plane = self.plugin.data_plane
+        auto_response = self._session_auto_responds()
+        close_reason: str | None = None
+        emitted_response = False
+        self._end_active_response_before_future_model_turn(model_turn_id=model_turn_id)
+        if (
+            session.active_response_id is not None
+            and model_turn_id is not None
+            and not session.active_response_accepts_model_turn(model_turn_id)
+        ):
+            return close_reason, emitted_response
+        active_response_id = session.active_response_id
+        auto_continuations_remaining = active_response_id is None or self._response_continuations_remaining(
+            active_response_id
+        )
+        non_terminal_auto_listen = (
+            auto_response
+            and active_response_id is not None
+            and session.active_request_id is not None
+            and model_result.get("end_of_turn") is not True
+            and auto_continuations_remaining
+        )
+        if non_terminal_auto_listen:
+            self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
+            return close_reason, emitted_response
+        if not auto_response and data_plane_request_id == session.active_request_id:
+            session.clear_request()
+        model_listen = model_result.get("model_listen")
+        if not isinstance(model_listen, bool):
+            model_listen = model_result.get("reason") in {None, "", "model_listen"}
+        response_id = session.active_response_id
+        if isinstance(data_plane_request_id, str) and not auto_response:
+            data_plane.mark_terminal(data_plane_request_id)
+        emitted_response = True
+        payload = {
+            "type": "response.listen",
+            "session_id": session.session_id,
+            "epoch": session.epoch,
+            "reason": model_result.get("reason") or "model_listen",
+            "model_listen": model_listen,
+        }
+        if response_id is not None:
+            payload["response_id"] = response_id
+        self._attach_runtime_metadata(payload, model_result)
+        self.emit(payload)
+        if model_result.get("abort_data_plane_request") is True and isinstance(data_plane_request_id, str):
+            await self._abort_request_background(data_plane_request_id, notify=False)
+        if response_id is not None:
+            if not auto_response and self._response_continuations_remaining(response_id):
+                self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
+                return close_reason, emitted_response
+            if auto_response:
+                model_state.clear_continuation()
+                if not auto_continuations_remaining:
+                    completed_turn_id = model_turn_id
+                    if completed_turn_id is None:
+                        completed_turn_id = session.active_response_turn_id
+                    if completed_turn_id is not None:
+                        session.complete_model_turn(completed_turn_id)
+            session.end_response(commit_text=False, preserve_request=auto_response)
+            self.emit(
+                {
+                    "type": "response.done",
+                    "session_id": session.session_id,
+                    "response_id": response_id,
+                    "epoch": session.epoch,
+                    "committed": False,
+                    "playback": session.playback.as_dict(),
+                }
+            )
+        return close_reason, emitted_response
+
     async def _send_one_model_output_event(
         self,
         model_result: dict[str, object],
@@ -1963,7 +2111,6 @@ class DuplexSessionRunner:
         expected_epoch: int | None = None,
     ) -> tuple[str | None, bool]:
         session = self.session
-        model_state = self.model_state
         data_plane = self.plugin.data_plane
         close_reason: str | None = None
         emitted_response = False
@@ -1979,25 +2126,7 @@ class DuplexSessionRunner:
         if isinstance(data_plane_request_id, str) and not active_request_matches:
             return close_reason, emitted_response
         if isinstance(model_result.get("error_code"), str):
-            response_id = session.active_response_id
-            self._emit_error(
-                str(model_result.get("error_code")),
-                str(model_result.get("error") or "Duplex native data-plane error"),
-            )
-            if response_id is not None:
-                session.end_response(commit_text=False)
-                self.emit(
-                    {
-                        "type": "response.done",
-                        "session_id": session.session_id,
-                        "response_id": response_id,
-                        "epoch": session.epoch,
-                        "committed": False,
-                        "status": "failed",
-                        "status_details": {"type": "failed", "reason": model_result.get("error_code")},
-                        "playback": session.playback.as_dict(),
-                    }
-                )
+            self._fail_response_from_model_error(model_result)
             return close_reason, True
         if model_result.get("function_call") is True:
             self.emit(
@@ -2031,73 +2160,12 @@ class DuplexSessionRunner:
             self.emit(payload)
             return close_reason, emitted_response
         if is_listen is True:
-            self._end_active_response_before_future_model_turn(model_turn_id=model_turn_id)
-            if (
-                session.active_response_id is not None
-                and model_turn_id is not None
-                and not session.active_response_accepts_model_turn(model_turn_id)
-            ):
-                return close_reason, emitted_response
-            active_response_id = session.active_response_id
-            auto_continuations_remaining = active_response_id is None or self._response_continuations_remaining(
-                active_response_id
+            return await self._on_model_listen(
+                model_result,
+                model_turn_id=model_turn_id,
+                data_plane_request_id=data_plane_request_id,
+                expected_epoch=expected_epoch,
             )
-            non_terminal_auto_listen = (
-                auto_response
-                and active_response_id is not None
-                and session.active_request_id is not None
-                and model_result.get("end_of_turn") is not True
-                and auto_continuations_remaining
-            )
-            if non_terminal_auto_listen:
-                self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
-                return close_reason, emitted_response
-            if not auto_response and data_plane_request_id == session.active_request_id:
-                session.clear_request()
-            model_listen = model_result.get("model_listen")
-            if not isinstance(model_listen, bool):
-                model_listen = model_result.get("reason") in {None, "", "model_listen"}
-            response_id = session.active_response_id
-            if isinstance(data_plane_request_id, str) and not auto_response:
-                data_plane.mark_terminal(data_plane_request_id)
-            emitted_response = True
-            payload = {
-                "type": "response.listen",
-                "session_id": session.session_id,
-                "epoch": session.epoch,
-                "reason": model_result.get("reason") or "model_listen",
-                "model_listen": model_listen,
-            }
-            if response_id is not None:
-                payload["response_id"] = response_id
-            self._attach_runtime_metadata(payload, model_result)
-            self.emit(payload)
-            if model_result.get("abort_data_plane_request") is True and isinstance(data_plane_request_id, str):
-                await self._abort_request_background(data_plane_request_id, notify=False)
-            if response_id is not None:
-                if not auto_response and self._response_continuations_remaining(response_id):
-                    self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
-                    return close_reason, emitted_response
-                if auto_response:
-                    model_state.clear_continuation()
-                    if not auto_continuations_remaining:
-                        completed_turn_id = model_turn_id
-                        if completed_turn_id is None:
-                            completed_turn_id = session.active_response_turn_id
-                        if completed_turn_id is not None:
-                            session.complete_model_turn(completed_turn_id)
-                session.end_response(commit_text=False, preserve_request=auto_response)
-                self.emit(
-                    {
-                        "type": "response.done",
-                        "session_id": session.session_id,
-                        "response_id": response_id,
-                        "epoch": session.epoch,
-                        "committed": False,
-                        "playback": session.playback.as_dict(),
-                    }
-                )
-            return close_reason, emitted_response
 
         text = model_result.get("text")
         audio = model_result.get("audio_data", model_result.get("audio"))
@@ -2119,25 +2187,11 @@ class DuplexSessionRunner:
                 )
             return close_reason, emitted_response
         if end_of_turn and not has_text and not has_audio and session.active_response_id is None:
-            if isinstance(data_plane_request_id, str):
-                if not auto_response and data_plane_request_id == session.active_request_id:
-                    session.clear_request()
-                if not auto_response:
-                    data_plane.mark_terminal(data_plane_request_id)
-            if model_turn_id is not None:
-                session.complete_model_turn(model_turn_id)
-            if auto_response:
-                model_state.clear_continuation()
-                emitted_response = True
-                payload = {
-                    "type": "response.listen",
-                    "session_id": session.session_id,
-                    "epoch": session.epoch,
-                    "reason": "model_turn_completed_without_output",
-                    "model_listen": True,
-                }
-                self._attach_runtime_metadata(payload, model_result)
-                self.emit(payload)
+            emitted_response = self._complete_model_turn_without_output(
+                model_result,
+                model_turn_id=model_turn_id,
+                data_plane_request_id=data_plane_request_id,
+            )
             return close_reason, emitted_response
         if session.active_response_id is None and model_turn_id is not None and model_turn_id < session.turn_id:
             # Late audio of a completed model turn must not reserve a second response.
