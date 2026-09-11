@@ -220,7 +220,7 @@ async def test_session_events_are_journaled_and_sent_in_order() -> None:
     ws, handle, task = await _open(handler, omni)
 
     handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="aGk="))
-    delta = await ws.wait_for("response.audio.delta")
+    delta = await ws.wait_for("response.output_audio.delta")
     assert delta["delta"] == "aGk=" and delta["server_event_seq"] == 1
 
     ws.feed({"type": "session.event_ack", "server_event_seq": 1})
@@ -387,7 +387,7 @@ async def test_resume_after_disconnect_replays_missed_events_and_rotates_the_tok
     ws, handle, task = await _open(handler, omni)
     token = ws.sent[0]["resume_token"]
     handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="one"))
-    await ws.wait_for("response.audio.delta")
+    await ws.wait_for("response.output_audio.delta")
     ws.disconnect()
     await asyncio.wait_for(task, timeout=2.0)
     assert omni.detached == [handle.session_id]
@@ -401,7 +401,7 @@ async def test_resume_after_disconnect_replays_missed_events_and_rotates_the_tok
     assert resumed["attachment_generation"] == 2
     assert resumed["resume_token"] != token
     assert "incarnation" not in resumed
-    replayed = await ws2.wait_for("response.audio.delta")
+    replayed = await ws2.wait_for("response.output_audio.delta")
     assert replayed["delta"] == "two" and replayed["server_event_seq"] == 2
     assert omni.resumed == [(handle.session_id, 0)]
 
@@ -464,9 +464,9 @@ async def test_journal_overflow_degrades_to_live_delivery_with_resync_required()
     handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="x" * 400))
     resync = await ws.wait_for("session.resync_required")
     assert resync["reason"] == "journal_overflow"
-    delta = await ws.wait_for("response.audio.delta")
+    delta = await ws.wait_for("response.output_audio.delta")
     assert "server_event_seq" not in delta
-    assert ws.types().index("session.resync_required") < ws.types().index("response.audio.delta")
+    assert ws.types().index("session.resync_required") < ws.types().index("response.output_audio.delta")
 
     ws.disconnect()
     await asyncio.wait_for(task, timeout=2.0)

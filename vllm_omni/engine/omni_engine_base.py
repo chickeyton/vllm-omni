@@ -8,19 +8,16 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import copy
 import queue
 import threading
 import time
 import uuid
 import weakref
-from collections.abc import Mapping
-from dataclasses import asdict
-from pathlib import Path
-from typing import Any, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, cast
 
 import janus
-import torch
-from omegaconf import OmegaConf
 from vllm import envs as vllm_envs
 from vllm.logger import init_logger
 from vllm.v1.engine.input_processor import InputProcessor
@@ -33,6 +30,15 @@ from vllm_omni.diffusion.data import (
     resolve_model_class_name,
 )
 from vllm_omni.diffusion.io_support import get_diffusion_output_type
+from vllm_omni.config.config_factory import StageConfigFactory
+from vllm_omni.config.resolver import OmniConfigResolution, resolve_omni_config
+from vllm_omni.config.stage_config import (
+    DuplexSessionRuntimeConfig,
+    PipelineConfig,
+    load_deploy_config,
+)
+from vllm_omni.data_entry_keys import REQUEST_ARTIFACT_DIRS_KEY, TRANSFORM_OWNED_META_KEYS
+from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.async_engine_utils import (
     SHUTDOWN_ENQUEUE_TIMEOUT_S,
     SHUTDOWN_JOIN_TIMEOUT_S,
@@ -61,17 +67,35 @@ from vllm_omni.engine.stage_runtime import (
     create_stage_runtime,
 )
 from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
-from vllm_omni.entrypoints.utils import (
-    load_and_resolve_stage_configs,
-    parse_stage_overrides,
-)
-from vllm_omni.inputs.data import OmniSamplingParams
+from vllm_omni.entrypoints.utils import parse_stage_overrides
+from vllm_omni.inputs.data import OmniInteractionPrompt, OmniSamplingParams
 from vllm_omni.metrics.prometheus import OmniRequestCounter
 
 logger = init_logger(__name__)
 
 _STARTUP_POLL_INTERVAL_S = 1.0
 _REQUEST_QUEUE_MAXSIZE = 256
+_ConfigResolutionResult = OmniConfigResolution | tuple[str | None, list[Any], str | None]
+
+
+def load_and_resolve_stage_configs(
+    model: str,
+    kwargs: dict[str, Any],
+    *,
+    trust_remote_code: bool | None,
+    deploy_config_path: str | None,
+    stage_overrides: Mapping[str, Mapping[str, Any]] | None,
+    strategy_config_path: str | None,
+) -> OmniConfigResolution:
+    """Compatibility seam delegating to the single config resolver."""
+    return resolve_omni_config(
+        model,
+        trust_remote_code=trust_remote_code,
+        cli_overrides=kwargs,
+        deploy_config_path=deploy_config_path,
+        stage_overrides=stage_overrides,
+        strategy_config_path=strategy_config_path,
+    )
 
 
 class OmniEngineBase:
@@ -175,7 +199,9 @@ class OmniEngineBase:
                 self._omni_master_port,
             )
 
-        # Stage resolution pops deploy_config, so get pipeline-wide settings beforehand.
+        # Keep the historical tuple return from _resolve_stage_configs while
+        # retaining the richer resolver result for pipeline-wide settings.
+        # Overrides of that private seam fall back to the factory below.
         deploy_config_path = kwargs.get("deploy_config")
         # ``trust_remote_code`` is tri-state (bool | None): ``None`` means "not
         # specified" so stage-config resolution can defer to the deploy yaml's
@@ -226,11 +252,24 @@ class OmniEngineBase:
         # global override (precedence: caller > deploy yaml > default False);
         # the merge rule lives in with_trust_remote_code_override.
         kwargs = with_trust_remote_code_override(kwargs, trust_remote_code)
+        self._config_resolution: OmniConfigResolution | None = None
         self.config_path, self.stage_configs = self._resolve_stage_configs(
             model,
             kwargs,
             trust_remote_code=trust_remote_code,
         )
+        if self._config_resolution is None:
+            pipeline_config = StageConfigFactory.get_pipeline_config(
+                model=model,
+                trust_remote_code=bool(trust_remote_code),
+                deploy_config_path=deploy_config_path,
+            )
+            self._set_pipeline_runtime_config(pipeline_config, self.config_path)
+        else:
+            self._set_pipeline_runtime_config(
+                self._config_resolution.pipeline_config,
+                self._config_resolution.config_path,
+            )
 
         self.num_stages = len(self.stage_configs)
         stage0_args = getattr(self.stage_configs[0], "engine_args", None) if self.num_stages > 0 else None
@@ -814,6 +853,29 @@ class OmniEngineBase:
             )
             self._omni_lb_policy = str(derived)
 
+    @staticmethod
+    def _create_default_diffusion_stage_cfg(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        """Compatibility seam for the factory-owned diffusion fallback."""
+        return StageConfigFactory.create_default_diffusion(kwargs)
+
+    def _set_pipeline_runtime_config(
+        self,
+        pipeline_config: PipelineConfig | None,
+        config_path: str | None,
+    ) -> None:
+        """Initialize engine-wide settings resolved from pipeline metadata."""
+        self.endpoint_restrictions = pipeline_config.endpoint_restrictions if pipeline_config is not None else ()
+        self._duplex_runtime_extension_path = (
+            pipeline_config.duplex_runtime_extension if pipeline_config is not None else None
+        )
+        self.duplex_serving_adapter_path = (
+            pipeline_config.duplex_serving_adapter if pipeline_config is not None else None
+        )
+        self._duplex_control_enabled = bool(pipeline_config and pipeline_config.duplex_control_enabled)
+        self.duplex_session_config = DuplexSessionRuntimeConfig()
+        if config_path is not None:
+            self.duplex_session_config = load_deploy_config(config_path).duplex_session
+
     def _resolve_stage_configs(
         self,
         model: str,
@@ -827,161 +889,48 @@ class OmniEngineBase:
             if legacy_arg in kwargs:
                 raise ValueError(f"`{legacy_arg}` is no longer supported; use `deploy_config` instead.")
 
+        # log_stats is captured by __init__; its CLI-only negative alias must
+        # not cross into per-stage structured config ownership validation.
+        kwargs.pop("disable_log_stats", None)
         deploy_config_path = kwargs.pop("deploy_config", None)
         strategy_config_path = kwargs.pop("strategy_config", None)
-        stage_overrides_json = kwargs.pop("stage_overrides", None)
+        # CLI callers arrive pre-parsed; offline Python callers may use the
+        # JSON-string form documented in recipes.
+        stage_overrides = parse_stage_overrides(kwargs.pop("stage_overrides", None))
 
         # ``diffusion_streaming_output`` is the public AsyncOmni/serve kwarg;
-        # stage configs know the field as ``streaming_output``. The unregistered
-        # single-stage fallback translates it in
-        # ``_create_default_diffusion_stage_cfg``, but a registered pipeline
-        # resolves through StageConfigFactory, which only passes through keys the
-        # stage schema recognizes — so mirror the translation here. Only a truthy
-        # value is mirrored: the serve CLI always carries the flag's ``False``
-        # default, which must not override a deploy YAML's ``streaming_output``.
+        # stage configs know the field as ``streaming_output``. Mirror only a
+        # truthy value so the CLI's False default does not override deploy YAML.
         if kwargs.get("diffusion_streaming_output") and kwargs.get("streaming_output") is None:
             kwargs["streaming_output"] = True
 
-        # Parse --stage-overrides JSON string if provided
-        stage_overrides = parse_stage_overrides(stage_overrides_json)
-
-        # Unregistered diffusion checkpoints use the single-stage fallback
-        # below instead of StageConfigFactory, so fold stage-0 model extras
-        # into the fallback's input as well.  Registered pipelines still get
-        # the complete override mapping through load_and_resolve_stage_configs.
-        default_stage_kwargs = kwargs
-        stage_zero_overrides = (stage_overrides or {}).get("0", {})
-        if "extras" in stage_zero_overrides:
-            override_extras = stage_zero_overrides["extras"]
-            if not isinstance(override_extras, Mapping):
-                raise TypeError("stage 0 extras must be a mapping")
-            default_stage_kwargs = {
-                **kwargs,
-                "extras": {
-                    **(kwargs.get("extras") or {}),
-                    **override_extras,
-                },
-            }
-
-        def create_default_stage_config() -> list:
-            fallback_kwargs = dict(default_stage_kwargs)
-            if not fallback_kwargs.get("model_class_name"):
-                model_class_name = resolve_model_class_name(
-                    model,
-                    fallback_kwargs.get("diffusion_load_format", "default"),
-                )
-                if model_class_name is not None:
-                    fallback_kwargs["model_class_name"] = model_class_name
-            return self._create_default_diffusion_stage_cfg(fallback_kwargs)
-
-        config_path, stage_configs, strategy_lb_policy = load_and_resolve_stage_configs(
-            model,
-            kwargs,
-            trust_remote_code=trust_remote_code,
-            default_stage_cfg_factory=create_default_stage_config,
-            deploy_config_path=deploy_config_path,
-            stage_overrides=stage_overrides,
-            strategy_config_path=strategy_config_path,
+        resolution = cast(
+            _ConfigResolutionResult,
+            load_and_resolve_stage_configs(
+                model,
+                kwargs,
+                trust_remote_code=trust_remote_code,
+                deploy_config_path=deploy_config_path,
+                stage_overrides=stage_overrides,
+                strategy_config_path=strategy_config_path,
+            ),
         )
+        if isinstance(resolution, OmniConfigResolution):
+            self._config_resolution = resolution
+            config_path = resolution.config_path
+            stage_configs = list(resolution.stage_configs)
+            strategy_lb_policy = resolution.omni_lb_policy
+        else:
+            # Compatibility for overrides of the historical tuple-returning
+            # seam. Production always receives OmniConfigResolution above.
+            config_path, stage_configs, strategy_lb_policy = resolution
 
         # A strategy.yaml may derive a pipeline-wide load-balancer policy. It is
         # an orchestrator-level knob (read once at construction), so apply it here
         # rather than as a per-stage config field.
         self._apply_strategy_lb_policy(strategy_lb_policy, kwargs)
 
-        # Inject diffusion LoRA-related knobs from kwargs if not present in the stage config.
-        for cfg in stage_configs:
-            try:
-                if not hasattr(cfg, "engine_args") or cfg.engine_args is None:
-                    cfg.engine_args = OmegaConf.create({})
-                global_sleep_mode = kwargs.get("enable_sleep_mode")
-                if global_sleep_mode is not None:
-                    if not hasattr(cfg.engine_args, "enable_sleep_mode") or cfg.engine_args.enable_sleep_mode is None:
-                        cfg.engine_args.enable_sleep_mode = global_sleep_mode
-                if getattr(cfg, "stage_type", None) != "diffusion":
-                    continue
-                if not hasattr(cfg, "engine_args") or cfg.engine_args is None:
-                    cfg.engine_args = OmegaConf.create({})
-                additional_config = kwargs.get("additional_config")
-                if additional_config is not None:
-                    current_additional_config = getattr(cfg.engine_args, "additional_config", None)
-                    if current_additional_config in (None, {}):
-                        cfg.engine_args.additional_config = additional_config
-                if kwargs.get("lora_path") is not None:
-                    if not hasattr(cfg.engine_args, "lora_path") or cfg.engine_args.lora_path is None:
-                        cfg.engine_args.lora_path = kwargs["lora_path"]
-                lora_scale = kwargs.get("lora_scale")
-                if lora_scale is None:
-                    # Backwards compatibility for older callers.
-                    lora_scale = kwargs.get("static_lora_scale")
-                if lora_scale is not None:
-                    if not hasattr(cfg.engine_args, "lora_scale") or cfg.engine_args.lora_scale is None:
-                        cfg.engine_args.lora_scale = lora_scale
-                if kwargs.get("lora_backend") is not None:
-                    if not hasattr(cfg.engine_args, "lora_backend") or cfg.engine_args.lora_backend is None:
-                        cfg.engine_args.lora_backend = kwargs["lora_backend"]
-                if (
-                    kwargs.get("diffusion_attention_config") is not None
-                    or kwargs.get("diffusion_attention_backend") is not None
-                    or kwargs.get("fastvideo_vsa_topk") is not None
-                ):
-                    has_stage_attention = (
-                        getattr(cfg.engine_args, "diffusion_attention_config", None) is not None
-                        or getattr(cfg.engine_args, "diffusion_attention_backend", None) is not None
-                    )
-                    if not has_stage_attention:
-                        cfg.engine_args.diffusion_attention_config = parse_attention_config(
-                            kwargs.get("diffusion_attention_config"),
-                            attention_backend=kwargs.get("diffusion_attention_backend"),
-                            fastvideo_vsa_topk=kwargs.get("fastvideo_vsa_topk"),
-                        )
-                quantization_config = kwargs.get("diffusion_quantization_config") or kwargs.get("quantization_config")
-                if quantization_config is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "quantization_config")
-                        or cfg.engine_args.quantization_config is None
-                    ):
-                        cfg.engine_args.quantization_config = quantization_config
-                # Inject profiler flags for diffusion stages
-                for profiler_key in (
-                    "enable_diffusion_pipeline_profiler",
-                    "enable_ar_profiler",
-                ):
-                    val = kwargs.get(profiler_key)
-                    if val:
-                        if not hasattr(cfg.engine_args, profiler_key) or not getattr(
-                            cfg.engine_args, profiler_key, False
-                        ):
-                            setattr(cfg.engine_args, profiler_key, val)
-                quantization = kwargs.get("quantization")
-                if quantization is not None:
-                    if not hasattr(cfg.engine_args, "quantization") or cfg.engine_args.quantization is None:
-                        cfg.engine_args.quantization = quantization
-                diffusion_kv_cache_dtype = kwargs.get("diffusion_kv_cache_dtype")
-                if diffusion_kv_cache_dtype is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_dtype")
-                        or cfg.engine_args.diffusion_kv_cache_dtype is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_dtype = diffusion_kv_cache_dtype
-                diffusion_kv_cache_skip_steps = kwargs.get("diffusion_kv_cache_skip_steps")
-                if diffusion_kv_cache_skip_steps is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_skip_steps")
-                        or cfg.engine_args.diffusion_kv_cache_skip_steps is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_skip_steps = diffusion_kv_cache_skip_steps
-                diffusion_kv_cache_skip_layers = kwargs.get("diffusion_kv_cache_skip_layers")
-                if diffusion_kv_cache_skip_layers is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_skip_layers")
-                        or cfg.engine_args.diffusion_kv_cache_skip_layers is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_skip_layers = diffusion_kv_cache_skip_layers
-            except Exception as e:
-                logger.warning("Failed to inject LoRA config for stage: %s", e)
-
-        return config_path, stage_configs
+        return cast(str, config_path), stage_configs
 
     # ==================== Public API ====================
 
@@ -1076,7 +1025,7 @@ class OmniEngineBase:
             tokens generated before abort (empty for diffusion / no OP state).
         """
         if not request_ids or getattr(self, "_shutdown_called", False):
-            return
+            return []
         if self.request_queue is None:
             raise RuntimeError("request_queue is not initialized")
         transport = self._correlated_rpc_client
@@ -1103,7 +1052,7 @@ class OmniEngineBase:
             result_msg = await loop.run_in_executor(None, _wait)
         except Exception as exc:
             if getattr(self, "_shutdown_called", False) and is_abort_transport_shutdown(exc):
-                return
+                return []
             raise
         if not result_msg.success:
             raise RuntimeError(result_msg.error or "abort failed")

@@ -349,7 +349,7 @@ async def test_session_owned_outputs_reach_the_runner_and_never_the_client_queue
     session = orchestrator.session_manager.get(SESSION_ID)
     assert session is not None and session.active_response_id is not None
     types = [message.event.type for message in [output_q.get_nowait() for _ in range(output_q.qsize())]]
-    assert "response.created" in types and "response.audio.delta" in types
+    assert "response.created" in types and "response.output_audio.delta" in types
 
     orphan = DuplexOrchestratorRequestState(
         request_id="duplex-s.b3RoZXI.e.0.r.stage0",

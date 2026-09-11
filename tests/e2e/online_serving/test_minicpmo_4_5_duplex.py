@@ -224,9 +224,9 @@ async def _run_seeded_text_to_audio(
                 if isinstance(event_type, str):
                     seen.append(event_type)
                 delta = event.get("delta")
-                if event_type == "response.audio.delta" and isinstance(delta, str):
+                if event_type == "response.output_audio.delta" and isinstance(delta, str):
                     audio_bytes += len(base64.b64decode(delta))
-                elif event_type == "response.audio_transcript.delta" and isinstance(delta, str):
+                elif event_type == "response.output_audio_transcript.delta" and isinstance(delta, str):
                     transcript.append(delta)
                 elif event_type == "response.output_text.delta" and isinstance(delta, str):
                     output_text.append(delta)

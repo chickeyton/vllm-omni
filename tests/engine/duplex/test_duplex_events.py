@@ -291,7 +291,7 @@ def test_projection_of_the_main_internal_event_sequence():
         state,
         {"type": "response.output_audio.delta", "response_id": "resp_1", "audio": pcm, "text": "hi", "format": "pcm16"},
     )
-    assert _types(audio_delta) == ["response.audio.delta", "response.audio_transcript.delta"]
+    assert _types(audio_delta) == ["response.output_audio.delta", "response.output_audio_transcript.delta"]
     assert isinstance(audio_delta[0], AudioDelta)
     assert audio_delta[0].delta == pcm
     assert audio_delta[0].format == "pcm16"
@@ -301,8 +301,8 @@ def test_projection_of_the_main_internal_event_sequence():
 
     done = project_internal_event(state, {"type": "response.done", "response_id": "resp_1"})
     assert _types(done) == [
-        "response.audio.done",
-        "response.audio_transcript.done",
+        "response.output_audio.done",
+        "response.output_audio_transcript.done",
         "response.content_part.done",
         "response.output_item.done",
         "conversation.item.done",
@@ -340,7 +340,7 @@ def test_projection_of_the_main_internal_event_sequence():
         state, {"type": "audio.cancelled", "response_id": "resp_2", "reason": "barge_in", "committed_ms": 0}
     )
     assert _types(cancelled) == [
-        "response.audio.done",
+        "response.output_audio.done",
         "response.content_part.done",
         "response.output_item.done",
         "conversation.item.done",
@@ -367,7 +367,7 @@ def test_projection_of_output_audio_buffer_clear_emits_cleared_before_terminals(
         state, {"type": "audio.cancelled", "reason": "output_audio_buffer_clear", "committed_ms": 250}
     )
 
-    assert _types(cleared)[:2] == ["output_audio_buffer.cleared", "response.audio.done"]
+    assert _types(cleared)[:2] == ["output_audio_buffer.cleared", "response.output_audio.done"]
     assert cleared[0].response_id == "resp_1"
     assert _types(cleared)[-2:] == ["response.done", "rate_limits.updated"]
     assert state.item_truncation_cursors["item_resp_1"] == (0, 250)
