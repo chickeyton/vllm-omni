@@ -81,7 +81,6 @@ from vllm_omni.engine.duplex.events import (
     ErrorEvent,
     InputCleared,
     OverlapDecision,
-    PlaybackAcknowledged,
     SessionExpired,
     SessionHeartbeatAck,
     error_event,
@@ -2947,6 +2946,282 @@ class DuplexSessionRunner:
             return "response_already_active"
         return None
 
+    async def _flush_and_submit_committed_turn(
+        self,
+        event: dict[str, object],
+        *,
+        event_type: str,
+        realtime_item_id: object,
+        should_create_response: bool,
+    ) -> bool:
+        """Flush the buffered turn and submit it, with no response yet running.
+
+        Returns whether the turn was flushed. An empty buffer falls through to
+        the bare acknowledgement at the end of ``_on_commit``.
+        """
+        session = self.session
+        model_state = self.model_state
+        commit_reservation = (
+            model_state.audio_buffer.prepare_commit(
+                operation_id=uuid.uuid4().hex,
+                chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
+            )
+            if event_type in {"input.commit", "input_audio_buffer.commit"}
+            else None
+        )
+        flushed_buffer_reserved_bytes = model_state.audio_buffer.pending_byte_count if commit_reservation is None else 0
+        flushed = (
+            commit_reservation.payload
+            if commit_reservation is not None
+            else model_state.audio_buffer.flush(chunk_period_ms=session.capabilities.chunk_period_ms or 1000)
+        )
+        if model_state.committed_audio_payload is not None:
+            if flushed is not None:
+                flushed = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, flushed)
+            else:
+                flushed = model_state.committed_audio_payload
+        if commit_reservation is not None:
+            commit_reservation.commit()
+        if flushed is None:
+            return False
+        if overlap_policy.should_force_listen_for_short_commit(self.session, event, flushed):
+            flushed = dict(flushed)
+            flushed["force_listen"] = True
+        model_state.input_since_commit = False
+        committed = self._commit_audio_input(
+            session,
+            realtime_item_id=realtime_item_id,
+            transcript=event.get("transcript"),
+        )
+        self.emit(
+            self._audio_committed_payload(
+                session,
+                committed=committed,
+                realtime_item_id=realtime_item_id,
+                transcript=event.get("transcript"),
+            )
+        )
+        operation_id = commit_reservation.operation_id if commit_reservation is not None else uuid.uuid4().hex
+        reserved_bytes = (
+            commit_reservation.byte_count if commit_reservation is not None else flushed_buffer_reserved_bytes
+        )
+        model_state.retain_committed_audio(flushed, operation_id=operation_id, reserved_bytes=reserved_bytes)
+        if should_create_response:
+            await self._start_append(
+                flushed,
+                final=True,
+                precreate_response=True,
+                operation_id=model_state.committed_audio_operation_id,
+                retained_committed_payload=flushed,
+            )
+        else:
+            model_state.deferred_response_create = False
+        return True
+
+    async def _start_response_from_committed_audio(self) -> None:
+        """Answer a client ``response.create``.
+
+        A model-native session generates from audio units, so the only thing
+        this can start is a turn whose audio was already committed. Anything
+        else -- a response already running, or nothing committed -- is refused
+        rather than silently producing an empty turn.
+        """
+        session = self.session
+        model_state = self.model_state
+        if self._response_in_progress() or self.tasks.append_tasks or self.run.stream_request_id is not None:
+            if session.active_response_id is None and (
+                session.active_request_id is not None
+                or self.tasks.append_tasks
+                or self.run.stream_request_id is not None
+            ):
+                return
+            self._emit_error(
+                "response_already_active", "response.create cannot start while another response is active."
+            )
+            session.discard_response_options()
+            return
+        if model_state.committed_audio_payload is not None:
+            committed_payload = model_state.committed_audio_payload
+            operation_id = model_state.committed_audio_operation_id
+            if operation_id is None:
+                operation_id = uuid.uuid4().hex
+                model_state.committed_audio_operation_id = operation_id
+            await self._start_append(
+                committed_payload,
+                final=True,
+                precreate_response=True,
+                operation_id=operation_id,
+                retained_committed_payload=committed_payload,
+            )
+            return
+        self._emit_error(
+            "response_create_without_input", "Native duplex response.create requires committed audio input."
+        )
+        session.discard_response_options()
+
+    def _discard_short_overlap_ack(self) -> None:
+        """Drop a sub-threshold interjection made while the model is speaking.
+
+        Too short to be a turn, so it neither interrupts the response nor
+        becomes one: the buffered audio is discarded and the turn stays with
+        the model.
+        """
+        session = self.session
+        model_state = self.model_state
+        model_state.audio_buffer.clear()
+        session.release_all_input_bytes()
+        model_state.input_since_commit = False
+        model_state.speech_since_commit = False
+        model_state.clear_committed_audio()
+        self._emit_events(discard_pending_input_audio(self._require_projector(), session.overlap_speech_ms))
+        self.emit(
+            {
+                "type": "input.committed",
+                "session_id": session.session_id,
+                "turn_id": session.turn_id,
+                "epoch": session.epoch,
+                "empty": True,
+                "is_speech": False,
+                "overlap_ack": True,
+                "no_response": True,
+            }
+        )
+        session.reset_overlap_speech()
+        session.discard_response_options()
+
+    def _defer_commit_behind_active_response(
+        self,
+        event: dict[str, object],
+        *,
+        realtime_item_id: object,
+        should_create_response: bool,
+        precreate_response_requested: bool,
+    ) -> bool:
+        """Retain a commit that arrived while a response is still running.
+
+        The audio is kept so the turn is not lost, and the response it should
+        start is remembered; ``_maybe_promote_deferred_overlap`` replays it once
+        the active response ends. Returns whether the commit was deferred --
+        an empty buffer has nothing to retain and falls through.
+        """
+        session = self.session
+        model_state = self.model_state
+        commit_reservation = model_state.audio_buffer.prepare_commit(
+            operation_id=uuid.uuid4().hex,
+            chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
+        )
+        deferred_payload = commit_reservation.payload
+        if deferred_payload is None:
+            commit_reservation.commit()
+            return False
+        if model_state.committed_audio_payload is not None:
+            deferred_payload = overlap_policy.merge_audio_payloads(
+                model_state.committed_audio_payload,
+                deferred_payload,
+            )
+        model_state.retain_committed_audio(
+            deferred_payload,
+            operation_id=commit_reservation.operation_id,
+            reserved_bytes=commit_reservation.byte_count,
+        )
+        commit_reservation.commit()
+        model_state.deferred_response_create = should_create_response
+        model_state.deferred_precreate_response = precreate_response_requested
+        model_state.input_since_commit = False
+        model_state.speech_since_commit = False
+        committed = self._commit_audio_input(
+            session,
+            realtime_item_id=realtime_item_id,
+            transcript=event.get("transcript"),
+        )
+        committed_payload = self._audio_committed_payload(
+            session,
+            committed=committed,
+            realtime_item_id=realtime_item_id,
+            transcript=event.get("transcript"),
+        )
+        committed_payload["overlap_deferred"] = True
+        committed_payload["response_create_deferred"] = should_create_response
+        self.emit(committed_payload)
+        return True
+
+    async def _commit_and_start_auto_response(self, event: dict[str, object], *, realtime_item_id: object) -> None:
+        """Commit the buffered turn and submit it, letting the model answer it."""
+        session = self.session
+        model_state = self.model_state
+        commit_reservation = model_state.audio_buffer.prepare_commit(
+            operation_id=uuid.uuid4().hex,
+            chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
+        )
+        final_payload = commit_reservation.payload
+        if model_state.committed_audio_payload is not None:
+            if final_payload is not None:
+                final_payload = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, final_payload)
+            else:
+                final_payload = model_state.committed_audio_payload
+        commit_reservation.commit()
+        if final_payload is not None:
+            model_state.retain_committed_audio(
+                final_payload,
+                operation_id=commit_reservation.operation_id,
+                reserved_bytes=commit_reservation.byte_count,
+            )
+        model_state.deferred_response_create = False
+        model_state.input_since_commit = False
+        model_state.speech_since_commit = False
+        data_plane_turn_id = session.turn_id
+        committed = self._commit_audio_input(
+            session,
+            realtime_item_id=realtime_item_id,
+            transcript=event.get("transcript"),
+            turn_id=data_plane_turn_id,
+        )
+        self.emit(
+            self._audio_committed_payload(
+                session,
+                committed=committed,
+                realtime_item_id=realtime_item_id,
+                transcript=event.get("transcript"),
+            )
+        )
+        if final_payload is not None:
+            await self._start_append(
+                {**final_payload, "duplex_turn_id": data_plane_turn_id},
+                final=True,
+                precreate_response=False,
+                operation_id=commit_reservation.operation_id,
+                retained_committed_payload=final_payload,
+            )
+
+    def _commit_silent_input(self) -> None:
+        """Commit a turn the client itself marked as silence: drop it and keep listening."""
+        session = self.session
+        model_state = self.model_state
+        model_state.input_since_commit = False
+        model_state.speech_since_commit = False
+        model_state.audio_buffer.clear()
+        session.release_all_input_bytes()
+        model_state.clear_committed_audio()
+        self.emit(
+            {
+                "type": "input.committed",
+                "session_id": session.session_id,
+                "turn_id": session.turn_id,
+                "epoch": session.epoch,
+                "empty": True,
+                "is_speech": False,
+                "no_response": True,
+            }
+        )
+        self.emit(
+            {
+                "type": "response.listen",
+                "session_id": session.session_id,
+                "epoch": session.epoch,
+                "reason": "silence_or_noise",
+            }
+        )
+
     async def _on_commit(self, event: dict[str, object]) -> None:
         session = self.session
         model_state = self.model_state
@@ -2958,30 +3233,7 @@ class DuplexSessionRunner:
         if event_type in {"input.commit", "input_audio_buffer.commit"} and not await self._wait_for_append_tail():
             return
         if event_type == "input_audio_buffer.commit" and event.get("is_speech") is False:
-            model_state.input_since_commit = False
-            model_state.speech_since_commit = False
-            model_state.audio_buffer.clear()
-            session.release_all_input_bytes()
-            model_state.clear_committed_audio()
-            self.emit(
-                {
-                    "type": "input.committed",
-                    "session_id": session.session_id,
-                    "turn_id": session.turn_id,
-                    "epoch": session.epoch,
-                    "empty": True,
-                    "is_speech": False,
-                    "no_response": True,
-                }
-            )
-            self.emit(
-                {
-                    "type": "response.listen",
-                    "session_id": session.session_id,
-                    "epoch": session.epoch,
-                    "reason": "silence_or_noise",
-                }
-            )
+            self._commit_silent_input()
             return
         should_create_response = (
             event_type == "response.create"
@@ -3029,204 +3281,29 @@ class DuplexSessionRunner:
             )
             if commit_action is CommitAction.DEFER_ACTIVE_RESPONSE:
                 if session.overlap_speech_ms <= session.config.overlap_short_ack_ms:
-                    model_state.audio_buffer.clear()
-                    session.release_all_input_bytes()
-                    model_state.input_since_commit = False
-                    model_state.speech_since_commit = False
-                    model_state.clear_committed_audio()
-                    self._emit_events(discard_pending_input_audio(self._require_projector(), session.overlap_speech_ms))
-                    self.emit(
-                        {
-                            "type": "input.committed",
-                            "session_id": session.session_id,
-                            "turn_id": session.turn_id,
-                            "epoch": session.epoch,
-                            "empty": True,
-                            "is_speech": False,
-                            "overlap_ack": True,
-                            "no_response": True,
-                        }
-                    )
-                    session.reset_overlap_speech()
-                    session.discard_response_options()
+                    self._discard_short_overlap_ack()
                     return
 
-                commit_reservation = model_state.audio_buffer.prepare_commit(
-                    operation_id=uuid.uuid4().hex,
-                    chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
-                )
-                deferred_payload = commit_reservation.payload
-                if deferred_payload is None:
-                    commit_reservation.commit()
-                else:
-                    if model_state.committed_audio_payload is not None:
-                        deferred_payload = overlap_policy.merge_audio_payloads(
-                            model_state.committed_audio_payload,
-                            deferred_payload,
-                        )
-                    model_state.retain_committed_audio(
-                        deferred_payload,
-                        operation_id=commit_reservation.operation_id,
-                        reserved_bytes=commit_reservation.byte_count,
-                    )
-                    commit_reservation.commit()
-                    model_state.deferred_response_create = should_create_response
-                    model_state.deferred_precreate_response = precreate_response_requested
-                    model_state.input_since_commit = False
-                    model_state.speech_since_commit = False
-                    committed = self._commit_audio_input(
-                        session,
-                        realtime_item_id=realtime_item_id,
-                        transcript=event.get("transcript"),
-                    )
-                    committed_payload = self._audio_committed_payload(
-                        session,
-                        committed=committed,
-                        realtime_item_id=realtime_item_id,
-                        transcript=event.get("transcript"),
-                    )
-                    committed_payload["overlap_deferred"] = True
-                    committed_payload["response_create_deferred"] = should_create_response
-                    self.emit(committed_payload)
-                    return
-            if commit_action is CommitAction.START_AUTO_RESPONSE:
-                commit_reservation = model_state.audio_buffer.prepare_commit(
-                    operation_id=uuid.uuid4().hex,
-                    chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
-                )
-                committed_input = commit_reservation.payload
-                final_payload = committed_input
-                if model_state.committed_audio_payload is not None:
-                    if final_payload is not None:
-                        final_payload = overlap_policy.merge_audio_payloads(
-                            model_state.committed_audio_payload, final_payload
-                        )
-                    else:
-                        final_payload = model_state.committed_audio_payload
-                commit_reservation.commit()
-                if final_payload is not None:
-                    model_state.retain_committed_audio(
-                        final_payload,
-                        operation_id=commit_reservation.operation_id,
-                        reserved_bytes=commit_reservation.byte_count,
-                    )
-                model_state.deferred_response_create = False
-                model_state.input_since_commit = False
-                model_state.speech_since_commit = False
-                data_plane_turn_id = session.turn_id
-                committed = self._commit_audio_input(
-                    session,
+                if self._defer_commit_behind_active_response(
+                    event,
                     realtime_item_id=realtime_item_id,
-                    transcript=event.get("transcript"),
-                    turn_id=data_plane_turn_id,
-                )
-                self.emit(
-                    self._audio_committed_payload(
-                        session,
-                        committed=committed,
-                        realtime_item_id=realtime_item_id,
-                        transcript=event.get("transcript"),
-                    )
-                )
-                if final_payload is not None:
-                    await self._start_append(
-                        {**final_payload, "duplex_turn_id": data_plane_turn_id},
-                        final=True,
-                        precreate_response=False,
-                        operation_id=commit_reservation.operation_id,
-                        retained_committed_payload=final_payload,
-                    )
-                return
-        if event_type == "response.create":
-            if self._response_in_progress() or self.tasks.append_tasks or self.run.stream_request_id is not None:
-                if session.active_response_id is None and (
-                    session.active_request_id is not None
-                    or self.tasks.append_tasks
-                    or self.run.stream_request_id is not None
+                    should_create_response=should_create_response,
+                    precreate_response_requested=precreate_response_requested,
                 ):
                     return
-                self._emit_error(
-                    "response_already_active", "response.create cannot start while another response is active."
-                )
-                session.discard_response_options()
+            if commit_action is CommitAction.START_AUTO_RESPONSE:
+                await self._commit_and_start_auto_response(event, realtime_item_id=realtime_item_id)
                 return
-            if model_state.committed_audio_payload is not None:
-                committed_payload = model_state.committed_audio_payload
-                operation_id = model_state.committed_audio_operation_id
-                if operation_id is None:
-                    operation_id = uuid.uuid4().hex
-                    model_state.committed_audio_operation_id = operation_id
-                await self._start_append(
-                    committed_payload,
-                    final=True,
-                    precreate_response=True,
-                    operation_id=operation_id,
-                    retained_committed_payload=committed_payload,
-                )
-                return
-            self._emit_error(
-                "response_create_without_input", "Native duplex response.create requires committed audio input."
-            )
-            session.discard_response_options()
+        if event_type == "response.create":
+            await self._start_response_from_committed_audio()
             return
-        if not self._response_in_progress():
-            commit_reservation = (
-                model_state.audio_buffer.prepare_commit(
-                    operation_id=uuid.uuid4().hex,
-                    chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
-                )
-                if event_type in {"input.commit", "input_audio_buffer.commit"}
-                else None
-            )
-            flushed_buffer_reserved_bytes = (
-                model_state.audio_buffer.pending_byte_count if commit_reservation is None else 0
-            )
-            flushed = (
-                commit_reservation.payload
-                if commit_reservation is not None
-                else model_state.audio_buffer.flush(chunk_period_ms=session.capabilities.chunk_period_ms or 1000)
-            )
-            if model_state.committed_audio_payload is not None:
-                if flushed is not None:
-                    flushed = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, flushed)
-                else:
-                    flushed = model_state.committed_audio_payload
-            if commit_reservation is not None:
-                commit_reservation.commit()
-            if flushed is not None:
-                if overlap_policy.should_force_listen_for_short_commit(self.session, event, flushed):
-                    flushed = dict(flushed)
-                    flushed["force_listen"] = True
-                model_state.input_since_commit = False
-                committed = self._commit_audio_input(
-                    session,
-                    realtime_item_id=realtime_item_id,
-                    transcript=event.get("transcript"),
-                )
-                self.emit(
-                    self._audio_committed_payload(
-                        session,
-                        committed=committed,
-                        realtime_item_id=realtime_item_id,
-                        transcript=event.get("transcript"),
-                    )
-                )
-                operation_id = commit_reservation.operation_id if commit_reservation is not None else uuid.uuid4().hex
-                reserved_bytes = (
-                    commit_reservation.byte_count if commit_reservation is not None else flushed_buffer_reserved_bytes
-                )
-                model_state.retain_committed_audio(flushed, operation_id=operation_id, reserved_bytes=reserved_bytes)
-                if should_create_response:
-                    await self._start_append(
-                        flushed,
-                        final=True,
-                        precreate_response=True,
-                        operation_id=model_state.committed_audio_operation_id,
-                        retained_committed_payload=flushed,
-                    )
-                else:
-                    model_state.deferred_response_create = False
-                return
+        if not self._response_in_progress() and await self._flush_and_submit_committed_turn(
+            event,
+            event_type=event_type,
+            realtime_item_id=realtime_item_id,
+            should_create_response=should_create_response,
+        ):
+            return
         # Nothing flushed (or a response is still in progress): acknowledge the
         # commit without starting a new response.
         had_uncommitted_audio = (
@@ -3269,7 +3346,6 @@ class DuplexSessionRunner:
     # ------------------------------------------------------------------ #
     # playback.ack (moved from OmniDuplexSessionHandler)                 #
     # ------------------------------------------------------------------ #
-
 
 
 __all__ = ["DuplexAppendTaskMeta", "DuplexSessionRunner", "DuplexSessionTasks"]
