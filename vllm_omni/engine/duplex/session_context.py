@@ -17,16 +17,23 @@ of those is infrastructure, and goes through :class:`RunnerServices`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 if TYPE_CHECKING:
-    from vllm_omni.engine.duplex.contracts import DuplexStagePort
+    from vllm.outputs import RequestOutput
+
+    from vllm_omni.engine.duplex.contracts import (
+        DuplexOutputContext,
+        DuplexOutputDecision,
+        DuplexStagePort,
+    )
     from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, DuplexModelSessionState
     from vllm_omni.engine.duplex.session import DuplexEngineSession
     from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
-    from vllm_omni.engine.duplex.session_runner import DuplexSessionTasks
+    from vllm_omni.metrics.stats import StageRequestStats
 
 _OffloadT = TypeVar("_OffloadT")
 
@@ -85,3 +92,70 @@ class DuplexSessionContext:
     tasks: DuplexSessionTasks
     run: DuplexRunState
     services: RunnerServices
+
+
+# --------------------------------------------------------------------------- #
+# Task bookkeeping                                                            #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class DuplexAppendTaskMeta:
+    epoch: int
+    final: bool
+    response_bound: bool
+
+
+@dataclass
+class DuplexSessionTasks:
+    """Tracked task handles of one session (append tail, active response, pending silence)."""
+
+    append_tasks: dict[asyncio.Task[bool], DuplexAppendTaskMeta] = field(default_factory=dict)
+    append_tail: asyncio.Task[bool] | None = None
+    active_response_task: asyncio.Task[None] | None = None
+
+    def track_append_task(
+        self,
+        task: asyncio.Task[bool],
+        *,
+        epoch: int,
+        final: bool,
+        response_bound: bool,
+    ) -> None:
+        self.append_tasks[task] = DuplexAppendTaskMeta(epoch, final, response_bound)
+        task.add_done_callback(self.append_tasks.pop)
+
+    def has_response_bound_append_tasks(self) -> bool:
+        return any(meta.response_bound for meta in self.append_tasks.values())
+
+    async def cancel_append_tasks(self, timeout_s: float = 0.25, *, response_bound_only: bool = False) -> bool:
+        tasks = [task for task, meta in self.append_tasks.items() if not response_bound_only or meta.response_bound]
+        if not tasks:
+            return False
+        cancelled_tail = self.append_tail if self.append_tail in tasks else None
+        for task in tasks:
+            task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout_s)
+        except TimeoutError:
+            pass
+        if cancelled_tail is not None and self.append_tail is cancelled_tail:
+            self.append_tail = None
+        return True
+
+
+# --------------------------------------------------------------------------- #
+# Stage output (the mailbox item the orchestrator hands the runner)           #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class StageOutput:
+    """One stage result, queued for the session that owns the request."""
+
+    stage_id: int
+    output: RequestOutput
+    metrics: StageRequestStats | None
+    request_id: str
+    context: DuplexOutputContext
+    decision: DuplexOutputDecision | None
