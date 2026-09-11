@@ -143,13 +143,21 @@ vllm_omni/
 │       ├── messages.py              queue envelopes (Open/Close/Resume/Touch/Command/Result/Event), DuplexSessionError
 │       ├── config.py                DuplexSessionConfig, DuplexCapabilities, ResponseCreateOptions
 │       ├── contracts.py             DuplexFence (session_id, epoch, turn_id), stage request records, DuplexStagePort
-│       ├── session.py               DuplexEngineSession: ledgers, lease, fence, stage resources, append sequencing
-│       ├── session_runner.py        DuplexSessionRunner (per-session mailbox on the orchestrator loop)
-│       ├── session_manager.py       DuplexSessionManager (admission, backpressure, reaper, dispatch)
 │       ├── plugin.py                DuplexModelPlugin, DuplexModelSessionState, DuplexDataPlane, PcmAppendBuffer ABCs
-│       ├── lease.py                 DuplexLeaseState (idle TTL, disconnect grace, resume generation)
-│       ├── turn_detection.py        server-side VAD turn detector used by the runner
-│       ├── audio.py / vad.py / commit_policy.py / intermediate.py
+│       ├── turn_detection.py        server-side VAD turn detector used by the session
+│       ├── audio.py / vad.py / intermediate.py
+│       └── session/                 one engine-resident session and everything that runs it
+│           ├── engine_session.py    DuplexEngineSession: ledgers, lease, fence, stage resources, append sequencing
+│           ├── runner.py            DuplexSessionRunner (per-session mailbox on the orchestrator loop)
+│           ├── manager.py           DuplexSessionManager (admission, backpressure, reaper, dispatch)
+│           ├── context.py           DuplexSessionContext / DuplexRunState: what the runner shares with its components
+│           ├── emitter.py           SessionEmitter: projection, epoch filter, domain effects of a terminal event
+│           ├── model_channel.py     ModelChannel: submit an append, project stage output, continue a turn
+│           ├── control.py           SessionControl: server VAD and the events that reconfigure it
+│           ├── append_task.py       AppendAttempt: one append in flight and the rollback its failure owes
+│           ├── helpers.py           pure reads and payload builders over a session
+│           ├── lease.py             DuplexLeaseState (idle TTL, disconnect grace, resume generation)
+│           └── overlap_policy.py / commit_policy.py / playback_ledger.py
 ├── config/stage_config.py           PipelineConfig.duplex_plugin; DuplexSessionRuntimeConfig
 ├── model_executor/models/minicpmo_4_5/duplex/plugin.py   MiniCPMO45DuplexPlugin (+ data_plane, input, policy, ...)
 └── clients/

@@ -11,12 +11,12 @@ import pytest
 
 from vllm_omni.engine.duplex.config import DuplexSessionConfig
 from vllm_omni.engine.duplex.contracts import DuplexFence
-from vllm_omni.engine.duplex.lease import (
+from vllm_omni.engine.duplex.session.lease import (
     DuplexLeaseActivity,
     DuplexLeaseConfig,
     DuplexLeaseState,
 )
-from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

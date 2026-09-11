@@ -30,8 +30,8 @@ from vllm_omni.engine.duplex.contracts import (
     DuplexStageSubmissionResult,
 )
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin
-from vllm_omni.engine.duplex.session import DuplexFenceMismatchError
-from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
+from vllm_omni.engine.duplex.session.engine_session import DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.messages import EngineQueueMessage, OutputMessage
 from vllm_omni.engine.orchestrator import (
     OrchestratorBase,

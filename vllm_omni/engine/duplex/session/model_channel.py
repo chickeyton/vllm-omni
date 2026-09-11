@@ -22,12 +22,12 @@ tracked task, and aborting a stage request in the background.
 from __future__ import annotations
 
 import asyncio
-import base64
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol
 
+import pybase64 as base64
 from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex.config import DuplexSessionState
@@ -39,15 +39,15 @@ from vllm_omni.engine.duplex.contracts import (
     DuplexStageSubmission,
     duplex_data_plane_request_info,
 )
-from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.plugin import (
     DuplexRuntimeConfigError,
     coerce_int,
     payload_turn_id,
 )
-from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
-from vllm_omni.engine.duplex.session_context import DuplexSessionContext, StageOutput
-from vllm_omni.engine.duplex.session_emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.context import DuplexSessionContext, StageOutput
+from vllm_omni.engine.duplex.session.emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
 from vllm_omni.metrics.stats import OrchestratorAggregator, StageRequestStats
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.outputs.duplex import attach_duplex_output_decision

@@ -46,8 +46,8 @@ from vllm_omni.engine.duplex.messages import (
     DuplexSessionEventMessage,
     OpenDuplexSessionMessage,
 )
-from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
-from vllm_omni.engine.duplex.session_runner import DuplexSessionRunner
+from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
+from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
 from vllm_omni.metrics.stats import StageRequestStats, StageStats
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.plugin import MiniCPMO45DuplexPlugin
 

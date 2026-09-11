@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm_omni.engine.duplex.commit_policy import (
+from vllm_omni.engine.duplex.session.commit_policy import (
     CommitAction,
     CommitSnapshot,
     decide_commit_action,

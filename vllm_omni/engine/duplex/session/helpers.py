@@ -13,9 +13,10 @@ Functions, not a component, because there is nothing here to own.
 
 from __future__ import annotations
 
-import base64
 import binascii
 from typing import TYPE_CHECKING
+
+import pybase64 as base64
 
 from vllm_omni.engine.duplex.config import DuplexPlaybackCommitPolicy
 from vllm_omni.engine.duplex.contracts import DuplexFence, duplex_resource_request_id
@@ -24,8 +25,8 @@ from vllm_omni.engine.duplex.events import ErrorEvent, OverlapDecision, error_ev
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from vllm_omni.engine.duplex.session import DuplexCommittedInput, DuplexEngineSession
-    from vllm_omni.engine.duplex.session_context import DuplexSessionTasks
+    from vllm_omni.engine.duplex.session.context import DuplexSessionTasks
+    from vllm_omni.engine.duplex.session.engine_session import DuplexCommittedInput, DuplexEngineSession
 
 
 # --------------------------------------------------------------------------- #

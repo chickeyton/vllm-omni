@@ -28,8 +28,6 @@ from typing import TYPE_CHECKING, TypeVar
 
 from vllm.logger import init_logger
 
-from vllm_omni.engine.duplex import overlap_policy, playback_ledger, session_helpers
-from vllm_omni.engine.duplex.append_task import AppendAttempt
 from vllm_omni.engine.duplex.audio import convert_input_audio_with_rate
 from vllm_omni.engine.duplex.commands import (
     AckPlayback,
@@ -51,7 +49,6 @@ from vllm_omni.engine.duplex.commands import (
     TruncateItem,
     UpdateSession,
 )
-from vllm_omni.engine.duplex.commit_policy import CommitAction, CommitSnapshot, decide_commit_action
 from vllm_omni.engine.duplex.config import (
     DuplexConfigError,
     DuplexOverlapPolicy,
@@ -70,8 +67,6 @@ from vllm_omni.engine.duplex.events import (
     SessionExpired,
     SessionHeartbeatAck,
 )
-from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
-from vllm_omni.engine.duplex.model_channel import ModelChannel
 from vllm_omni.engine.duplex.plugin import (
     DuplexModelPlugin,
     DuplexModelSessionState,
@@ -90,15 +85,20 @@ from vllm_omni.engine.duplex.realtime_events import (
     resolve_truncate_item,
     retrieve_item_events,
 )
-from vllm_omni.engine.duplex.session import DuplexEngineSession
-from vllm_omni.engine.duplex.session_context import (
+from vllm_omni.engine.duplex.session import helpers, overlap_policy, playback_ledger
+from vllm_omni.engine.duplex.session.append_task import AppendAttempt
+from vllm_omni.engine.duplex.session.commit_policy import CommitAction, CommitSnapshot, decide_commit_action
+from vllm_omni.engine.duplex.session.context import (
     DuplexRunState,
     DuplexSessionContext,
     DuplexSessionTasks,
     StageOutput,
 )
-from vllm_omni.engine.duplex.session_control import SessionControl
-from vllm_omni.engine.duplex.session_emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.control import SessionControl
+from vllm_omni.engine.duplex.session.emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
+from vllm_omni.engine.duplex.session.model_channel import ModelChannel
 from vllm_omni.engine.duplex.turn_detection import (
     TurnDetectionResult,
 )
@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.outputs import RequestOutput
 
-    from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
+    from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 
 logger = init_logger(__name__)
 
@@ -658,7 +658,7 @@ class DuplexSessionRunner:
         model_state = self.model_state
         event["force_barge_in"] = True
         cancelled_fence = session.fence
-        playback_was_active = session_helpers.assistant_playback_active(self.session)
+        playback_was_active = helpers.assistant_playback_active(self.session)
         model_state.audio_buffer.clear_force_listen()
         session.reset_overlap_speech()
         model_state.input_since_commit = False
@@ -675,8 +675,8 @@ class DuplexSessionRunner:
             old_epoch = session.epoch
             old_response_id = session.active_response_id
             committed_ms = session.playback.committed_ms
-            session_helpers.commit_played_response_history(session, old_response_id, committed_ms)
-            new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+            helpers.commit_played_response_history(session, old_response_id, committed_ms)
+            new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
             self.emit(
                 {
                     "type": "audio.cancelled",
@@ -693,8 +693,8 @@ class DuplexSessionRunner:
         if not cancelled and playback_was_active:
             old_epoch = session.epoch
             committed_ms = session.playback.committed_ms
-            session_helpers.commit_played_response_history(session, session.last_response_id, committed_ms)
-            new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+            helpers.commit_played_response_history(session, session.last_response_id, committed_ms)
+            new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
             self.emit(
                 {
                     "type": "audio.cancelled",
@@ -723,7 +723,7 @@ class DuplexSessionRunner:
             self._emit_error("bad_event", "input_audio_buffer.append requires audio")
             return
         if not session.capabilities.supports_barge_in and overlap_policy.event_requests_barge_in(event):
-            self._emit_events([session_helpers.barge_in_unsupported_error()])
+            self._emit_events([helpers.barge_in_unsupported_error()])
             event = dict(event)
             event.pop("force_barge_in", None)
             for key in ("overlap_action", "overlap"):
@@ -773,7 +773,7 @@ class DuplexSessionRunner:
         defer_append = False
         buffer_overlap_audio = True
         self._mark_pending_silence_superseded()
-        overlap_active = session_helpers.response_in_progress(self.session, self.tasks) and (
+        overlap_active = helpers.response_in_progress(self.session, self.tasks) and (
             not auto_responds
             or (
                 session.capabilities.supports_barge_in
@@ -785,7 +785,7 @@ class DuplexSessionRunner:
         )
         if overlap_active:
             decision = overlap_policy.decide(self.session, event, payload, auto_responds=auto_responds)
-            self._emit_events([session_helpers.overlap_decision_event(self.session, decision)])
+            self._emit_events([helpers.overlap_decision_event(self.session, decision)])
             action = decision.get("action")
             if action == "drop":
                 duration_ms = overlap_policy.input_audio_duration_ms(event, payload)
@@ -828,7 +828,7 @@ class DuplexSessionRunner:
         model_state.speech_since_commit = model_state.speech_since_commit or overlap_policy.input_looks_like_speech(
             self.session, event, payload
         )
-        raw_audio_bytes = session_helpers.audio_payload_size_bytes(payload)
+        raw_audio_bytes = helpers.audio_payload_size_bytes(payload)
         try:
             if not session.reserve_input_bytes(
                 raw_audio_bytes,
@@ -910,7 +910,7 @@ class DuplexSessionRunner:
         append_turn_id = payload_turn_id(payload)
         if append_turn_id is None:
             append_turn_id = session.turn_id
-        request_id = session_helpers.stage0_request_id(self.session, append_epoch)
+        request_id = helpers.stage0_request_id(self.session, append_epoch)
         if final or precreate_response:
             session.bind_request(request_id)
         if precreate_response:
@@ -1078,7 +1078,7 @@ class DuplexSessionRunner:
         model_state = self.model_state
         event_type = str(event.get("type"))
         if event_type == "barge_in" and not session.capabilities.supports_barge_in:
-            self._emit_events([session_helpers.barge_in_unsupported_error()])
+            self._emit_events([helpers.barge_in_unsupported_error()])
             return
         cancel_reason = (
             "output_audio_buffer_clear"
@@ -1090,7 +1090,7 @@ class DuplexSessionRunner:
         cancelled_fence = session.fence
         if event_type == "response.cancel":
             requested_response_id = event.get("response_id")
-            has_active_response_work = session_helpers.response_in_progress(self.session, self.tasks)
+            has_active_response_work = helpers.response_in_progress(self.session, self.tasks)
             if (
                 isinstance(requested_response_id, str)
                 and session.active_response_id is not None
@@ -1112,7 +1112,7 @@ class DuplexSessionRunner:
                 )
                 return
         had_unbuffered_append = model_state.input_since_commit and not model_state.audio_buffer.has_pending()
-        playback_was_active = session_helpers.assistant_playback_active(self.session)
+        playback_was_active = helpers.assistant_playback_active(self.session)
         if event_type in {"input.cancel", "barge_in"}:
             model_state.audio_buffer.clear()
             session.release_all_input_bytes()
@@ -1131,8 +1131,8 @@ class DuplexSessionRunner:
             old_epoch = session.epoch
             old_response_id = session.active_response_id
             committed_ms = session.playback.committed_ms
-            session_helpers.commit_played_response_history(session, old_response_id, committed_ms)
-            new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+            helpers.commit_played_response_history(session, old_response_id, committed_ms)
+            new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
             self.emit(
                 {
                     "type": "audio.cancelled",
@@ -1149,8 +1149,8 @@ class DuplexSessionRunner:
         if not cancelled and playback_was_active:
             old_epoch = session.epoch
             committed_ms = session.playback.committed_ms
-            session_helpers.commit_played_response_history(session, session.last_response_id, committed_ms)
-            new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+            helpers.commit_played_response_history(session, session.last_response_id, committed_ms)
+            new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
             self.emit(
                 {
                     "type": "audio.cancelled",
@@ -1168,8 +1168,8 @@ class DuplexSessionRunner:
             old_epoch = session.epoch
             old_response_id = session.active_response_id
             committed_ms = session.playback.committed_ms
-            session_helpers.commit_played_response_history(session, old_response_id, committed_ms)
-            new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+            helpers.commit_played_response_history(session, old_response_id, committed_ms)
+            new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
             self.emit(
                 {
                     "type": "audio.cancelled",
@@ -1236,7 +1236,7 @@ class DuplexSessionRunner:
         # The epoch bump is the atomic part: from here on every model output
         # and append of the old epoch is dropped by the stale-epoch filter in
         # ``emit`` / the append tail, whatever the awaits below interleave with.
-        new_epoch, old_playback = session_helpers.advance_barge_in_epoch(session)
+        new_epoch, old_playback = helpers.advance_barge_in_epoch(session)
         if old_request_id is not None:
             # Release projector/parser cursors so cancelled epochs do not
             # accumulate until the whole session closes.
@@ -1276,7 +1276,7 @@ class DuplexSessionRunner:
     def _cancel_pending_input(self, *, reason: str) -> None:
         session = self.session
         cancelled = session.cancel_pending_input()
-        session_helpers.advance_barge_in_epoch(session)
+        helpers.advance_barge_in_epoch(session)
         self.emit(
             {
                 "type": "input.cancelled",
@@ -1348,13 +1348,13 @@ class DuplexSessionRunner:
             flushed = dict(flushed)
             flushed["force_listen"] = True
         model_state.input_since_commit = False
-        committed = session_helpers.commit_audio_input(
+        committed = helpers.commit_audio_input(
             session,
             realtime_item_id=realtime_item_id,
             transcript=event.get("transcript"),
         )
         self.emit(
-            session_helpers.audio_committed_payload(
+            helpers.audio_committed_payload(
                 session,
                 committed=committed,
                 realtime_item_id=realtime_item_id,
@@ -1389,7 +1389,7 @@ class DuplexSessionRunner:
         session = self.session
         model_state = self.model_state
         if (
-            session_helpers.response_in_progress(self.session, self.tasks)
+            helpers.response_in_progress(self.session, self.tasks)
             or self.tasks.append_tasks
             or self.run.stream_request_id is not None
         ):
@@ -1493,12 +1493,12 @@ class DuplexSessionRunner:
         model_state.deferred_precreate_response = precreate_response_requested
         model_state.input_since_commit = False
         model_state.speech_since_commit = False
-        committed = session_helpers.commit_audio_input(
+        committed = helpers.commit_audio_input(
             session,
             realtime_item_id=realtime_item_id,
             transcript=event.get("transcript"),
         )
-        committed_payload = session_helpers.audio_committed_payload(
+        committed_payload = helpers.audio_committed_payload(
             session,
             committed=committed,
             realtime_item_id=realtime_item_id,
@@ -1534,14 +1534,14 @@ class DuplexSessionRunner:
         model_state.input_since_commit = False
         model_state.speech_since_commit = False
         data_plane_turn_id = session.turn_id
-        committed = session_helpers.commit_audio_input(
+        committed = helpers.commit_audio_input(
             session,
             realtime_item_id=realtime_item_id,
             transcript=event.get("transcript"),
             turn_id=data_plane_turn_id,
         )
         self.emit(
-            session_helpers.audio_committed_payload(
+            helpers.audio_committed_payload(
                 session,
                 committed=committed,
                 realtime_item_id=realtime_item_id,
@@ -1639,8 +1639,8 @@ class DuplexSessionRunner:
                     speech_since_commit=model_state.speech_since_commit,
                     active_response_id=session.active_response_id,
                     overlap_speech_ms=session.overlap_speech_ms,
-                    response_in_progress=session_helpers.response_in_progress(self.session, self.tasks),
-                    playback_active=session_helpers.assistant_playback_active(self.session),
+                    response_in_progress=helpers.response_in_progress(self.session, self.tasks),
+                    playback_active=helpers.assistant_playback_active(self.session),
                 )
             )
             if commit_action is CommitAction.DEFER_ACTIVE_RESPONSE:
@@ -1661,9 +1661,7 @@ class DuplexSessionRunner:
         if event_type == "response.create":
             await self._start_response_from_committed_audio()
             return
-        if not session_helpers.response_in_progress(
-            self.session, self.tasks
-        ) and await self._flush_and_submit_committed_turn(
+        if not helpers.response_in_progress(self.session, self.tasks) and await self._flush_and_submit_committed_turn(
             event,
             event_type=event_type,
             realtime_item_id=realtime_item_id,
@@ -1684,7 +1682,7 @@ class DuplexSessionRunner:
             model_state.speech_since_commit = False
         if event_type != "response.create":
             committed = (
-                session_helpers.commit_audio_input(
+                helpers.commit_audio_input(
                     session,
                     realtime_item_id=realtime_item_id,
                     transcript=event.get("transcript"),
@@ -1693,7 +1691,7 @@ class DuplexSessionRunner:
                 else None
             )
             self.emit(
-                session_helpers.audio_committed_payload(
+                helpers.audio_committed_payload(
                     session,
                     committed=committed,
                     realtime_item_id=realtime_item_id,
@@ -1704,7 +1702,7 @@ class DuplexSessionRunner:
         if committed is not None:
             if isinstance(realtime_item_id, str):
                 session.register_history_item(realtime_item_id, committed.message)
-            self.emit(session_helpers.input_committed_payload(session, committed, realtime_item_id=realtime_item_id))
+            self.emit(helpers.input_committed_payload(session, committed, realtime_item_id=realtime_item_id))
         # NOTE(refactor): the old generic chat-completion fallback response
         # (`_run_response`) is gone; a native session with a response already in
         # progress only acknowledges the commit here.

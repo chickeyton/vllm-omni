@@ -84,7 +84,6 @@ CHECK_IMPORTS = {
             "vllm_omni/engine/duplex/contracts.py",
             "vllm_omni/engine/duplex/events.py",
             "vllm_omni/engine/duplex/realtime_commands.py",
-            "vllm_omni/engine/duplex/session_runner.py",
             "vllm_omni/experimental/fullduplex/joyvl/memory/memory.py",
             "vllm_omni/model_executor/models/minicpmo_4_5/duplex/input.py",
             "vllm_omni/model_executor/models/minicpmo_4_5/duplex/plugin.py",

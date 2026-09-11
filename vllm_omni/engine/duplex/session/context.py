@@ -31,8 +31,8 @@ if TYPE_CHECKING:
         DuplexStagePort,
     )
     from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, DuplexModelSessionState
-    from vllm_omni.engine.duplex.session import DuplexEngineSession
-    from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
+    from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
+    from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
     from vllm_omni.metrics.stats import StageRequestStats
 
 _OffloadT = TypeVar("_OffloadT")

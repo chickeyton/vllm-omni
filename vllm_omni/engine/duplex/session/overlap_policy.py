@@ -13,14 +13,14 @@ runner.
 
 from __future__ import annotations
 
-import base64
 import binascii
 from collections.abc import Mapping
 
 import numpy as np
+import pybase64 as base64
 
 from vllm_omni.engine.duplex.config import DuplexOverlapPolicy
-from vllm_omni.engine.duplex.session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
 
 
 def decide(
