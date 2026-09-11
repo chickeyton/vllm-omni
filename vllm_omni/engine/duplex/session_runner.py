@@ -109,6 +109,7 @@ from vllm_omni.engine.duplex.realtime_events import (
     retrieve_item_events,
 )
 from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session_context import DuplexRunState, DuplexSessionContext
 from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
     ServerTurnDetector,
@@ -239,17 +240,22 @@ class DuplexSessionRunner:
         self._worker_stopped = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
-        self._closing = False
-        self._close_reason: str | None = None
-        self._closed_emitted = False
-        self._closed_deferred = False
-        self._runtime_closed = False
-        #: Request id of the resumable data-plane stream currently bound to this session.
-        self._stream_request_id: str | None = None
+        #: Flags more than one component reads and writes (see session_context).
+        self.run = DuplexRunState()
         self._turn_detection_config: TurnDetectionConfig | None = None
         self._turn_detector: ServerTurnDetector | None = None
         self._pending_turn_detection: PendingTurnDetectionUpdate | None = None
         self._projector: RealtimeProjectionState | None = session.projector
+        self.ctx = DuplexSessionContext(
+            session=session,
+            model_state=self.model_state,
+            plugin=plugin,
+            stage_port=stage_port,
+            manager=manager,
+            tasks=self.tasks,
+            run=self.run,
+            services=self,
+        )
 
     # ------------------------------------------------------------------ #
     # Public interface                                                   #
@@ -299,10 +305,10 @@ class DuplexSessionRunner:
             # take. Hand them to the session instead of dropping them, on the
             # mailbox so they stay ordered with this session's other work.
             snapshot = self._stage_metrics_snapshot(stage_id, metrics, output)
-            if snapshot is not None and not self._closing and self.session.state != DuplexSessionState.CLOSED:
+            if snapshot is not None and not self.run.closing and self.session.state != DuplexSessionState.CLOSED:
                 self._mailbox.put_nowait(_Internal("stage_metrics", {"stage_metrics": snapshot}))
             return False
-        if self._closing or self.session.state == DuplexSessionState.CLOSED:
+        if self.run.closing or self.session.state == DuplexSessionState.CLOSED:
             return True
         self._mailbox.put_nowait(
             _StageOutput(
@@ -351,12 +357,12 @@ class DuplexSessionRunner:
     @property
     def closed_emitted(self) -> bool:
         """Whether ``session.closed`` / ``session.expired`` already left this runner."""
-        return self._closed_emitted
+        return self.run.closed_emitted
 
     @property
     def closing(self) -> bool:
         """Whether an irreversible close has begun (commands and control ops are refused)."""
-        return self._closing or self.session.state != DuplexSessionState.OPEN
+        return self.run.closing or self.session.state != DuplexSessionState.OPEN
 
     async def close(self, reason: str, *, emit_closed: bool = True) -> None:
         """Graceful close: cancel work, release the data plane, emit ``session.closed``.
@@ -366,7 +372,7 @@ class DuplexSessionRunner:
         admission slot is free again".
         """
         session = self.session
-        if session.state == DuplexSessionState.CLOSED and (self._closed_emitted or self._closed_deferred):
+        if session.state == DuplexSessionState.CLOSED and (self.run.closed_emitted or self.run.closed_deferred):
             await self._stop_worker()
             return
         self._begin_close(reason)
@@ -380,13 +386,13 @@ class DuplexSessionRunner:
         await self._cancel_active_response(self.tasks.active_response_task, reason=reason, notify=False)
         self.tasks.active_response_task = None
         self._cleanup_duplex_session_state()
-        if not self._closed_emitted and not self._closed_deferred:
-            self._close_reason = self._close_reason or reason
+        if not self.run.closed_emitted and not self.run.closed_deferred:
+            self.run.close_reason = self.run.close_reason or reason
             if emit_closed:
-                self._closed_emitted = True
+                self.run.closed_emitted = True
                 self.emit({"type": "session.closed", "session_id": session.session_id, "reason": reason})
             else:
-                self._closed_deferred = True
+                self.run.closed_deferred = True
         session.close()
         await self._stop_worker()
 
@@ -398,17 +404,17 @@ class DuplexSessionRunner:
         """
         session = self.session
         self._begin_close(reason)
-        if not self._closed_emitted:
+        if not self.run.closed_emitted:
             if emit_expired:
                 # Also when the event was deferred: the manager only emits a
                 # deferred terminal for the teardown it drives itself, and an
                 # expiry that arrives first (a stage failure racing a wire
                 # ``session.close``) takes the runner away from it. Emitting
                 # here keeps "every session ends with one terminal event".
-                self._closed_emitted = True
+                self.run.closed_emitted = True
                 self._emit_events([SessionExpired(reason=reason)])
             else:
-                self._closed_deferred = True
+                self.run.closed_deferred = True
         await self.tasks.cancel_append_tasks()
         self._cancel_data_plane_stream()
         active_response_task = self.tasks.active_response_task
@@ -423,8 +429,8 @@ class DuplexSessionRunner:
         await self._stop_worker()
 
     async def shutdown(self) -> None:
-        self._closing = True
-        self._closed_emitted = True
+        self.run.closing = True
+        self.run.closed_emitted = True
         await self.tasks.cancel_append_tasks()
         self._cancel_data_plane_stream()
         active_response_task = self.tasks.active_response_task
@@ -465,14 +471,14 @@ class DuplexSessionRunner:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
 
-    def _spawn(self, coro: Awaitable[None], *, name: str) -> asyncio.Task[None]:
+    def spawn(self, coro: Awaitable[None], *, name: str) -> asyncio.Task[None]:
         task = asyncio.ensure_future(coro)
         task.set_name(name)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
 
-    async def _offload(self, fn: Callable[..., _OffloadT], *args: object, **kwargs: object) -> _OffloadT:
+    async def offload(self, fn: Callable[..., _OffloadT], *args: object, **kwargs: object) -> _OffloadT:
         loop = self._loop or asyncio.get_running_loop()
         if kwargs:
             return await loop.run_in_executor(self.manager.executor, lambda: fn(*args, **kwargs))
@@ -486,7 +492,7 @@ class DuplexSessionRunner:
         if isinstance(item, _Internal):
             await self._on_internal(item)
             return
-        if self._closing or session.state == DuplexSessionState.CLOSED:
+        if self.run.closing or session.state == DuplexSessionState.CLOSED:
             if isinstance(item, Commit):
                 session.release_pending_turn()
             elif isinstance(item, AppendAudio):
@@ -501,7 +507,7 @@ class DuplexSessionRunner:
                 self.session.stash_stage_metrics(stage_metrics)
             return
         if item.kind == "promote_deferred_overlap":
-            if self._closing or self.session.state != DuplexSessionState.OPEN:
+            if self.run.closing or self.session.state != DuplexSessionState.OPEN:
                 return
             payload = item.payload.get("payload")
             if not isinstance(payload, dict):
@@ -704,7 +710,7 @@ class DuplexSessionRunner:
         if not accepted:
             return
         self._emit_events(project_internal_event(self._require_projector(), payload))
-        if deferred_overlap_payload is not None and not self._closing:
+        if deferred_overlap_payload is not None and not self.run.closing:
             precreate_response = self.model_state.deferred_precreate_response
             self.model_state.deferred_precreate_response = False
             self._mailbox.put_nowait(
@@ -720,7 +726,7 @@ class DuplexSessionRunner:
             return False
         if event_type not in MODEL_OUTPUT_EVENTS:
             return False
-        if self._closing and event_type != "response.listen":
+        if self.run.closing and event_type != "response.listen":
             return True
         if self.session.state == DuplexSessionState.CLOSED and event_type != "response.listen":
             return True
@@ -738,14 +744,14 @@ class DuplexSessionRunner:
             if isinstance(payload_epoch, int) and payload_epoch != session.epoch:
                 return False, None
             if payload_type in {"response.done", "response.listen"} and (
-                self._closing or session.state == DuplexSessionState.CLOSED
+                self.run.closing or session.state == DuplexSessionState.CLOSED
             ):
                 return False, None
         elif self._is_stale_model_output(payload):
             return False, None
 
         if payload_type == "session.closed":
-            self._close_reason = self._close_reason or str(payload.get("reason") or "closed")
+            self.run.close_reason = self.run.close_reason or str(payload.get("reason") or "closed")
             session.mark_closing()
 
         if not is_terminal:
@@ -838,8 +844,8 @@ class DuplexSessionRunner:
     # ------------------------------------------------------------------ #
 
     def _begin_close(self, reason: str) -> None:
-        self._closing = True
-        self._close_reason = self._close_reason or reason
+        self.run.closing = True
+        self.run.close_reason = self.run.close_reason or reason
         self.session.mark_closing()
 
     def _session_auto_responds(self) -> bool:
@@ -1018,7 +1024,7 @@ class DuplexSessionRunner:
     def _cleanup_duplex_session_state(self) -> None:
         session = self.session
         self.plugin.data_plane.close_session(session.session_id, active_request_id=session.active_request_id)
-        self._stream_request_id = None
+        self.run.stream_request_id = None
 
     # ------------------------------------------------------------------ #
     # Overlap policy (moved from OmniDuplexSessionHandler)               #
@@ -1429,7 +1435,7 @@ class DuplexSessionRunner:
         fmt = event.get("format") if isinstance(event.get("format"), str) else "pcm_f32le"
         sample_rate_hz = event.get("sample_rate_hz")
         try:
-            result = await self._offload(
+            result = await self.offload(
                 detector.process,
                 audio,
                 fmt=fmt,
@@ -1470,7 +1476,7 @@ class DuplexSessionRunner:
         sr_raw = event.get("sample_rate_hz") or event.get("sample_rate")
         sample_rate_hz = sr_raw if isinstance(sr_raw, int | float) else 16000
         try:
-            audio, fmt, sample_rate_hz = await self._offload(
+            audio, fmt, sample_rate_hz = await self.offload(
                 convert_input_audio_with_rate,
                 audio,
                 fmt,
@@ -1488,7 +1494,7 @@ class DuplexSessionRunner:
         vad_result = await self._run_turn_detection(event)
         projector = self._require_projector()
         self._emit_events(note_input_append(projector, event, vad_result=vad_result))
-        if self._closing or session.state != DuplexSessionState.OPEN:
+        if self.run.closing or session.state != DuplexSessionState.OPEN:
             return
 
         force_listen = bool(event.get("force_listen", False))
@@ -1546,7 +1552,7 @@ class DuplexSessionRunner:
                 model_state.input_since_commit = False
                 model_state.speech_since_commit = False
                 await self.tasks.cancel_append_tasks()
-                had_stream = self._stream_request_id is not None
+                had_stream = self.run.stream_request_id is not None
                 cancel_reason = str(decision.get("cancel_reason") or "barge_in")
                 cancelled = await self._cancel_active_response(
                     self.tasks.active_response_task,
@@ -1756,7 +1762,7 @@ class DuplexSessionRunner:
                         }
                     )
                 if not append_ok and session.state == DuplexSessionState.CLOSED:
-                    self._runtime_closed = True
+                    self.run.runtime_closed = True
                     return False
                 if not emitted_response and session.epoch == append_epoch:
                     if session.active_request_id == self._stage0_request_id(append_epoch):
@@ -1776,7 +1782,7 @@ class DuplexSessionRunner:
                 self._send_runtime_error("runtime_append_task_failed", exc)
                 if session.state != DuplexSessionState.CLOSED:
                     self._begin_close("runtime_append_task_failed")
-                    self._spawn(self._close_from_runtime("runtime_append_task_failed"), name="duplex-runtime-close")
+                    self.spawn(self._close_from_runtime("runtime_append_task_failed"), name="duplex-runtime-close")
                 return False
 
         async def _run_in_wire_order(predecessor: asyncio.Task[bool] | None) -> bool:
@@ -1795,7 +1801,7 @@ class DuplexSessionRunner:
                         pcm_reservation.rollback()
                     _discard_retained_committed_audio()
                     return False
-            if self._closing or self._runtime_closed or session.state != DuplexSessionState.OPEN:
+            if self.run.closing or self.run.runtime_closed or session.state != DuplexSessionState.OPEN:
                 if pcm_reservation is not None:
                     pcm_reservation.rollback()
                 _discard_retained_committed_audio()
@@ -2090,14 +2096,14 @@ class DuplexSessionRunner:
             return False
         session = self.session
         session.bind_request(request_id)
-        if self._stream_request_id == request_id:
+        if self.run.stream_request_id == request_id:
             return False
-        self._stream_request_id = request_id
+        self.run.stream_request_id = request_id
         return True
 
     def _cancel_data_plane_stream(self) -> bool:
-        had_stream = self._stream_request_id is not None
-        self._stream_request_id = None
+        had_stream = self.run.stream_request_id is not None
+        self.run.stream_request_id = None
         return had_stream
 
     async def _signal_cancel_fence(self, cancelled_fence: DuplexFence) -> bool:
@@ -2125,11 +2131,11 @@ class DuplexSessionRunner:
         session = self.session
         if session.state == DuplexSessionState.CLOSED:
             return
-        self._runtime_closed = True
+        self.run.runtime_closed = True
         self._begin_close(reason)
         self._cleanup_duplex_session_state()
-        if not self._closed_emitted:
-            self._closed_emitted = True
+        if not self.run.closed_emitted:
+            self.run.closed_emitted = True
             self.emit({"type": "session.closed", "session_id": session.session_id, "reason": reason})
         session.close()
         # The manager aborts the stage requests (if any) and frees the
@@ -2239,7 +2245,7 @@ class DuplexSessionRunner:
 
     async def _on_stage_output_item(self, item: _StageOutput) -> None:
         session = self.session
-        if session.state == DuplexSessionState.CLOSED or self._closing:
+        if session.state == DuplexSessionState.CLOSED or self.run.closing:
             return
         expected_epoch = item.context.identity.fence.epoch
         if session.epoch != expected_epoch:
@@ -2268,9 +2274,9 @@ class DuplexSessionRunner:
             # cursor on its way out and offers the model another
             # silence unit.
             self.plugin.data_plane.close_stream(item.request_id)
-            if self._stream_request_id == item.request_id:
-                self._stream_request_id = None
-            self._spawn(
+            if self.run.stream_request_id == item.request_id:
+                self.run.stream_request_id = None
+            self.spawn(
                 self._maybe_continue_response(expected_epoch=expected_epoch),
                 name="duplex-continue",
             )
@@ -2397,7 +2403,7 @@ class DuplexSessionRunner:
                 and auto_continuations_remaining
             )
             if non_terminal_auto_listen:
-                self._spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
+                self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
                 return close_reason, emitted_response
             if not auto_response and data_plane_request_id == session.active_request_id:
                 session.clear_request()
@@ -2423,7 +2429,7 @@ class DuplexSessionRunner:
                 await self._abort_request_background(data_plane_request_id, notify=False)
             if response_id is not None:
                 if not auto_response and self._response_continuations_remaining(response_id):
-                    self._spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
+                    self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
                     return close_reason, emitted_response
                 if auto_response:
                     model_state.clear_continuation()
@@ -2460,7 +2466,7 @@ class DuplexSessionRunner:
                 and auto_response
                 and (model_turn_id is not None or session.active_response_id is not None)
             ):
-                self._spawn(
+                self.spawn(
                     self._maybe_continue_response(expected_epoch=expected_epoch, expected_model_turn_id=model_turn_id),
                     name="duplex-continue",
                 )
@@ -2585,7 +2591,7 @@ class DuplexSessionRunner:
             and model_result.get("abort_data_plane_request") is True
             and auto_response
         ):
-            self._spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
+            self.spawn(self._maybe_continue_response(expected_epoch=expected_epoch), name="duplex-continue")
         if end_of_turn:
             data_plane_request_id = model_result.get("data_plane_request_id")
             if isinstance(data_plane_request_id, str) and not auto_response:
@@ -2794,7 +2800,7 @@ class DuplexSessionRunner:
         session = self.session
         model_state = self.model_state
         response_id = session.active_response_id
-        if session.state == DuplexSessionState.CLOSED or self._closing:
+        if session.state == DuplexSessionState.CLOSED or self.run.closing:
             model_state.clear_continuation()
             return
         request_id = session.active_request_id
@@ -2907,7 +2913,7 @@ class DuplexSessionRunner:
         )
         if event_type == "response.cancel":
             session.release_input_bytes(model_state.clear_committed_audio())
-        had_stream = self._stream_request_id is not None
+        had_stream = self.run.stream_request_id is not None
         cancelled = await self._cancel_active_response(self.tasks.active_response_task, reason=cancel_reason)
         had_stream = self._cancel_data_plane_stream() or had_stream
         if not cancelled and (had_stream or had_append or had_unbuffered_append):
@@ -3252,7 +3258,7 @@ class DuplexSessionRunner:
                     "created": True,
                 }
             )
-            self._spawn(
+            self.spawn(
                 self._maybe_continue_response(
                     expected_epoch=session.epoch,
                     expected_model_turn_id=session.turn_id,
@@ -3358,7 +3364,7 @@ class DuplexSessionRunner:
                 or model_state.committed_audio_payload is not None
                 or realtime_validated_audio_commit
             )
-            if not has_pending_audio and not self.tasks.append_tasks and self._stream_request_id is None:
+            if not has_pending_audio and not self.tasks.append_tasks and self.run.stream_request_id is None:
                 self._emit_error(
                     "input_audio_buffer_empty", "input_audio_buffer.commit requires a non-empty input audio buffer."
                 )
@@ -3482,11 +3488,11 @@ class DuplexSessionRunner:
                     )
                 return
         if event_type == "response.create":
-            if self._response_in_progress() or self.tasks.append_tasks or self._stream_request_id is not None:
+            if self._response_in_progress() or self.tasks.append_tasks or self.run.stream_request_id is not None:
                 if session.active_response_id is None and (
                     session.active_request_id is not None
                     or self.tasks.append_tasks
-                    or self._stream_request_id is not None
+                    or self.run.stream_request_id is not None
                 ):
                     return
                 self._emit_error(
