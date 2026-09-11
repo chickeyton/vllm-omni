@@ -188,7 +188,7 @@ def test_stage_engine_core_client_module_reload_keeps_forward_refs_deferred():
 
 
 def test_async_omni_engine_initialize_stages_passes_log_stats_to_runtime(monkeypatch):
-    import vllm_omni.engine.async_omni_engine as engine_mod
+    import vllm_omni.engine.omni_engine_base as engine_mod
 
     engine = object.__new__(AsyncOmniEngine)
     engine.stage_configs = [types.SimpleNamespace()]
