@@ -576,23 +576,23 @@ async def test_stage1_audio_opens_a_response_and_streams_deltas() -> None:
             "response.output_item.added",
             "response.speak",
             "response.content_part.added",
-            "response.audio.delta",
-            "response.audio_transcript.delta",
+            "response.output_audio.delta",
+            "response.output_audio_transcript.delta",
         ]
         response_id = find(events, "response.created").response_id
         assert response_id == h.session.active_response_id
         assert h.session.active_request_id == request_id
-        delta = find(events, "response.audio.delta")
+        delta = find(events, "response.output_audio.delta")
         assert (delta.delta, delta.format, delta.sample_rate_hz) == ("wav-24000", "wav", 24000)
         assert delta.response_id == response_id
-        assert find(events, "response.audio_transcript.delta").delta == "hel"
+        assert find(events, "response.output_audio_transcript.delta").delta == "hel"
         assert h.session.playback.sent_ms == 1000
 
         # Cumulative Stage1 audio is sliced to the new samples only.
         events = await h.deliver_and_settle(tts_output(request_id, samples=48000, text="hello"))
-        assert types(events) == ["response.audio.delta", "response.audio_transcript.delta"]
-        assert find(events, "response.audio.delta").delta == "wav-24000"
-        assert find(events, "response.audio_transcript.delta").delta == "lo"
+        assert types(events) == ["response.output_audio.delta", "response.output_audio_transcript.delta"]
+        assert find(events, "response.output_audio.delta").delta == "wav-24000"
+        assert find(events, "response.output_audio_transcript.delta").delta == "lo"
         assert h.session.playback.sent_ms == 2000
     finally:
         await close_harness(h)
@@ -608,8 +608,8 @@ async def test_turn_end_completes_the_response_and_advances_the_model_turn() -> 
 
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hello", turn_end=True))
         assert types(events) == [
-            "response.audio.done",
-            "response.audio_transcript.done",
+            "response.output_audio.done",
+            "response.output_audio_transcript.done",
             "response.content_part.done",
             "response.output_item.done",
             "conversation.item.done",
@@ -618,7 +618,7 @@ async def test_turn_end_completes_the_response_and_advances_the_model_turn() -> 
         ]
         done = find(events, "response.done")
         assert done.status == "completed"
-        assert find(events, "response.audio_transcript.done").transcript == "hello"
+        assert find(events, "response.output_audio_transcript.done").transcript == "hello"
         assert h.session.active_response_id is None
         assert h.session.turn_id == 1
         # Ack-only playback: the assistant text enters history on playback ack.
@@ -660,8 +660,8 @@ async def test_stale_epoch_output_is_dropped_after_barge_in() -> None:
         done = find(events, "response.done")
         assert done.status == "cancelled"
         assert types(events)[: types(events).index("response.done")] == [
-            "response.audio.done",
-            "response.audio_transcript.done",
+            "response.output_audio.done",
+            "response.output_audio_transcript.done",
             "response.content_part.done",
             "response.output_item.done",
             "conversation.item.done",
@@ -821,7 +821,7 @@ async def test_turn_mode_commit_with_response_create_starts_one_response() -> No
         assert response_id is not None
 
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="sure"))
-        assert types(events)[-2:] == ["response.audio.delta", "response.audio_transcript.delta"]
+        assert types(events)[-2:] == ["response.output_audio.delta", "response.output_audio_transcript.delta"]
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="sure", finished=True))
         done = find(events, "response.done")
         assert done.response_id == response_id
@@ -938,7 +938,7 @@ async def test_stage0_metrics_reach_the_response_even_though_its_output_feeds_tt
         assert await h.settle() == []
 
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
-        stage_metrics = _stage_metrics_of(find(events, "response.audio.delta"))
+        stage_metrics = _stage_metrics_of(find(events, "response.output_audio.delta"))
         assert stage_metrics["0"]["num_tokens_out"] == 3
         assert stage_metrics["0"]["vllm_itls_ms"] == [9.0, 11.0]
     finally:
@@ -966,7 +966,7 @@ async def test_stage0_metrics_from_several_units_are_summed_into_one_response() 
         assert await h.settle() == []
 
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
-        stage_metrics = _stage_metrics_of(find(events, "response.audio.delta"))
+        stage_metrics = _stage_metrics_of(find(events, "response.output_audio.delta"))
         assert stage_metrics["0"]["num_tokens_out"] == 7
     finally:
         await close_harness(h)

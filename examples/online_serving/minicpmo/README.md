@@ -240,7 +240,7 @@ them unless `--allow-invalid-clock` is explicit.
 - Co-locating all three stages minimizes hardware requirements but makes their
   CUDA contexts contend for one GPU. Use the 8x4090 layout or a custom
   multi-GPU deploy config when throughput is the primary goal.
-- Output audio streams as base64 PCM16 (24 kHz mono) in `response.audio.delta`.
+- Output audio streams as base64 PCM16 (24 kHz mono) in `response.output_audio.delta`.
 - Offline counterpart:
   [`examples/offline_inference/minicpmo/`](../../offline_inference/minicpmo/)
 - Recipe:

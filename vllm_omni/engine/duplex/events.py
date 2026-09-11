@@ -354,7 +354,7 @@ class ContentPartDone(ContentPartAdded):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AudioDelta(_ResponseEvent):
-    wire_type = "response.audio.delta"
+    wire_type = "response.output_audio.delta"
     optional_wire_fields = frozenset({"sample_rate_hz", "metadata"})
 
     #: Base64 audio in ``format``.
@@ -373,12 +373,12 @@ class AudioDelta(_ResponseEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AudioDone(_ResponseEvent):
-    wire_type = "response.audio.done"
+    wire_type = "response.output_audio.done"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TranscriptDelta(_ResponseEvent):
-    wire_type = "response.audio_transcript.delta"
+    wire_type = "response.output_audio_transcript.delta"
 
     delta: str = ""
 
@@ -389,7 +389,7 @@ class TranscriptDelta(_ResponseEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TranscriptDone(_ResponseEvent):
-    wire_type = "response.audio_transcript.done"
+    wire_type = "response.output_audio_transcript.done"
 
     transcript: str = ""
 
@@ -689,9 +689,9 @@ MODEL_OUTPUT_EVENTS = frozenset(
         "response.output_item.added",
         "response.content_part.added",
         "response.output_audio.delta",
-        "response.audio.delta",
+        "response.output_audio.delta",
         "response.output_audio.done",
-        "response.audio.done",
+        "response.output_audio.done",
         "response.output_text.delta",
         "response.output_text.done",
         "response.text.delta",

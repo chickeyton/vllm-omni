@@ -1442,3 +1442,64 @@ async def test_wire_close_of_an_idle_session_still_emits_session_closed() -> Non
         assert events[0].reason == "client_close"
         assert harness.manager.get("sid-idle-close") is None
         assert (await harness.open("sid-idle-replacement")).ok is True
+
+
+# --------------------------------------------------------------------------- #
+# Reaper loop                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+async def test_reaper_loop_waits_between_ticks() -> None:
+    """The loop paces itself; it does not spin on the expiry check.
+
+    Ported from the pre-framework ``Orchestrator._duplex_reaper_loop`` tests:
+    the loop moved to the session manager with the sessions it reaps.
+    """
+    manager = object.__new__(DuplexSessionManager)
+    calls = 0
+
+    async def reap_expired(now: float | None = None) -> int:
+        nonlocal calls
+        calls += 1
+        return 0
+
+    manager.reap_expired = reap_expired  # type: ignore[method-assign]
+    manager.runtime_config = DuplexSessionRuntimeConfig(reaper_interval_s=0.01)
+    shutdown = asyncio.Event()
+
+    task = asyncio.create_task(manager.reaper_loop(shutdown))
+    await asyncio.sleep(0.035)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert 2 <= calls <= 5
+
+
+@pytest.mark.parametrize("first_cleanup_delay", [0.0, 0.05], ids=["immediate", "delayed"])
+async def test_reaper_loop_survives_one_cleanup_failure(first_cleanup_delay: float) -> None:
+    """A failed expiry sweep is retried on the next tick, not fatal to the loop."""
+    recovered = asyncio.Event()
+    calls = 0
+
+    manager = object.__new__(DuplexSessionManager)
+
+    async def reap_expired(now: float | None = None) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(first_cleanup_delay)
+            raise RuntimeError("transient cleanup failure")
+        recovered.set()
+        return 0
+
+    manager.reap_expired = reap_expired  # type: ignore[method-assign]
+    manager.runtime_config = DuplexSessionRuntimeConfig(reaper_interval_s=0.01)
+    shutdown = asyncio.Event()
+
+    task = asyncio.create_task(manager.reaper_loop(shutdown))
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=5.0)
+        assert calls >= 2
+    finally:
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=5.0)

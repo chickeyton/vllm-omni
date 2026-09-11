@@ -177,9 +177,9 @@ def _write_partition_index(path, *, partition, tasks):
 
 
 def test_modular_diffusers_index_is_resolved_generically(tmp_path):
+    from vllm_omni.config.resolver import resolve_omni_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig, resolve_model_class_name
     from vllm_omni.diffusion.utils.hf_utils import is_diffusion_model
-    from vllm_omni.entrypoints.utils import resolve_model_config_path
 
     (tmp_path / "modular_model_index.json").write_text(
         json.dumps(
@@ -193,7 +193,16 @@ def test_modular_diffusers_index_is_resolved_generically(tmp_path):
 
     assert is_diffusion_model(str(tmp_path))
     assert resolve_model_class_name(str(tmp_path)) == "MiniMaxH3ModularPipeline"
-    assert resolve_model_config_path(str(tmp_path)) is None
+    resolved = resolve_omni_config(
+        str(tmp_path),
+        trust_remote_code=False,
+        deploy_config_path=None,
+        cli_overrides=None,
+        stage_overrides=None,
+        strategy_config_path=None,
+    )
+    assert resolved.config_path is None
+    assert resolved.stage_by_id(0).engine_args.model_class_name == "MiniMaxH3ModularPipeline"
 
     config = OmniDiffusionConfig(model=str(tmp_path))
     config.enrich_config()
@@ -2444,6 +2453,56 @@ def test_g4_standalone_audio_duration_and_total_duration_contract():
                 (torch.zeros(1, 8 * sample_rate), sample_rate),
             ]
         )
+
+
+def test_ref2va_video_soundtrack_does_not_consume_standalone_audio_budget():
+    from PIL import Image
+
+    from vllm_omni.diffusion.cache.cachedit.runtime import RequestScopedCacheDiTRuntime
+    from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
+    from vllm_omni.diffusion.models.minimax_h3.quality_policy import MiniMaxH3QualityPolicy
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+    pipeline = object.__new__(MiniMaxH3Pipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.partition = "ref2va"
+    pipeline.supported_tasks = frozenset({"ref2va"})
+    pipeline.device = torch.device("cpu")
+    pipeline.default_video_shift = 12.0
+    pipeline.default_audio_shift = 3.0
+    pipeline._resolve_sigma_positions = Mock(return_value=(None, 50))
+    pipeline._quality_policy = MiniMaxH3QualityPolicy(None)
+    pipeline._cache_dit_runtime = Mock(spec=RequestScopedCacheDiTRuntime)
+    pipeline.text_encoder = object()
+    pipeline.encode_prompt = Mock(return_value=(torch.ones(1, 2), torch.ones(1, dtype=torch.long)))
+    pipeline._prepare_reference_videos = Mock(return_value=[{"input_has_audio": True}])
+    pipeline._encode_visual_conditions = Mock(return_value=(torch.ones(1, 96), [(1, 16, 16), (17, 48, 84)]))
+    # A 2.35-second video soundtrack and a 15-second standalone reference
+    # each satisfy their modality's separate 15-second duration budget.
+    embedded = torch.full((188, 32), 1.0)
+    standalone = torch.full((1200, 32), 2.0)
+    pipeline._encode_reference_audio_conditions = Mock(return_value=(embedded, [94], standalone, [600]))
+    sampling = OmniDiffusionSamplingParams(
+        width=1344,
+        height=768,
+        fps=24,
+        num_inference_steps=50,
+        extra_args={"task": "ref2va", "duration": 15.0},
+    )
+
+    context = pipeline._prepare_request_inputs(
+        prompt="A person carrying books down a street",
+        multi_modal_data={
+            "image": Image.new("RGB", (256, 256)),
+            "video": ["reference.mp4"],
+            "audio": (torch.zeros(1, 15 * 16000), 16000),
+        },
+        sampling=sampling,
+    )
+
+    assert context["audio_condition_lengths"] == [94, 600]
+    assert [block["kind"] for block in context["ref_blocks"]] == ["image", "video_audio", "audio"]
+    torch.testing.assert_close(context["audio_condition"], torch.cat([embedded, standalone]))
 
 
 def test_ref2va_audio_duration_validation_precedes_rank_branch(monkeypatch):

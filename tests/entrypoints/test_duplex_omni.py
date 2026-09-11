@@ -160,7 +160,7 @@ async def test_events_are_routed_to_their_handle_and_end_on_session_closed(monke
 
         events = await _collect(handle, 10)
 
-        assert [event.type for event in events] == ["session.created", "response.audio.delta", "session.closed"]
+        assert [event.type for event in events] == ["session.created", "response.output_audio.delta", "session.closed"]
         assert events[0].session_id == handle.session_id
         assert handle.closed and handle.close_reason == "client_close"
         assert await handle.wait_closed() == "client_close"
@@ -179,7 +179,7 @@ async def test_events_is_single_consumer_but_may_be_reentered(monkeypatch) -> No
         handle = await omni.open_session()
         engine.emit(handle.session_id, AudioDelta(delta="one"))
         first = handle.events()
-        assert (await first.__anext__()).type == "response.audio.delta"
+        assert (await first.__anext__()).type == "response.output_audio.delta"
         with pytest.raises(RuntimeError, match="active events"):
             await handle.events().__anext__()
         await first.aclose()
