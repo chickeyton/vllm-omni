@@ -1268,3 +1268,177 @@ def test_manager_rejects_a_plugin_whose_sampling_policy_mismatches_the_stages() 
             runtime_config=_runtime_config(),
             model_config=None,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Admission bookkeeping                                                       #
+# --------------------------------------------------------------------------- #
+
+
+async def test_duplicate_open_in_flight_does_not_release_the_first_opens_slot() -> None:
+    """A duplicate id arriving mid-flight must not free the slot the first open holds.
+
+    The rejection runs the same ``finally`` as a successful open, so without a
+    guard it discards an ``_admitting`` entry it never added, and the next open
+    of a *different* id sails past ``max_sessions``. Server-allocated ids make
+    this a guard rather than a live path, which is exactly why a sequential
+    duplicate cannot exercise it.
+    """
+    async with Harness.create(max_sessions=1) as harness:
+        harness.plugin.blocked_session_ids.add("dup")
+        first = asyncio.create_task(harness.open("dup", DuplexSessionConfig(model="fake-model", instructions="dup")))
+        await asyncio.wait_for(harness.plugin.runtime_config_started.wait(), timeout=1.0)
+
+        duplicate = await harness.open("dup", DuplexSessionConfig(model="fake-model", instructions="dup"))
+        assert duplicate.ok is False
+        assert duplicate.error_code == "session_exists"
+
+        # The in-flight open still holds the only slot.
+        overflow = await harness.open("other", DuplexSessionConfig(model="fake-model", instructions="other"))
+        assert overflow.ok is False
+        assert overflow.error_code == "resource_exhausted"
+
+        harness.plugin.runtime_config_gate.set()
+        assert (await first).ok is True
+        assert harness.manager.active_count() == 1
+
+
+async def test_expiry_emits_a_terminal_event_even_when_a_close_deferred_it() -> None:
+    """Every session ends with exactly one terminal event, whoever tears it down.
+
+    A wire ``session.close`` defers its ``session.closed`` to the manager. If a
+    stage failure then takes the runner away from the manager (the orchestrator
+    cleanup path), nobody would emit the deferred event unless ``expire``
+    upgrades it.
+    """
+    async with Harness.create() as harness:
+        await harness.open("sid-deferred")
+        runner = harness.manager.runners["sid-deferred"]
+        # What the runner does for a wire close: tear down, defer the terminal.
+        await runner.close("client_close", emit_closed=False)
+        harness.events("sid-deferred")
+
+        await runner.expire("request_cleanup", emit_expired=True)
+
+        terminal = [
+            event for event in harness.events("sid-deferred") if isinstance(event, SessionClosed | SessionExpired)
+        ]
+        assert len(terminal) == 1, terminal
+        assert isinstance(terminal[0], SessionExpired)
+        assert terminal[0].reason == "request_cleanup"
+
+
+async def test_a_terminal_event_is_emitted_once_even_if_expiry_runs_twice() -> None:
+    async with Harness.create() as harness:
+        await harness.open("sid-once")
+        runner = harness.manager.runners["sid-once"]
+
+        await runner.expire("idle_ttl_expired", emit_expired=True)
+        await runner.expire("idle_ttl_expired", emit_expired=True)
+
+        terminal = [event for event in harness.events("sid-once") if isinstance(event, SessionClosed | SessionExpired)]
+        assert len(terminal) == 1, terminal
+
+
+# --------------------------------------------------------------------------- #
+# Resume and takeover lifecycle                                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_resume_inside_the_grace_window_stops_the_reaper_expiring_the_session() -> None:
+    """Resuming clears the disconnect deadline, not just the lease generation.
+
+    The reaper decides expiry from ``lease.detached_at``. A resume that bumped
+    the generation without clearing it would let the reaper kill a session a
+    client had already come back to.
+    """
+    async with Harness.create(disconnect_grace_s=30.0) as harness:
+        await harness.open("sid-grace")
+        session = harness.session("sid-grace")
+        assert (await harness.touch("sid-grace", DuplexLeaseActivity.DETACH.value)).ok is True
+        harness.clock.advance(10.0)
+
+        assert (await harness.resume("sid-grace", expected_lease_generation=0)).ok is True
+        assert session.lease.detached_at is None
+
+        # Past the original deadline: the session survives because it is attached.
+        harness.clock.advance(25.0)
+        assert await harness.manager.reap_expired() == 0
+        assert harness.manager.get("sid-grace") is not None
+
+
+async def test_resume_after_the_grace_window_reports_unknown_session() -> None:
+    """Once the reaper has expired a detached session, resume has nothing to attach to."""
+    async with Harness.create(disconnect_grace_s=5.0) as harness:
+        await harness.open("sid-late")
+        assert (await harness.touch("sid-late", DuplexLeaseActivity.DETACH.value)).ok is True
+        harness.clock.advance(6.0)
+        assert await harness.manager.reap_expired() == 1
+
+        late = await harness.resume("sid-late", expected_lease_generation=0)
+
+        assert late.ok is False
+        assert late.error_code == "unknown_session"
+
+
+async def test_takeover_invalidates_the_generation_the_replaced_client_held() -> None:
+    """Two clients cannot both hold the session: the first one's generation goes stale.
+
+    This is the engine half of a websocket takeover — the transport picks the
+    winning socket, and the lease generation is what stops the loser from
+    resuming behind it.
+    """
+    async with Harness.create() as harness:
+        await harness.open("sid-takeover")
+        session = harness.session("sid-takeover")
+        assert (await harness.touch("sid-takeover", DuplexLeaseActivity.DETACH.value)).ok is True
+
+        winner = await harness.resume("sid-takeover", expected_lease_generation=0)
+        assert winner.ok is True
+        assert winner.lease_generation == 1
+
+        # The replaced client still believes it holds generation 0.
+        loser = await harness.resume("sid-takeover", expected_lease_generation=0)
+        assert loser.ok is False
+        assert loser.error_code == "session_resume_conflict"
+        assert session.lease_generation == 1
+
+        # The winner can still act on the session it took over.
+        assert (await harness.touch("sid-takeover", DuplexLeaseActivity.HEARTBEAT.value)).ok is True
+
+
+async def test_resume_is_refused_once_a_close_has_begun() -> None:
+    async with Harness.create() as harness:
+        await harness.open("sid-closing")
+        await harness.close("sid-closing")
+
+        resumed = await harness.resume("sid-closing", expected_lease_generation=0)
+
+        assert resumed.ok is False
+        assert resumed.error_code == "unknown_session"
+
+
+async def test_wire_close_of_an_idle_session_still_emits_session_closed() -> None:
+    """The protocol smoke shape: open, send nothing, close.
+
+    A session that never bound a stage request has nothing for the reaper to
+    clean up, so the terminal event is the only thing the client ever gets
+    back for its ``session.close``. Regression guard for a close path that
+    only emitted after a cleanup it never performed.
+    """
+    async with Harness.create(max_sessions=1) as harness:
+        await harness.open("sid-idle-close")
+        harness.events()
+
+        harness.command("sid-idle-close", CloseSession(reason="client_close"))
+        events: list[DuplexEvent] = []
+        for _ in range(200):
+            events.extend(harness.events("sid-idle-close"))
+            if events:
+                break
+            await asyncio.sleep(0.01)
+
+        assert [type(event) for event in events] == [SessionClosed]
+        assert events[0].reason == "client_close"
+        assert harness.manager.get("sid-idle-close") is None
+        assert (await harness.open("sid-idle-replacement")).ok is True
