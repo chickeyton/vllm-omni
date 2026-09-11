@@ -293,6 +293,14 @@ class DuplexSessionRunner:
         consume = decision is not None or stage_id >= context.final_stage_id
         if not consume:
             # Stage0 text without a direct decision feeds the TTS stage as before.
+            # Its metrics still have to reach the client: before sessions moved
+            # into the engine the orchestrator published them as a standalone
+            # ``StageMetricsMessage``, a path session-owned requests no longer
+            # take. Hand them to the session instead of dropping them, on the
+            # mailbox so they stay ordered with this session's other work.
+            snapshot = self._stage_metrics_snapshot(stage_id, metrics, output)
+            if snapshot is not None and not self._closing and self.session.state != DuplexSessionState.CLOSED:
+                self._mailbox.put_nowait(_Internal("stage_metrics", {"stage_metrics": snapshot}))
             return False
         if self._closing or self.session.state == DuplexSessionState.CLOSED:
             return True
@@ -487,6 +495,11 @@ class DuplexSessionRunner:
         await self._on_command(item)
 
     async def _on_internal(self, item: _Internal) -> None:
+        if item.kind == "stage_metrics":
+            stage_metrics = item.payload.get("stage_metrics")
+            if isinstance(stage_metrics, Mapping):
+                self.session.stash_stage_metrics(stage_metrics)
+            return
         if item.kind == "promote_deferred_overlap":
             if self._closing or self.session.state != DuplexSessionState.OPEN:
                 return

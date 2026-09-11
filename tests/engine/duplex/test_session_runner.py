@@ -48,6 +48,7 @@ from vllm_omni.engine.duplex.messages import (
 )
 from vllm_omni.engine.duplex.session_manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session_runner import DuplexSessionRunner
+from vllm_omni.metrics.stats import StageRequestStats, StageStats
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.plugin import MiniCPMO45DuplexPlugin
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -168,6 +169,7 @@ class Harness:
         segment_output_metadata: dict[str, Any] | None = None,
         segment_token_ids: Sequence[int] = (),
         epoch: int | None = None,
+        metrics: Any = None,
     ) -> bool:
         session = self.session
         fence = session.fence if epoch is None else session.fence.__class__(SESSION_ID, epoch=epoch)
@@ -178,7 +180,7 @@ class Harness:
             segment_token_ids=tuple(segment_token_ids),
             segment_output_metadata=dict(segment_output_metadata or {}),
         )
-        return self.runner.on_stage_output(stage_id, output, None, request_id=output.request_id, context=context)
+        return self.runner.on_stage_output(stage_id, output, metrics, request_id=output.request_id, context=context)
 
     async def deliver_and_settle(self, output: object, **kwargs: Any) -> list[DuplexEvent]:
         self.deliver(output, **kwargs)
@@ -252,6 +254,31 @@ def append_audio(
         sample_rate_hz=16000,
         is_speech=is_speech,
         event_id=event_id,
+    )
+
+
+def stage_stats(
+    *,
+    stage_id: int,
+    request_id: str,
+    num_tokens_out: int,
+    itls_ms: list[float] | None = None,
+) -> StageRequestStats:
+    """The per-request stats the orchestrator hands to the runner with an output."""
+    return StageRequestStats(
+        batch_id=0,
+        batch_size=1,
+        num_tokens_in=7,
+        num_tokens_out=num_tokens_out,
+        stage_gen_time_ms=120.0,
+        rx_transfer_bytes=0,
+        rx_decode_time_ms=0.0,
+        rx_in_flight_time_ms=0.0,
+        stage_stats=StageStats(),
+        stage_id=stage_id,
+        request_id=request_id,
+        final_output_type="text",
+        vllm_itls_ms=list(itls_ms or []),
     )
 
 
@@ -866,5 +893,80 @@ async def test_conversation_items_can_be_injected_and_deleted() -> None:
         events = await h.run(commands.DeleteItem(item_id="item_missing", event_id="evt-del"))
         assert types(events) == ["error"]
         assert events[0].code == "item_not_found"
+    finally:
+        await close_harness(h)
+
+
+def _stage_metrics_of(event: object) -> dict[str, dict[str, object]]:
+    """Per-stage engine metrics as the client reads them off one wire event."""
+    payload = event.to_realtime()
+    metadata = payload.get("metadata")
+    assert isinstance(metadata, dict), payload
+    vllm_omni = metadata.get("vllm_omni")
+    assert isinstance(vllm_omni, dict), metadata
+    stage_metrics = vllm_omni.get("stage_metrics")
+    assert isinstance(stage_metrics, dict), vllm_omni
+    return stage_metrics
+
+
+@pytest.mark.asyncio
+async def test_stage0_metrics_reach_the_response_even_though_its_output_feeds_tts() -> None:
+    """A pass-through Stage0 output still has to report its tokens.
+
+    Stage0 text with no decision is forwarded to the TTS stage rather than
+    consumed, and before sessions moved into the engine the orchestrator
+    published its metrics separately. Returning ``False`` here must not also
+    throw the metrics away, or every response reports no engine token count and
+    the benchmark cannot compute TPOT.
+    """
+    h = await open_harness()
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        text_output = SimpleNamespace(
+            request_id=request_id,
+            finished=False,
+            outputs=[SimpleNamespace(text="hi", token_ids=[11], multimodal_output={})],
+            multimodal_output={},
+        )
+        forwarded = h.deliver(
+            text_output,
+            stage_id=0,
+            metrics=stage_stats(stage_id=0, request_id=request_id, num_tokens_out=3, itls_ms=[9.0, 11.0]),
+        )
+        assert forwarded is False
+        assert await h.settle() == []
+
+        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
+        stage_metrics = _stage_metrics_of(find(events, "response.audio.delta"))
+        assert stage_metrics["0"]["num_tokens_out"] == 3
+        assert stage_metrics["0"]["vllm_itls_ms"] == [9.0, 11.0]
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_stage0_metrics_from_several_units_are_summed_into_one_response() -> None:
+    """Two pass-through segments before the first audio are one response's tokens."""
+    h = await open_harness()
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        for tokens in (3, 4):
+            h.deliver(
+                SimpleNamespace(
+                    request_id=request_id,
+                    finished=False,
+                    outputs=[SimpleNamespace(text="hi", token_ids=[11], multimodal_output={})],
+                    multimodal_output={},
+                ),
+                stage_id=0,
+                metrics=stage_stats(stage_id=0, request_id=request_id, num_tokens_out=tokens),
+            )
+        assert await h.settle() == []
+
+        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
+        stage_metrics = _stage_metrics_of(find(events, "response.audio.delta"))
+        assert stage_metrics["0"]["num_tokens_out"] == 7
     finally:
         await close_harness(h)
