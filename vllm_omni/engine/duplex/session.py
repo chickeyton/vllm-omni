@@ -164,6 +164,11 @@ class DuplexEngineSession:
     _append_turn_key: tuple[int, int, int] | None = field(default=None, repr=False)
     _input: InputBufferState = field(default_factory=InputBufferState, repr=False)
     _response: ResponseState = field(default_factory=ResponseState, repr=False)
+    #: Stage snapshots that arrived while no response was open. A stage whose
+    #: output feeds the next stage rather than the client reports its metrics
+    #: before the response those tokens end up in exists, so they are held here
+    #: and folded into the first response that opens after them.
+    _pending_stage_metrics: list[dict[str, dict[str, object]]] = field(default_factory=list, repr=False)
     _playback: PlaybackLedger = field(default_factory=PlaybackLedger, repr=False)
     _conversation: ConversationHistory = field(default_factory=ConversationHistory, repr=False)
     model_state: DuplexModelSessionState | None = field(default=None, repr=False)
@@ -667,11 +672,39 @@ class DuplexEngineSession:
         self._response.stage_metric_tpot_weighted_ms.clear()
         self._response.stage_metric_tpot_weight.clear()
 
+    def stash_stage_metrics(self, stage_metrics: Mapping[object, object] | None) -> None:
+        """Hold a stage snapshot until a response exists to attribute it to.
+
+        A stage that hands its output to the next stage instead of the client
+        (stage 0 feeding the TTS stage) reports its token metrics before the
+        response carrying those tokens is created. Dropping them would leave
+        every response without an engine-side token count; holding them keeps
+        the count whole, at the cost of attributing a turn the model never
+        spoke to the next response it does speak.
+        """
+        if not isinstance(stage_metrics, Mapping):
+            return
+        snapshot = {
+            str(stage_id): dict(values) for stage_id, values in stage_metrics.items() if isinstance(values, Mapping)
+        }
+        if not snapshot:
+            return
+        if self.active_response_id is not None:
+            self.accumulate_response_stage_metrics(snapshot)
+            return
+        self._pending_stage_metrics.append(snapshot)
+
     def accumulate_response_stage_metrics(
         self,
         stage_metrics: Mapping[object, object] | None,
     ) -> dict[str, dict[str, object]]:
-        if self.active_response_id is None or not isinstance(stage_metrics, Mapping):
+        if self.active_response_id is None:
+            return copy.deepcopy(self._response.stage_metrics)
+        if self._pending_stage_metrics:
+            pending, self._pending_stage_metrics = self._pending_stage_metrics, []
+            for held in pending:
+                self.accumulate_response_stage_metrics(held)
+        if not isinstance(stage_metrics, Mapping):
             return copy.deepcopy(self._response.stage_metrics)
 
         additive_fields = (
