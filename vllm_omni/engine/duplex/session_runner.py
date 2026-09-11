@@ -75,8 +75,6 @@ from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_id,
 )
 from vllm_omni.engine.duplex.events import (
-    DOMAIN_TERMINAL_EVENTS,
-    MODEL_OUTPUT_EVENTS,
     DuplexEvent,
     ErrorEvent,
     InputCleared,
@@ -98,7 +96,6 @@ from vllm_omni.engine.duplex.realtime_events import (
     RealtimeProjectionState,
     discard_pending_input_audio,
     note_input_append,
-    project_internal_event,
     resolve_cancel_response,
     resolve_clear_output_audio,
     resolve_commit,
@@ -109,6 +106,7 @@ from vllm_omni.engine.duplex.realtime_events import (
 )
 from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.engine.duplex.session_context import DuplexRunState, DuplexSessionContext
+from vllm_omni.engine.duplex.session_emitter import SessionEmitter
 from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
     ServerTurnDetector,
@@ -244,7 +242,6 @@ class DuplexSessionRunner:
         self._turn_detection_config: TurnDetectionConfig | None = None
         self._turn_detector: ServerTurnDetector | None = None
         self._pending_turn_detection: PendingTurnDetectionUpdate | None = None
-        self._projector: RealtimeProjectionState | None = session.projector
         self.ctx = DuplexSessionContext(
             session=session,
             model_state=self.model_state,
@@ -255,6 +252,7 @@ class DuplexSessionRunner:
             run=self.run,
             services=self,
         )
+        self.out = SessionEmitter(self.ctx, promote_deferred_overlap=self._promote_deferred_overlap_later)
 
     # ------------------------------------------------------------------ #
     # Public interface                                                   #
@@ -263,15 +261,14 @@ class DuplexSessionRunner:
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         session = self.session
-        if self._projector is None:
+        if self.out.projector is None:
             default_payload = session.config.extra_body.get("realtime_session_payload")
-            self._projector = RealtimeProjectionState(
+            self.out.projector = RealtimeProjectionState(
                 session_id=session.session_id,
                 model=session.config.model,
                 default_payload=default_payload if isinstance(default_payload, Mapping) else None,
                 initial_session_update=True,
             )
-            session.projector = self._projector
         # Every client speaks the Realtime protocol now; the old runner forced
         # the ACK-only playback ledger for that path.
         session.config.playback_commit_policy = DuplexPlaybackCommitPolicy.ACK_ONLY.value
@@ -660,7 +657,7 @@ class DuplexSessionRunner:
         model_state.speech_since_commit = False
         model_state.clear_committed_audio()
         session.cancel_pending_input()
-        projector = self._projector
+        projector = self.out.projector
         if projector is not None:
             from vllm_omni.engine.duplex.realtime_events import clear_input_buffer
 
@@ -668,22 +665,15 @@ class DuplexSessionRunner:
         self._emit_events([InputCleared()])
 
     # ------------------------------------------------------------------ #
-    # Emission (was emit_event + _apply_outbound_session_event + writer) #
+    # Emission (delegated to SessionEmitter)                             #
     # ------------------------------------------------------------------ #
 
-    def _require_projector(self) -> RealtimeProjectionState:
-        if self._projector is None:
-            self._projector = RealtimeProjectionState(
-                session_id=self.session.session_id,
-                model=self.session.config.model,
-                initial_session_update=True,
-            )
-            self.session.projector = self._projector
-        return self._projector
+    def emit(self, payload: dict[str, object]) -> None:
+        """Apply an internal event to the session, project it, and send it."""
+        self.out.emit(payload)
 
     def _emit_events(self, events: list[DuplexEvent]) -> None:
-        for event in events:
-            self.manager.emit(self.session, event)
+        self.out.emit_events(events)
 
     def _emit_error(
         self,
@@ -693,150 +683,22 @@ class DuplexSessionRunner:
         event_id: object | None = None,
         retryable: bool | None = None,
     ) -> None:
-        """Send one typed ``error`` event (``event_id`` is the client event it answers)."""
-        extra = {} if retryable is None else {"retryable": retryable}
-        self._emit_events([error_event(code, message, event_id=event_id, extra=extra)])
+        self.out.emit_error(code, message, event_id=event_id, retryable=retryable)
 
-    def emit(self, payload: dict[str, object]) -> None:
-        """Apply the domain effects of an internal event, then project it to typed events and send them.
-
-        Only events with domain effects (response / cancel / close terminals) or
-        Realtime projection state (response items, content parts) still travel as
-        internal dictionaries; stateless events are constructed typed at the
-        emit site.
-        """
-        accepted, deferred_overlap_payload = self._apply_outbound_session_event(payload)
-        if not accepted:
-            return
-        self._emit_events(project_internal_event(self._require_projector(), payload))
-        if deferred_overlap_payload is not None and not self.run.closing:
-            precreate_response = self.model_state.deferred_precreate_response
-            self.model_state.deferred_precreate_response = False
-            self._mailbox.put_nowait(
-                _Internal(
-                    "promote_deferred_overlap",
-                    {"payload": deferred_overlap_payload, "precreate_response": precreate_response},
-                )
-            )
+    def _require_projector(self) -> RealtimeProjectionState:
+        return self.out.require_projector()
 
     def _is_stale_model_output(self, payload: dict[str, object]) -> bool:
-        event_type = payload.get("type")
-        if event_type in DOMAIN_TERMINAL_EVENTS:
-            return False
-        if event_type not in MODEL_OUTPUT_EVENTS:
-            return False
-        if self.run.closing and event_type != "response.listen":
-            return True
-        if self.session.state == DuplexSessionState.CLOSED and event_type != "response.listen":
-            return True
-        epoch = payload.get("epoch")
-        return isinstance(epoch, int) and epoch != self.session.epoch
+        return self.out.is_stale_model_output(payload)
 
-    def _apply_outbound_session_event(self, payload: dict[str, object]) -> tuple[bool, dict[str, object] | None]:
-        """Apply domain transitions before an event is projected (moved from serving)."""
-        session = self.session
-        model_state = self.model_state
-        payload_type = payload.get("type")
-        is_terminal = payload_type in DOMAIN_TERMINAL_EVENTS
-        if is_terminal:
-            payload_epoch = payload.get("epoch")
-            if isinstance(payload_epoch, int) and payload_epoch != session.epoch:
-                return False, None
-            if payload_type in {"response.done", "response.listen"} and (
-                self.run.closing or session.state == DuplexSessionState.CLOSED
-            ):
-                return False, None
-        elif self._is_stale_model_output(payload):
-            return False, None
-
-        if payload_type == "session.closed":
-            self.run.close_reason = self.run.close_reason or str(payload.get("reason") or "closed")
-            session.mark_closing()
-
-        if not is_terminal:
-            return True, None
-
-        terminal_status = payload.get("status")
-        terminal_status_details = payload.get("status_details")
-        if terminal_status is None and isinstance(terminal_status_details, dict):
-            terminal_status = terminal_status_details.get("type")
-        response_terminal = payload_type == "response.done" or (
-            payload_type == "response.listen" and session.active_response_id is not None
-        )
-        can_promote_overlap = response_terminal and terminal_status not in {"cancelled", "failed"}
-        deferred_overlap_payload: dict[str, object] | None = None
-        continuous_input_crosses_terminal = (
-            can_promote_overlap
-            and self._session_auto_responds()
-            and model_state.input_since_commit
-            and not model_state.deferred_response_create
-        )
-        if continuous_input_crosses_terminal:
-            session.reset_overlap_speech()
-            return True, None
-        realtime_input_still_open = (
-            can_promote_overlap and model_state.input_since_commit and not model_state.deferred_response_create
-        )
-        if realtime_input_still_open:
-            session.reset_overlap_speech()
-            return True, None
-        if can_promote_overlap and session.overlap_speech_ms > 0:
-            has_deferred_overlap = (
-                model_state.audio_buffer.has_pending() or model_state.committed_audio_payload is not None
+    def _promote_deferred_overlap_later(self, payload: dict[str, object], precreate_response: bool) -> None:
+        """Re-enter the mailbox so the promoted turn is handled in command order."""
+        self._mailbox.put_nowait(
+            _Internal(
+                "promote_deferred_overlap",
+                {"payload": payload, "precreate_response": precreate_response},
             )
-            should_promote_overlap = (
-                session.state == DuplexSessionState.OPEN
-                and has_deferred_overlap
-                and session.overlap_speech_ms > session.config.overlap_short_ack_ms
-            )
-            if should_promote_overlap:
-                flushed_reserved_bytes = model_state.audio_buffer.pending_byte_count
-                deferred_overlap_payload = model_state.audio_buffer.flush(
-                    chunk_period_ms=session.capabilities.chunk_period_ms or 1000
-                )
-                if model_state.committed_audio_payload is not None:
-                    if deferred_overlap_payload is not None:
-                        deferred_overlap_payload = overlap_policy.merge_audio_payloads(
-                            model_state.committed_audio_payload,
-                            deferred_overlap_payload,
-                        )
-                    else:
-                        deferred_overlap_payload = model_state.committed_audio_payload
-                if self._session_auto_responds() and deferred_overlap_payload is not None:
-                    deferred_overlap_payload = dict(deferred_overlap_payload)
-                    deferred_overlap_payload["force_listen"] = False
-                if deferred_overlap_payload is not None:
-                    model_state.retain_committed_audio(
-                        deferred_overlap_payload,
-                        operation_id=model_state.committed_audio_operation_id,
-                        reserved_bytes=flushed_reserved_bytes,
-                    )
-                model_state.input_since_commit = deferred_overlap_payload is not None
-                # Realtime path: defer the promoted response to the next terminal.
-                model_state.deferred_response_create = True
-                model_state.deferred_precreate_response = False
-                deferred_overlap_payload = None
-            else:
-                had_pending_overlap_audio = model_state.audio_buffer.has_pending()
-                model_state.audio_buffer.clear()
-                model_state.input_since_commit = False
-                model_state.speech_since_commit = False
-                if had_pending_overlap_audio and self._projector is not None:
-                    self._emit_events(discard_pending_input_audio(self._projector, session.overlap_speech_ms))
-                if payload_type in {"audio.cancelled", "input.cancelled", "session.closed"}:
-                    session.release_input_bytes(model_state.clear_committed_audio())
-
-        session.reset_overlap_speech()
-        if (
-            can_promote_overlap
-            and model_state.deferred_response_create
-            and model_state.committed_audio_payload is not None
-        ):
-            deferred_overlap_payload = model_state.committed_audio_payload
-            model_state.deferred_response_create = False
-            model_state.input_since_commit = False
-            model_state.speech_since_commit = False
-        return True, deferred_overlap_payload
+        )
 
     # ------------------------------------------------------------------ #
     # Session helpers (moved from OmniDuplexSessionHandler)              #
@@ -848,10 +710,7 @@ class DuplexSessionRunner:
         self.session.mark_closing()
 
     def _session_auto_responds(self) -> bool:
-        extra = getattr(self.session.config, "extra_body", None)
-        if not isinstance(extra, dict):
-            return False
-        return extra.get("auto_response") is True or extra.get("full_duplex") is True
+        return self.out.auto_responds()
 
     def _stage0_request_id(self, epoch: int) -> str:
         return duplex_resource_request_id(DuplexFence(self.session.session_id, epoch=epoch), "stage0")
