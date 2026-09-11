@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 
@@ -59,7 +58,6 @@ from vllm_omni.engine.duplex.config import (
     DuplexSessionState,
     DuplexTurnEventType,
     ResponseCreateOptions,
-    realtime_item_to_history_message,
 )
 from vllm_omni.engine.duplex.contracts import (
     DuplexOutputContext,
@@ -77,7 +75,6 @@ from vllm_omni.engine.duplex.model_channel import ModelChannel
 from vllm_omni.engine.duplex.plugin import (
     DuplexModelPlugin,
     DuplexModelSessionState,
-    DuplexRuntimeConfigError,
     PcmAppendReservation,
     payload_turn_id,
 )
@@ -100,14 +97,10 @@ from vllm_omni.engine.duplex.session_context import (
     DuplexSessionTasks,
     StageOutput,
 )
+from vllm_omni.engine.duplex.session_control import SessionControl
 from vllm_omni.engine.duplex.session_emitter import SessionEmitter
 from vllm_omni.engine.duplex.turn_detection import (
-    PendingTurnDetectionUpdate,
-    ServerTurnDetector,
-    ServerVADUnavailableError,
-    TurnDetectionConfig,
     TurnDetectionResult,
-    apply_turn_detection_result,
 )
 from vllm_omni.metrics.stats import StageRequestStats
 
@@ -161,9 +154,6 @@ class DuplexSessionRunner:
         self._background_tasks: set[asyncio.Task[None]] = set()
         #: Flags more than one component reads and writes (see session_context).
         self.run = DuplexRunState()
-        self._turn_detection_config: TurnDetectionConfig | None = None
-        self._turn_detector: ServerTurnDetector | None = None
-        self._pending_turn_detection: PendingTurnDetectionUpdate | None = None
         self.ctx = DuplexSessionContext(
             session=session,
             model_state=self.model_state,
@@ -181,6 +171,12 @@ class DuplexSessionRunner:
             close_from_runtime=self._close_from_runtime,
             schedule_silence_continuation=self._schedule_silence_continuation,
             abort_request=self._abort_request_background,
+        )
+        self.control = SessionControl(
+            self.ctx,
+            self.out,
+            self.model,
+            wait_for_append_tail=self._wait_for_append_tail,
         )
 
     # ------------------------------------------------------------------ #
@@ -201,7 +197,7 @@ class DuplexSessionRunner:
         # Every client speaks the Realtime protocol now; the old runner forced
         # the ACK-only playback ledger for that path.
         session.config.playback_commit_policy = DuplexPlaybackCommitPolicy.ACK_ONLY.value
-        self._init_turn_detection()
+        self.control.init_turn_detection()
         self._worker = self._loop.create_task(self._run(), name=f"duplex-session-{session.session_id}")
         self.emit({"type": "session.created", "session": session.as_public_dict()})
 
@@ -465,7 +461,7 @@ class DuplexSessionRunner:
         elif event_type in _CANCEL_EVENTS:
             await self._on_cancel(payload)
         elif event_type == "turn.signal":
-            await self._on_turn_signal(payload)
+            await self.control.on_turn_signal(payload)
         else:
             self._emit_error("unknown_event", f"Unknown duplex event: {event_type}")
 
@@ -492,8 +488,8 @@ class DuplexSessionRunner:
             session.release_pending_turn()
             resolved = resolve_commit(projector, command)
             self._emit_events(resolved.events)
-            if resolved.reset_vad and self._turn_detector is not None:
-                self._turn_detector.reset()
+            if resolved.reset_vad:
+                self.control.reset_vad()
             if resolved.payload is not None:
                 await self._on_commit(resolved.payload)
         elif isinstance(command, CreateResponse):
@@ -531,9 +527,9 @@ class DuplexSessionRunner:
                 normalized["type"] = command.event
                 await self._on_cancel(normalized)
             else:
-                await self._on_turn_signal(payload)
+                await self.control.on_turn_signal(payload)
         elif isinstance(command, UpdateSession):
-            await self._on_session_update(dict(command.patch), realtime_event_id=command.event_id)
+            await self.control.on_session_update(dict(command.patch), realtime_event_id=command.event_id)
         elif isinstance(command, AckPlayback):
             self._emit_events(playback_ledger.apply_playback_ack(self.session, command.payload()))
         elif isinstance(command, Heartbeat):
@@ -547,7 +543,7 @@ class DuplexSessionRunner:
             resolved = resolve_delete_item(projector, command)
             self._emit_events(resolved.events)
             for payload in resolved.payloads:
-                await self._on_turn_signal(payload)
+                await self.control.on_turn_signal(payload)
         elif isinstance(command, TruncateItem):
             resolved = resolve_truncate_item(projector, command)
             self._emit_events(resolved.events)
@@ -645,52 +641,6 @@ class DuplexSessionRunner:
         session = self.session
         self.plugin.data_plane.close_session(session.session_id, active_request_id=session.active_request_id)
         self.run.stream_request_id = None
-
-    # ------------------------------------------------------------------ #
-    # Turn detection (server VAD)                                        #
-    # ------------------------------------------------------------------ #
-
-    def _init_turn_detection(self) -> None:
-        turn_detection = self.session.config.extra_body.get("realtime_turn_detection")
-        if not isinstance(turn_detection, dict) or turn_detection.get("type") != "server_vad":
-            self._turn_detection_config = None
-            self._turn_detector = None
-            return
-        try:
-            config = TurnDetectionConfig.from_realtime(turn_detection)
-            self._turn_detection_config = config
-            self._turn_detector = config.build_detector()
-        except Exception as exc:
-            logger.warning("Duplex session %s: turn detection disabled: %s", self.session.session_id, exc)
-            self._turn_detection_config = None
-            self._turn_detector = None
-
-    async def _run_turn_detection(self, event: dict[str, object]) -> TurnDetectionResult | None:
-        detector = self._turn_detector
-        if detector is None:
-            return None
-        audio = event.get("audio")
-        if not isinstance(audio, str) or not audio:
-            return None
-        fmt = event.get("format") if isinstance(event.get("format"), str) else "pcm_f32le"
-        sample_rate_hz = event.get("sample_rate_hz")
-        try:
-            result = await self.offload(
-                detector.process,
-                audio,
-                fmt=fmt,
-                sample_rate_hz=sample_rate_hz if isinstance(sample_rate_hz, int) else None,
-                audio_end_ms=event.get("audio_end_ms") if isinstance(event.get("audio_end_ms"), int) else None,
-            )
-        except ServerVADUnavailableError as exc:
-            self._emit_error("server_vad_unavailable", str(exc))
-            self._turn_detector = None
-            return None
-        except ValueError as exc:
-            self._emit_error("bad_audio", str(exc))
-            return None
-        apply_turn_detection_result(event, result)
-        return result
 
     # ------------------------------------------------------------------ #
     # Append path (was the audio-append branch + start_native_append)    #
@@ -799,7 +749,7 @@ class DuplexSessionRunner:
         event["audio"] = audio
         event["format"] = fmt
         event["sample_rate_hz"] = sample_rate_hz
-        vad_result = await self._run_turn_detection(event)
+        vad_result = await self.control.run_turn_detection(event)
         projector = self._require_projector()
         self._emit_events(note_input_append(projector, event, vad_result=vad_result))
         if self.run.closing or session.state != DuplexSessionState.OPEN:
@@ -915,8 +865,8 @@ class DuplexSessionRunner:
         command = Commit(final=True, create_response=vad_result.create_response)
         resolved = resolve_commit(self._require_projector(), command)
         self._emit_events(resolved.events)
-        if resolved.reset_vad and self._turn_detector is not None:
-            self._turn_detector.reset()
+        if resolved.reset_vad:
+            self.control.reset_vad()
         if resolved.payload is not None:
             self._mailbox.put_nowait(_Internal("commit", resolved.payload))
 
@@ -1434,210 +1384,6 @@ class DuplexSessionRunner:
                 "reason": reason,
                 "epoch": session.epoch,
                 "cancelled": cancelled,
-            }
-        )
-
-    # ------------------------------------------------------------------ #
-    # turn.signal (session.update / conversation items / local turns)    #
-    # ------------------------------------------------------------------ #
-
-    async def _on_turn_signal(self, event: dict[str, object]) -> None:
-        session = self.session
-        turn_event = event.get("event")
-        realtime_event_id = event.get("realtime_event_id")
-        if not isinstance(turn_event, str):
-            self._emit_error("bad_event", "turn.signal requires event")
-            return
-        if turn_event == "barge_in" and not session.capabilities.supports_barge_in:
-            self._emit_events([session_helpers.barge_in_unsupported_error()])
-            return
-        if turn_event == "session.update":
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                self._emit_error("bad_event", "session.update requires a session payload", event_id=realtime_event_id)
-                return
-            await self._on_session_update(
-                payload,
-                realtime_event_id=realtime_event_id if isinstance(realtime_event_id, str) else None,
-            )
-            return
-        if turn_event == "conversation.item.create":
-            await self._on_conversation_item_create(event)
-            return
-        if turn_event == "conversation.item.delete":
-            payload = event.get("payload")
-            item_id = payload.get("item_id") if isinstance(payload, dict) else None
-            deleted = session.delete_history_item(item_id) if isinstance(item_id, str) else False
-            self.emit(
-                {
-                    "type": "conversation.item.deleted",
-                    "session_id": session.session_id,
-                    "item_id": item_id,
-                    "deleted": deleted,
-                }
-            )
-            return
-        if turn_event == "conversation.item.truncate":
-            payload = event.get("payload")
-            item_id = payload.get("item_id") if isinstance(payload, dict) else None
-            audio_end_ms = payload.get("audio_end_ms") if isinstance(payload, dict) else None
-            truncated = (
-                session.truncate_history_item(
-                    item_id,
-                    audio_end_ms=int(audio_end_ms) if isinstance(audio_end_ms, int | float) else 0,
-                    hard=True,
-                )
-                if isinstance(item_id, str)
-                else False
-            )
-            self.emit(
-                {
-                    "type": "conversation.item.truncated",
-                    "session_id": session.session_id,
-                    "item_id": item_id,
-                    "content_index": (payload.get("content_index", 0) if isinstance(payload, dict) else 0),
-                    "audio_end_ms": audio_end_ms,
-                    "truncated": truncated,
-                }
-            )
-            return
-        self._emit_events([session.signal_turn(turn_event, event)])
-
-    async def _on_session_update(self, payload: dict[str, object], *, realtime_event_id: str | None) -> None:
-        session = self.session
-        model_state = self.model_state
-        pending_turn_detection: PendingTurnDetectionUpdate | None = None
-
-        def reject_update() -> None:
-            if pending_turn_detection is not None:
-                pending_turn_detection.reject()
-
-        try:
-            pending_turn_detection = PendingTurnDetectionUpdate.prepare(payload)
-        except Exception as exc:
-            self._emit_error("unsupported_turn_detection", str(exc), event_id=realtime_event_id)
-            return
-        if not await self._wait_for_append_tail():
-            self._emit_error(
-                "session_update_aborted",
-                "session.update was not applied because the preceding append failed",
-                event_id=realtime_event_id,
-            )
-            reject_update()
-            return
-        try:
-            self.plugin.validate_client_extra_body(payload.get("extra_body"))
-        except DuplexRuntimeConfigError as exc:
-            self._emit_error(exc.code, str(exc), event_id=realtime_event_id)
-            reject_update()
-            return
-        candidate_config = deepcopy(session.config)
-        audio_started = session.playback.generated_ms > 0 or session.playback.sent_ms > 0
-        try:
-            candidate_config.apply_realtime_update(
-                payload,
-                session_id=session.session_id,
-                audio_started=audio_started,
-            )
-        except DuplexConfigError as exc:
-            self._emit_error(exc.code, str(exc) or "session.update was rejected", event_id=realtime_event_id)
-            reject_update()
-            return
-        if candidate_config.instructions != session.config.instructions and model_state.context_locked:
-            self._emit_error(
-                "instructions_update_unsupported",
-                "session.update cannot change instructions after the native duplex context is initialized",
-                event_id=realtime_event_id,
-            )
-            reject_update()
-            return
-        requests_audio = any(str(modality).lower() == "audio" for modality in candidate_config.modalities)
-        if (
-            requests_audio
-            and "ref_audio_data" not in session.runtime_config
-            and getattr(self.plugin, "requires_ref_audio", False)
-        ):
-            self._emit_error(
-                "ref_audio_required", "Native duplex audio output requires ref_audio", event_id=realtime_event_id
-            )
-            reject_update()
-            return
-        try:
-            candidate_runtime_config = self.plugin.runtime_config_for_update(
-                candidate_config,
-                dict(session.runtime_config),
-            )
-            # Validate the sampling policy for the candidate before adopting it.
-            self.plugin.configure_sampling_params(
-                runtime_config=dict(candidate_runtime_config),
-                defaults=tuple(self.stage_port.sampling_defaults()),
-            )
-        except (DuplexRuntimeConfigError, DuplexConfigError) as exc:
-            self._emit_error(exc.code, str(exc), event_id=realtime_event_id)
-            reject_update()
-            return
-        except Exception as exc:
-            self._emit_error("runtime_signal_failed", str(exc), event_id=realtime_event_id)
-            reject_update()
-            return
-        session.replace_config(candidate_config)
-        session.replace_runtime_config(candidate_runtime_config)
-        try:
-            session.touch_lease(DuplexLeaseActivity.SIGNAL)
-        except Exception:
-            pass
-        if pending_turn_detection is not None:
-            self._turn_detection_config, self._turn_detector = pending_turn_detection.commit(self._turn_detector)
-        projector = self._require_projector()
-        projector.apply_session_defaults(payload)
-        self.emit({"type": "session.updated", "session": session.as_public_dict()})
-
-    async def _on_conversation_item_create(self, event: dict[str, object]) -> None:
-        session = self.session
-        payload = event.get("payload")
-        item = payload.get("item") if isinstance(payload, dict) else None
-        item_type = item.get("type") if isinstance(item, dict) else None
-        if item_type == "function_call_output" and isinstance(item, dict):
-            if not await self._wait_for_append_tail():
-                return
-            try:
-                candidate_runtime_config = self.plugin.runtime_config_for_function_output(
-                    session.config,
-                    dict(session.runtime_config),
-                    item,
-                )
-            except DuplexRuntimeConfigError as exc:
-                self._emit_error(exc.code, str(exc))
-                return
-            if candidate_runtime_config is not None:
-                session.replace_runtime_config(candidate_runtime_config)
-            self.emit(
-                {
-                    "type": "conversation.item.created",
-                    "session_id": session.session_id,
-                    "item": item,
-                    "created": True,
-                }
-            )
-            self.spawn(
-                self.model.maybe_continue_response(
-                    expected_epoch=session.epoch,
-                    expected_model_turn_id=session.turn_id,
-                ),
-                name="duplex-continue",
-            )
-            return
-        message = realtime_item_to_history_message(item)
-        item_id = item.get("id") if isinstance(item, dict) else None
-        if message is not None:
-            session.append_history_message(message)
-            session.register_history_item(item_id if isinstance(item_id, str) else None, message)
-        self.emit(
-            {
-                "type": "conversation.item.created",
-                "session_id": session.session_id,
-                "item": item,
-                "created": message is not None,
             }
         )
 
