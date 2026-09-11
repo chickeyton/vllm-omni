@@ -417,6 +417,13 @@ def _has_post_commit_decision(
 # refusal is harmless — record it instead of failing the case.
 _TOLERATED_ERROR_CODES = frozenset({"playback_ack_too_late"})
 
+# ``session.close`` carries no reason of its own, so the server stamps the
+# terminal event with the reason it inferred for it. Anything else on a
+# ``session.closed`` after our own close request means the session ended for a
+# reason we did not ask for (a disconnect, a lease timeout, a shutdown), which
+# is what this guard is looking for.
+_CLIENT_CLOSE_REASONS = frozenset({"client_close"})
+
 
 def _error_code(event: dict[str, object]) -> str | None:
     error = event.get("error")
@@ -452,7 +459,7 @@ def _raise_if_session_terminated(
             event_type == "session.closed"
             and explicit_close_from is not None
             and index >= explicit_close_from
-            and reason is None
+            and (reason is None or reason in _CLIENT_CLOSE_REASONS)
         )
         if expected:
             continue

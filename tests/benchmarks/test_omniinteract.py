@@ -401,6 +401,27 @@ def test_tolerated_playback_ack_rejection_is_a_warning_not_a_failure():
         oi._raise_if_session_terminated(collector, 0, warnings=warnings)
 
 
+def test_our_own_close_is_expected_even_though_the_server_stamps_a_reason():
+    """``session.close`` is answered with ``session.closed`` carrying ``client_close``.
+
+    The guard exists to catch a session that ended for a reason we did not ask
+    for. A close we requested is not that, whether or not the server names it.
+    """
+    collector = _collector(({"type": "session.closed", "reason": "client_close"}, 1.0))
+    oi._raise_if_session_terminated(collector, 0, explicit_close_from=0)
+
+    collector = _collector(({"type": "session.closed", "event": {"reason": "client_close"}}, 1.0))
+    oi._raise_if_session_terminated(collector, 0, explicit_close_from=0)
+
+    collector = _collector(({"type": "session.closed", "reason": "disconnect"}, 1.0))
+    with pytest.raises(RuntimeError, match="Unexpected session.closed: disconnect"):
+        oi._raise_if_session_terminated(collector, 0, explicit_close_from=0)
+
+    collector = _collector(({"type": "session.expired", "reason": "timeout"}, 1.0))
+    with pytest.raises(RuntimeError, match="session.expired: timeout"):
+        oi._raise_if_session_terminated(collector, 0, explicit_close_from=0)
+
+
 @pytest.mark.parametrize(
     ("event", "match"),
     [
