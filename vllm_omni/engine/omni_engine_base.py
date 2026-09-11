@@ -8,37 +8,35 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
-import copy
 import queue
 import threading
 import time
 import uuid
 import weakref
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from collections.abc import Mapping
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, cast
 
 import janus
+import torch
 from vllm import envs as vllm_envs
 from vllm.logger import init_logger
 from vllm.v1.engine.input_processor import InputProcessor
 
 from vllm_omni.config.config_factory import StageConfigFactory, with_trust_remote_code_override
-from vllm_omni.config.stage_config import _DEPLOY_DIR, load_deploy_config
-from vllm_omni.diffusion.data import (
-    DiffusionParallelConfig,
-    parse_attention_config,
-    resolve_model_class_name,
-)
-from vllm_omni.diffusion.io_support import get_diffusion_output_type
-from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.resolver import OmniConfigResolution, resolve_omni_config
 from vllm_omni.config.stage_config import (
+    _DEPLOY_DIR,
     DuplexSessionRuntimeConfig,
     PipelineConfig,
     load_deploy_config,
 )
-from vllm_omni.data_entry_keys import REQUEST_ARTIFACT_DIRS_KEY, TRANSFORM_OWNED_META_KEYS
-from vllm_omni.engine import OmniEngineCoreRequest
+from vllm_omni.diffusion.data import (
+    DiffusionParallelConfig,
+    parse_attention_config,
+)
+from vllm_omni.diffusion.io_support import get_diffusion_output_type
 from vllm_omni.engine.async_engine_utils import (
     SHUTDOWN_ENQUEUE_TIMEOUT_S,
     SHUTDOWN_JOIN_TIMEOUT_S,
@@ -68,7 +66,7 @@ from vllm_omni.engine.stage_runtime import (
 )
 from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
 from vllm_omni.entrypoints.utils import parse_stage_overrides
-from vllm_omni.inputs.data import OmniInteractionPrompt, OmniSamplingParams
+from vllm_omni.inputs.data import OmniSamplingParams
 from vllm_omni.metrics.prometheus import OmniRequestCounter
 
 logger = init_logger(__name__)
