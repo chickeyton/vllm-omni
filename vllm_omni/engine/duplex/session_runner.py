@@ -1101,6 +1101,74 @@ class DuplexSessionRunner:
     # Append path (was the audio-append branch + start_native_append)    #
     # ------------------------------------------------------------------ #
 
+    async def _barge_in_for_overlap(self, event: dict[str, object], decision: dict[str, object]) -> bool:
+        """Interrupt the model so the user's overlapping speech becomes the turn.
+
+        Cancels the active response and the data-plane stream, advances the
+        barge-in epoch so stale output is dropped, and reports what was cut.
+        Returns whether the append should continue: losing the fence race
+        means this append belongs to a superseded epoch and is abandoned.
+        """
+        session = self.session
+        model_state = self.model_state
+        event["force_barge_in"] = True
+        cancelled_fence = session.fence
+        playback_was_active = self._assistant_playback_active()
+        model_state.audio_buffer.clear_force_listen()
+        session.reset_overlap_speech()
+        model_state.input_since_commit = False
+        model_state.speech_since_commit = False
+        await self.tasks.cancel_append_tasks()
+        had_stream = self.run.stream_request_id is not None
+        cancel_reason = str(decision.get("cancel_reason") or "barge_in")
+        cancelled = await self._cancel_active_response(
+            self.tasks.active_response_task,
+            reason=cancel_reason,
+        )
+        had_stream = self._cancel_data_plane_stream() or had_stream
+        if not cancelled and had_stream:
+            old_epoch = session.epoch
+            old_response_id = session.active_response_id
+            committed_ms = session.playback.committed_ms
+            self._commit_played_response_history(session, old_response_id, committed_ms)
+            new_epoch, old_playback = self._advance_barge_in_epoch(session)
+            self.emit(
+                {
+                    "type": "audio.cancelled",
+                    "session_id": session.session_id,
+                    "response_id": old_response_id,
+                    "reason": cancel_reason,
+                    "cancelled_epoch": old_epoch,
+                    "epoch": new_epoch,
+                    "committed_ms": committed_ms,
+                    "playback": old_playback,
+                }
+            )
+            cancelled = True
+        if not cancelled and playback_was_active:
+            old_epoch = session.epoch
+            committed_ms = session.playback.committed_ms
+            self._commit_played_response_history(session, session.last_response_id, committed_ms)
+            new_epoch, old_playback = self._advance_barge_in_epoch(session)
+            self.emit(
+                {
+                    "type": "audio.cancelled",
+                    "session_id": session.session_id,
+                    "response_id": session.last_response_id,
+                    "reason": cancel_reason,
+                    "cancelled_epoch": old_epoch,
+                    "epoch": new_epoch,
+                    "committed_ms": committed_ms,
+                    "playback": old_playback,
+                }
+            )
+            cancelled = True
+        if session.epoch > cancelled_fence.epoch:
+            if not await self._signal_cancel_fence(cancelled_fence):
+                return False
+        self.tasks.active_response_task = None
+        return True
+
     async def _on_append_audio(self, event: dict[str, object]) -> None:
         session = self.session
         model_state = self.model_state
@@ -1189,64 +1257,10 @@ class DuplexSessionRunner:
                 if decision.get("force_listen", True) is True:
                     payload["force_listen"] = True
             else:
-                event["force_barge_in"] = True
-                cancelled_fence = session.fence
-                playback_was_active = self._assistant_playback_active()
+                if not await self._barge_in_for_overlap(event, decision):
+                    return
                 buffer_overlap_audio = True
                 defer_append = False
-                model_state.audio_buffer.clear_force_listen()
-                session.reset_overlap_speech()
-                model_state.input_since_commit = False
-                model_state.speech_since_commit = False
-                await self.tasks.cancel_append_tasks()
-                had_stream = self.run.stream_request_id is not None
-                cancel_reason = str(decision.get("cancel_reason") or "barge_in")
-                cancelled = await self._cancel_active_response(
-                    self.tasks.active_response_task,
-                    reason=cancel_reason,
-                )
-                had_stream = self._cancel_data_plane_stream() or had_stream
-                if not cancelled and had_stream:
-                    old_epoch = session.epoch
-                    old_response_id = session.active_response_id
-                    committed_ms = session.playback.committed_ms
-                    self._commit_played_response_history(session, old_response_id, committed_ms)
-                    new_epoch, old_playback = self._advance_barge_in_epoch(session)
-                    self.emit(
-                        {
-                            "type": "audio.cancelled",
-                            "session_id": session.session_id,
-                            "response_id": old_response_id,
-                            "reason": cancel_reason,
-                            "cancelled_epoch": old_epoch,
-                            "epoch": new_epoch,
-                            "committed_ms": committed_ms,
-                            "playback": old_playback,
-                        }
-                    )
-                    cancelled = True
-                if not cancelled and playback_was_active:
-                    old_epoch = session.epoch
-                    committed_ms = session.playback.committed_ms
-                    self._commit_played_response_history(session, session.last_response_id, committed_ms)
-                    new_epoch, old_playback = self._advance_barge_in_epoch(session)
-                    self.emit(
-                        {
-                            "type": "audio.cancelled",
-                            "session_id": session.session_id,
-                            "response_id": session.last_response_id,
-                            "reason": cancel_reason,
-                            "cancelled_epoch": old_epoch,
-                            "epoch": new_epoch,
-                            "committed_ms": committed_ms,
-                            "playback": old_playback,
-                        }
-                    )
-                    cancelled = True
-                if session.epoch > cancelled_fence.epoch:
-                    if not await self._signal_cancel_fence(cancelled_fence):
-                        return
-                self.tasks.active_response_task = None
         elif not auto_responds and not overlap_policy.input_looks_like_speech(self.session, event, payload):
             # Turn-mode only: skip silent chunks so they don't open a response.
             self.emit(
