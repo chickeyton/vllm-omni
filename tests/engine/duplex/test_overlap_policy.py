@@ -15,9 +15,9 @@ import base64
 import numpy as np
 import pytest
 
-from vllm_omni.engine.duplex import overlap_policy
+from vllm_omni.engine.duplex.session import overlap_policy
 from vllm_omni.engine.duplex.config import DuplexSessionConfig
-from vllm_omni.engine.duplex.session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

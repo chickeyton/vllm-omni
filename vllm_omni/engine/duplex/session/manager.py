@@ -35,7 +35,6 @@ from vllm_omni.engine.duplex.contracts import (
     duplex_resource_request_id,
 )
 from vllm_omni.engine.duplex.events import DuplexEvent, ErrorEvent, SessionClosed, SessionExpired, error_event
-from vllm_omni.engine.duplex.lease import DuplexLeaseActivity, DuplexLeaseConfig, DuplexLeaseState
 from vllm_omni.engine.duplex.messages import (
     CloseDuplexSessionMessage,
     DuplexControlResultMessage,
@@ -47,14 +46,15 @@ from vllm_omni.engine.duplex.messages import (
     TouchDuplexSessionMessage,
 )
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, DuplexRuntimeConfigError, validate_duplex_plugin_sampling
-from vllm_omni.engine.duplex.session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity, DuplexLeaseConfig, DuplexLeaseState
 
 if TYPE_CHECKING:
     import janus
     from vllm.config import ModelConfig
 
     from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-    from vllm_omni.engine.duplex.session_runner import DuplexSessionRunner
+    from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
     from vllm_omni.engine.messages import EngineQueueMessage
 
 logger = init_logger(__name__)
@@ -435,7 +435,7 @@ class DuplexSessionManager:
         return len(set(self.runners) | set(self._closing) | self._admitting)
 
     async def open(self, message: OpenDuplexSessionMessage) -> None:
-        from vllm_omni.engine.duplex.session_runner import DuplexSessionRunner
+        from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
 
         session_id = message.session_id
         session: DuplexEngineSession | None = None

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from vllm_omni.engine.duplex import overlap_policy
 from vllm_omni.engine.duplex.config import DuplexSessionState
 from vllm_omni.engine.duplex.events import (
     DOMAIN_TERMINAL_EVENTS,
@@ -32,7 +31,8 @@ from vllm_omni.engine.duplex.realtime_events import (
     discard_pending_input_audio,
     project_internal_event,
 )
-from vllm_omni.engine.duplex.session_context import DuplexSessionContext
+from vllm_omni.engine.duplex.session import overlap_policy
+from vllm_omni.engine.duplex.session.context import DuplexSessionContext
 
 
 class SessionEmitter:

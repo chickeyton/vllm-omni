@@ -23,12 +23,12 @@ from dataclasses import dataclass
 
 from vllm.logger import init_logger
 
-from vllm_omni.engine.duplex import session_helpers
 from vllm_omni.engine.duplex.config import DuplexSessionState, DuplexTurnEventType
-from vllm_omni.engine.duplex.model_channel import ModelChannel
 from vllm_omni.engine.duplex.plugin import PcmAppendReservation
-from vllm_omni.engine.duplex.session_context import DuplexSessionContext
-from vllm_omni.engine.duplex.session_emitter import SessionEmitter
+from vllm_omni.engine.duplex.session import helpers
+from vllm_omni.engine.duplex.session.context import DuplexSessionContext
+from vllm_omni.engine.duplex.session.emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.model_channel import ModelChannel
 
 logger = init_logger(__name__)
 
@@ -155,7 +155,7 @@ class AppendAttempt:
                 self.ctx.run.runtime_closed = True
                 return False
             if not emitted_response and session.epoch == self.epoch:
-                if session.active_request_id == session_helpers.stage0_request_id(session, self.epoch):
+                if session.active_request_id == helpers.stage0_request_id(session, self.epoch):
                     session.clear_request(self.request_id)
                 if self.final:
                     self.out.emit_events([session.signal_turn(DuplexTurnEventType.USER_STARTED.value)])

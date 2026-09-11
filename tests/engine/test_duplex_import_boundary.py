@@ -94,8 +94,8 @@ import vllm_omni.entrypoints.duplex.serving
 expected_eager = (
     "vllm_omni.engine.duplex.commands",
     "vllm_omni.engine.duplex.events",
-    "vllm_omni.engine.duplex.session",
-    "vllm_omni.engine.duplex.session_manager",
+    "vllm_omni.engine.duplex.session.engine_session",
+    "vllm_omni.engine.duplex.session.manager",
     "vllm_omni.engine.duplex.plugin",
 )
 missing = sorted(name for name in expected_eager if name not in sys.modules)
@@ -228,15 +228,27 @@ def test_engine_duplex_uses_canonical_contract_module_names() -> None:
         "commands.py",
         "contracts.py",
         "events.py",
-        "lease.py",
         "messages.py",
         "plugin.py",
-        "session.py",
-        "session_manager.py",
-        "session_runner.py",
         "intermediate.py",
     ):
         assert (engine_dir / name).is_file()
+    # one session and everything that runs it lives in the session subpackage
+    for name in (
+        "__init__.py",
+        "engine_session.py",
+        "manager.py",
+        "runner.py",
+        "context.py",
+        "emitter.py",
+        "model_channel.py",
+        "control.py",
+        "append_task.py",
+        "helpers.py",
+        "lease.py",
+    ):
+        assert (engine_dir / "session" / name).is_file()
+    assert not (engine_dir / "session.py").exists()
     for removed in ("control_plane.py", "control_client.py", "runtime.py"):
         assert not (engine_dir / removed).exists()
     # the duplex_ prefix is dropped inside the duplex package

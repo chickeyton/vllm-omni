@@ -23,13 +23,13 @@ from copy import deepcopy
 
 from vllm.logger import init_logger
 
-from vllm_omni.engine.duplex import session_helpers
 from vllm_omni.engine.duplex.config import DuplexConfigError, realtime_item_to_history_message
-from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
-from vllm_omni.engine.duplex.model_channel import ModelChannel
 from vllm_omni.engine.duplex.plugin import DuplexRuntimeConfigError
-from vllm_omni.engine.duplex.session_context import DuplexSessionContext
-from vllm_omni.engine.duplex.session_emitter import SessionEmitter
+from vllm_omni.engine.duplex.session import helpers
+from vllm_omni.engine.duplex.session.context import DuplexSessionContext
+from vllm_omni.engine.duplex.session.emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
+from vllm_omni.engine.duplex.session.model_channel import ModelChannel
 from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
     ServerTurnDetector,
@@ -119,7 +119,7 @@ class SessionControl:
             self._out.emit_error("bad_event", "turn.signal requires event")
             return
         if turn_event == "barge_in" and not session.capabilities.supports_barge_in:
-            self._out.emit_events([session_helpers.barge_in_unsupported_error()])
+            self._out.emit_events([helpers.barge_in_unsupported_error()])
             return
         if turn_event == "session.update":
             payload = event.get("payload")

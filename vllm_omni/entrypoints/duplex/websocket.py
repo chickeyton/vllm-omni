@@ -4,7 +4,7 @@
 """WebSocket transport helpers for the duplex Realtime handler.
 
 The ordered session mailbox and the per-session task handles that used to be
-defined here now live engine-side (``vllm_omni.engine.duplex.session_runner``).
+defined here now live engine-side (``vllm_omni.engine.duplex.session.runner``).
 """
 
 from __future__ import annotations

@@ -15,8 +15,8 @@ so the rules can be exercised without a runner.
 from __future__ import annotations
 
 from vllm_omni.engine.duplex.events import DuplexEvent, PlaybackAcknowledged, error_event
-from vllm_omni.engine.duplex.lease import DuplexLeaseActivity
-from vllm_omni.engine.duplex.session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
+from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
 
 
 def apply_playback_ack(session: DuplexEngineSession, event: dict[str, object]) -> list[DuplexEvent]:
