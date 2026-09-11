@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, TypeVar
 from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex import overlap_policy, playback_ledger, session_helpers
+from vllm_omni.engine.duplex.append_task import AppendAttempt
 from vllm_omni.engine.duplex.audio import convert_input_audio_with_rate
 from vllm_omni.engine.duplex.commands import (
     AckPlayback,
@@ -56,7 +57,6 @@ from vllm_omni.engine.duplex.config import (
     DuplexOverlapPolicy,
     DuplexPlaybackCommitPolicy,
     DuplexSessionState,
-    DuplexTurnEventType,
     ResponseCreateOptions,
 )
 from vllm_omni.engine.duplex.contracts import (
@@ -918,120 +918,21 @@ class DuplexSessionRunner:
         if precreate_response and session.active_response_id is None:
             response_id = session.begin_response(turn_id=append_turn_id)
             self.emit(self.model.response_created_payload(response_id, epoch=append_epoch))
-        precreated_response_id = session.active_response_id if precreate_response else None
-
-        def _discard_retained_committed_audio() -> None:
-            if (
-                retained_committed_payload is not None
-                and model_state.committed_audio_payload is retained_committed_payload
-            ):
-                session.release_input_bytes(model_state.clear_committed_audio())
-
-        async def _run() -> bool:
-            try:
-                append_ok, emitted_response = await self.model.append_runtime_input(
-                    payload,
-                    operation_id=(pcm_reservation.operation_id if pcm_reservation is not None else operation_id),
-                    final=final,
-                    expected_epoch=append_epoch,
-                )
-                if append_ok:
-                    model_state.context_locked = True
-                    if pcm_reservation is not None:
-                        pcm_reservation.commit()
-                        session.release_input_bytes(pcm_reservation.byte_count)
-                    if (
-                        retained_committed_payload is not None
-                        and model_state.committed_audio_payload is retained_committed_payload
-                    ):
-                        session.release_input_bytes(model_state.clear_committed_audio())
-                else:
-                    if pcm_reservation is not None:
-                        pcm_reservation.rollback()
-                    _discard_retained_committed_audio()
-                if (
-                    not append_ok
-                    and precreated_response_id is not None
-                    and session.active_response_id == precreated_response_id
-                ):
-                    session.end_response(commit_text=False)
-                    self.emit(
-                        {
-                            "type": "response.done",
-                            "session_id": session.session_id,
-                            "response_id": precreated_response_id,
-                            "epoch": session.epoch,
-                            "committed": False,
-                            "status": "failed",
-                            "status_details": {"type": "failed", "reason": "runtime_append_failed"},
-                            "playback": session.playback.as_dict(),
-                        }
-                    )
-                if not append_ok and session.state == DuplexSessionState.CLOSED:
-                    self.run.runtime_closed = True
-                    return False
-                if not emitted_response and session.epoch == append_epoch:
-                    if session.active_request_id == session_helpers.stage0_request_id(self.session, append_epoch):
-                        session.clear_request(request_id)
-                    if final:
-                        self._emit_events([session.signal_turn(DuplexTurnEventType.USER_STARTED.value)])
-                return append_ok
-            except asyncio.CancelledError:
-                if pcm_reservation is not None:
-                    pcm_reservation.rollback()
-                raise
-            except Exception as exc:
-                if pcm_reservation is not None:
-                    pcm_reservation.rollback()
-                _discard_retained_committed_audio()
-                logger.exception("Native duplex append task failed: %s", exc)
-                self.model.send_runtime_error("runtime_append_task_failed", exc)
-                if session.state != DuplexSessionState.CLOSED:
-                    self._begin_close("runtime_append_task_failed")
-                    self.spawn(self._close_from_runtime("runtime_append_task_failed"), name="duplex-runtime-close")
-                return False
-
-        async def _run_in_wire_order(predecessor: asyncio.Task[bool] | None) -> bool:
-            if predecessor is not None:
-                try:
-                    predecessor_ok = await predecessor
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise
-                    predecessor_ok = False
-                except Exception:
-                    predecessor_ok = False
-                if not predecessor_ok:
-                    if pcm_reservation is not None:
-                        pcm_reservation.rollback()
-                    _discard_retained_committed_audio()
-                    return False
-            if self.run.closing or self.run.runtime_closed or session.state != DuplexSessionState.OPEN:
-                if pcm_reservation is not None:
-                    pcm_reservation.rollback()
-                _discard_retained_committed_audio()
-                return False
-            if before_append is not None and not before_append():
-                if pcm_reservation is not None:
-                    pcm_reservation.rollback()
-                _discard_retained_committed_audio()
-                return True
-            if pcm_reservation is not None and not pcm_reservation.active:
-                _discard_retained_committed_audio()
-                return False
-            return await _run()
-
-        def _release_cancelled_retained_audio(done: asyncio.Task[bool]) -> None:
-            if done.cancelled():
-                _discard_retained_committed_audio()
-                return
-            try:
-                append_ok = done.result()
-            except Exception:
-                append_ok = False
-            if not append_ok:
-                _discard_retained_committed_audio()
+        attempt = AppendAttempt(
+            ctx=self.ctx,
+            out=self.out,
+            model=self.model,
+            fail_session=self._fail_session_from_append,
+            payload=payload,
+            epoch=append_epoch,
+            request_id=request_id,
+            final=final,
+            pcm_reservation=pcm_reservation,
+            operation_id=operation_id,
+            retained_committed_payload=retained_committed_payload,
+            precreated_response_id=session.active_response_id if precreate_response else None,
+            before_append=before_append,
+        )
 
         predecessor = self.tasks.append_tail
         if predecessor is not None and predecessor.done():
@@ -1043,8 +944,8 @@ class DuplexSessionRunner:
                 # Appends queued behind a failed predecessor stop; a later
                 # command is an explicit retry and starts a new chain.
                 predecessor = None
-        task = asyncio.create_task(_run_in_wire_order(predecessor))
-        task.add_done_callback(_release_cancelled_retained_audio)
+        task = asyncio.create_task(attempt.run_in_wire_order(predecessor))
+        task.add_done_callback(attempt.release_on_failure)
         self.tasks.append_tail = task
         self.tasks.track_append_task(
             task,
@@ -1054,16 +955,15 @@ class DuplexSessionRunner:
         )
         if silence_continuation:
             model_state.pending_silence_task = task
-
-            def _clear_done_pending_silence(done: asyncio.Task[bool]) -> None:
-                if model_state.pending_silence_task is done:
-                    model_state.pending_silence_task = None
-                    model_state.pending_silence_owner_id = None
-
-            task.add_done_callback(_clear_done_pending_silence)
+            task.add_done_callback(attempt.clear_pending_silence)
         # Let this wire-order effect start before the next mailbox item can cancel it.
         await asyncio.sleep(0)
         return task
+
+    def _fail_session_from_append(self, reason: str) -> None:
+        """An append task died: mark the session closing now, close it out next."""
+        self._begin_close(reason)
+        self.spawn(self._close_from_runtime(reason), name="duplex-runtime-close")
 
     async def _wait_for_append_tail(self) -> bool:
         predecessor = self.tasks.append_tail
