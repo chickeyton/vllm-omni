@@ -29,9 +29,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeVar
 
-import numpy as np
 from vllm.logger import init_logger
 
+from vllm_omni.engine.duplex import overlap_policy
 from vllm_omni.engine.duplex.audio import convert_input_audio_with_rate
 from vllm_omni.engine.duplex.commands import (
     AckPlayback,
@@ -797,7 +797,7 @@ class DuplexSessionRunner:
                 )
                 if model_state.committed_audio_payload is not None:
                     if deferred_overlap_payload is not None:
-                        deferred_overlap_payload = self._merge_audio_payloads(
+                        deferred_overlap_payload = overlap_policy.merge_audio_payloads(
                             model_state.committed_audio_payload,
                             deferred_overlap_payload,
                         )
@@ -1030,360 +1030,6 @@ class DuplexSessionRunner:
     # Overlap policy (moved from OmniDuplexSessionHandler)               #
     # ------------------------------------------------------------------ #
 
-    def _overlap_decision(self, event: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
-        session = self.session
-        duration_ms = self._input_audio_duration_ms(event, payload)
-        is_speech = self._input_looks_like_speech(event, payload)
-        if not session.capabilities.supports_barge_in and self._event_requests_barge_in(event):
-            return self._defer_unsupported_barge_in(session, duration_ms=duration_ms, is_speech=is_speech)
-        explicit = event.get("overlap_action") or event.get("overlap")
-        if isinstance(explicit, str):
-            normalized = explicit.strip().lower()
-            if normalized in {"barge_in", "interrupt", "cancel"}:
-                return {
-                    "action": "barge_in",
-                    "reason": "client_overlap_action",
-                    "duration_ms": duration_ms,
-                    "buffer_audio": True,
-                }
-            if normalized in {"listen", "continue", "continue_output", "ack"}:
-                session.reset_overlap_speech()
-                return {
-                    "action": "listen",
-                    "reason": "client_overlap_action",
-                    "duration_ms": duration_ms,
-                    "buffer_audio": (
-                        normalized == "listen" and is_speech and duration_ms > session.config.overlap_short_ack_ms
-                    ),
-                    "defer_runtime_append": True,
-                }
-            if normalized in {"drop", "ignore", "silence"}:
-                session.reset_overlap_speech()
-                return {
-                    "action": "drop",
-                    "reason": "client_overlap_action",
-                    "duration_ms": duration_ms,
-                    "buffer_audio": False,
-                }
-
-        if bool(event.get("force_barge_in", False)):
-            return {
-                "action": "barge_in",
-                "reason": "client_force_barge_in",
-                "duration_ms": duration_ms,
-                "buffer_audio": True,
-            }
-        if self._session_auto_responds():
-            if is_speech:
-                session.accumulate_overlap_speech(duration_ms)
-            vad_speech_started = self._vad_speech_started(event, payload)
-            if (
-                session.capabilities.supports_barge_in
-                and is_speech
-                and session.config.overlap_policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value
-                and vad_speech_started is not False
-            ):
-                return {
-                    "action": "barge_in",
-                    "reason": ("server_vad_speech_started" if vad_speech_started is True else "barge_in_on_speech"),
-                    "cancel_reason": "turn_detected" if vad_speech_started is True else "barge_in",
-                    "duration_ms": duration_ms,
-                    "overlap_speech_ms": session.overlap_speech_ms,
-                    "buffer_audio": True,
-                }
-            return {
-                "action": "listen",
-                "reason": "auto_response_continuous",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": True,
-                "defer_runtime_append": False,
-                "force_listen": event.get("force_listen") is True or payload.get("force_listen") is True,
-                "preserve_realtime_input": True,
-            }
-        if bool(event.get("force_listen", False)):
-            session.reset_overlap_speech()
-            return {
-                "action": "listen",
-                "reason": "client_force_listen",
-                "duration_ms": duration_ms,
-                "buffer_audio": is_speech,
-                "defer_runtime_append": True,
-            }
-
-        policy = session.config.overlap_policy
-        if not is_speech:
-            if session.overlap_speech_ms <= 0:
-                session.reset_overlap_speech()
-            return {
-                "action": "drop",
-                "reason": "silence_or_noise",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": False,
-            }
-
-        if self._is_short_ack_transcript_hint(event, payload):
-            session.reset_overlap_speech()
-            return {
-                "action": "listen",
-                "reason": "short_ack_transcript",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": False,
-                "defer_runtime_append": True,
-            }
-
-        if policy == DuplexOverlapPolicy.LISTEN_ONLY.value:
-            session.accumulate_overlap_speech(duration_ms)
-            return {
-                "action": "listen",
-                "reason": "policy_listen_only",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": True,
-                "defer_runtime_append": True,
-            }
-
-        if policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value and not session.capabilities.supports_barge_in:
-            return self._defer_unsupported_barge_in(session, duration_ms=duration_ms, is_speech=True)
-
-        session.accumulate_overlap_speech(duration_ms)
-        if policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value:
-            vad_speech_started = self._vad_speech_started(event, payload)
-            if vad_speech_started is False:
-                return {
-                    "action": "listen",
-                    "reason": "server_vad_utterance_active",
-                    "duration_ms": duration_ms,
-                    "overlap_speech_ms": session.overlap_speech_ms,
-                    "buffer_audio": True,
-                    "defer_runtime_append": False,
-                    "force_listen": True,
-                    "preserve_realtime_input": True,
-                }
-            return {
-                "action": "barge_in",
-                "reason": ("server_vad_speech_started" if vad_speech_started is True else "policy_barge_in_on_speech"),
-                "cancel_reason": "turn_detected" if vad_speech_started is True else "barge_in",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": True,
-            }
-
-        if (
-            duration_ms <= session.config.overlap_short_ack_ms
-            and session.overlap_speech_ms <= session.config.overlap_short_ack_ms
-        ):
-            return {
-                "action": "listen",
-                "reason": "short_ack",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": True,
-                "defer_runtime_append": True,
-            }
-        if session.overlap_speech_ms >= session.config.overlap_barge_in_ms:
-            if not session.capabilities.supports_barge_in:
-                return {
-                    "action": "listen",
-                    "reason": "barge_in_unsupported",
-                    "duration_ms": duration_ms,
-                    "overlap_speech_ms": session.overlap_speech_ms,
-                    "buffer_audio": True,
-                    "defer_runtime_append": True,
-                }
-            return {
-                "action": "barge_in",
-                "reason": "long_overlap_speech",
-                "duration_ms": duration_ms,
-                "overlap_speech_ms": session.overlap_speech_ms,
-                "buffer_audio": True,
-            }
-        return {
-            "action": "listen",
-            "reason": "accumulating_overlap_speech",
-            "duration_ms": duration_ms,
-            "overlap_speech_ms": session.overlap_speech_ms,
-            "buffer_audio": True,
-            "defer_runtime_append": True,
-        }
-
-    @staticmethod
-    def _vad_speech_started(event: Mapping[str, object], payload: Mapping[str, object]) -> bool | None:
-        for source in (event, payload):
-            vad = source.get("vad")
-            if isinstance(vad, Mapping) and isinstance(vad.get("speech_started"), bool):
-                return bool(vad["speech_started"])
-        return None
-
-    @staticmethod
-    def _event_requests_barge_in(event: Mapping[str, object]) -> bool:
-        if event.get("force_barge_in") is True:
-            return True
-        explicit = event.get("overlap_action") or event.get("overlap")
-        return isinstance(explicit, str) and explicit.strip().lower() in {"barge_in", "interrupt", "cancel"}
-
-    @staticmethod
-    def _defer_unsupported_barge_in(
-        session: DuplexEngineSession,
-        *,
-        duration_ms: int,
-        is_speech: bool,
-    ) -> dict[str, object]:
-        if is_speech:
-            session.accumulate_overlap_speech(duration_ms)
-        return {
-            "action": "listen",
-            "reason": "barge_in_unsupported",
-            "duration_ms": duration_ms,
-            "overlap_speech_ms": session.overlap_speech_ms,
-            "buffer_audio": is_speech,
-            "defer_runtime_append": True,
-        }
-
-    @staticmethod
-    def _is_short_ack_transcript_hint(event: dict[str, object], payload: dict[str, object]) -> bool:
-        raw_text = event.get("transcript") or event.get("text") or payload.get("transcript") or payload.get("text")
-        if not isinstance(raw_text, str):
-            return False
-        normalized = raw_text.strip().lower()
-        if not normalized:
-            return False
-        compact = "".join(ch for ch in normalized if ch.isalnum() or "一" <= ch <= "鿿")
-        if compact in {
-            "嗯",
-            "嗯嗯",
-            "对",
-            "对的",
-            "好",
-            "好的",
-            "继续",
-            "继续说",
-            "可以",
-            "是的",
-            "yes",
-            "yeah",
-            "yep",
-            "ok",
-            "okay",
-            "continue",
-            "goon",
-            "right",
-        }:
-            return True
-        return normalized in {"go on", "keep going", "please continue"}
-
-    @staticmethod
-    def _input_audio_duration_ms(event: dict[str, object], payload: dict[str, object]) -> int:
-        for key in ("duration_ms", "audio_duration_ms"):
-            value = event.get(key)
-            if isinstance(value, int | float):
-                return max(0, int(value))
-        fmt = payload.get("format")
-        sample_rate_hz = payload.get("sample_rate_hz")
-        audio = payload.get("audio")
-        if fmt == "pcm_f32le" and isinstance(sample_rate_hz, int) and sample_rate_hz > 0 and isinstance(audio, str):
-            try:
-                raw = base64.b64decode(audio, validate=True)
-            except (binascii.Error, ValueError):
-                return 0
-            return int((len(raw) // 4) * 1000 / sample_rate_hz)
-        return 0
-
-    @staticmethod
-    def _merge_audio_payloads(first: dict[str, object], second: dict[str, object]) -> dict[str, object]:
-        if first.get("format") != "pcm_f32le" or second.get("format") != "pcm_f32le":
-            return second
-        first_rate = first.get("sample_rate_hz")
-        second_rate = second.get("sample_rate_hz")
-        if not isinstance(first_rate, int) or not isinstance(second_rate, int) or first_rate != second_rate:
-            return second
-        first_audio = first.get("audio")
-        second_audio = second.get("audio")
-        if not isinstance(first_audio, str) or not isinstance(second_audio, str):
-            return second
-        try:
-            first_raw = base64.b64decode(first_audio, validate=True)
-            second_raw = base64.b64decode(second_audio, validate=True)
-        except (binascii.Error, ValueError):
-            return second
-        merged = dict(second)
-        merged["audio"] = base64.b64encode(first_raw + second_raw).decode("ascii")
-        merged["sample_rate_hz"] = first_rate
-        merged_frames = [
-            frame
-            for source in (first.get("video_frames"), second.get("video_frames"))
-            if isinstance(source, list)
-            for frame in source
-            if isinstance(frame, str) and frame
-        ]
-        if merged_frames:
-            merged["video_frames"] = merged_frames
-        else:
-            merged.pop("video_frames", None)
-        merged["force_listen"] = bool(first.get("force_listen", False)) or bool(second.get("force_listen", False))
-        merged.pop("force_speak", None)
-        merged["is_speech"] = bool(first.get("is_speech", False)) or bool(second.get("is_speech", False))
-        return merged
-
-    def _should_force_listen_for_short_commit(self, event: dict[str, object], payload: dict[str, object]) -> bool:
-        if event.get("force_listen") is True or payload.get("force_listen") is True:
-            return True
-        if event.get("force_barge_in") is True:
-            return False
-        if event.get("response_create") is not True:
-            return False
-        duration_ms = self._input_audio_duration_ms(event, payload)
-        return 0 < duration_ms <= self.session.config.overlap_short_ack_ms
-
-    def _should_force_listen_for_auto_response_overlap(
-        self, event: dict[str, object], payload: dict[str, object]
-    ) -> bool:
-        if not self._session_auto_responds():
-            return False
-        if event.get("force_barge_in") is True:
-            return False
-        return event.get("force_listen") is True or payload.get("force_listen") is True
-
-    def _input_looks_like_speech(self, event: dict[str, object], payload: dict[str, object]) -> bool:
-        for key in ("is_speech", "speech"):
-            value = event.get(key)
-            if isinstance(value, bool):
-                return value
-        vad = event.get("vad")
-        if isinstance(vad, dict):
-            value = vad.get("is_speech")
-            if isinstance(value, bool):
-                return value
-            probability = vad.get("speech_probability", vad.get("probability"))
-            if isinstance(probability, int | float):
-                return float(probability) >= 0.5
-        probability = event.get("speech_probability")
-        if isinstance(probability, int | float):
-            return float(probability) >= 0.5
-
-        fmt = payload.get("format")
-        audio = payload.get("audio")
-        if fmt in {"pcm_f32le", "pcm16"} and isinstance(audio, str):
-            try:
-                raw = base64.b64decode(audio, validate=True)
-            except (binascii.Error, ValueError):
-                return True
-            if fmt == "pcm_f32le":
-                if len(raw) < 4 or len(raw) % 4 != 0:
-                    return True
-                samples = np.frombuffer(raw, dtype=np.float32)
-            else:
-                if len(raw) < 2 or len(raw) % 2 != 0:
-                    return True
-                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            if samples.size == 0:
-                return False
-            rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32)))))
-            return rms >= self.session.config.overlap_silence_rms
-        return True
-
     def _emit_overlap_decision(self, decision: dict[str, object]) -> None:
         session = self.session
         details: dict[str, object] = {
@@ -1464,7 +1110,7 @@ class DuplexSessionRunner:
         if not isinstance(audio, str):
             self._emit_error("bad_event", "input_audio_buffer.append requires audio")
             return
-        if not session.capabilities.supports_barge_in and self._event_requests_barge_in(event):
+        if not session.capabilities.supports_barge_in and overlap_policy.event_requests_barge_in(event):
             self._emit_events([self._barge_in_unsupported_error()])
             event = dict(event)
             event.pop("force_barge_in", None)
@@ -1510,26 +1156,28 @@ class DuplexSessionRunner:
             frames = [frame for frame in video_frames if isinstance(frame, str) and frame]
             if frames:
                 payload["video_frames"] = frames
-        payload["is_speech"] = self._input_looks_like_speech(event, payload)
+        payload["is_speech"] = overlap_policy.input_looks_like_speech(self.session, event, payload)
+        auto_responds = self._session_auto_responds()
         defer_append = False
         buffer_overlap_audio = True
         self._mark_pending_silence_superseded()
         overlap_active = self._response_in_progress() and (
-            not self._session_auto_responds()
+            not auto_responds
             or (
                 session.capabilities.supports_barge_in
                 and (
                     session.config.overlap_policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value
-                    or self._event_requests_barge_in(event)
+                    or overlap_policy.event_requests_barge_in(event)
                 )
             )
         )
         if overlap_active:
-            decision = self._overlap_decision(event, payload)
+            decision = overlap_policy.decide(self.session, event, payload, auto_responds=auto_responds)
             self._emit_overlap_decision(decision)
             action = decision.get("action")
             if action == "drop":
-                self._emit_events(discard_pending_input_audio(projector, self._input_audio_duration_ms(event, payload)))
+                duration_ms = overlap_policy.input_audio_duration_ms(event, payload)
+                self._emit_events(discard_pending_input_audio(projector, duration_ms))
                 self._maybe_schedule_vad_commit(vad_result)
                 return
             if action == "listen":
@@ -1537,7 +1185,7 @@ class DuplexSessionRunner:
                 defer_append = bool(decision.get("defer_runtime_append", True))
                 if not buffer_overlap_audio and decision.get("preserve_realtime_input") is not True:
                     self._emit_events(
-                        discard_pending_input_audio(projector, self._input_audio_duration_ms(event, payload))
+                        discard_pending_input_audio(projector, overlap_policy.input_audio_duration_ms(event, payload))
                     )
                 if decision.get("force_listen", True) is True:
                     payload["force_listen"] = True
@@ -1600,7 +1248,7 @@ class DuplexSessionRunner:
                     if not await self._signal_cancel_fence(cancelled_fence):
                         return
                 self.tasks.active_response_task = None
-        elif not self._session_auto_responds() and not self._input_looks_like_speech(event, payload):
+        elif not auto_responds and not overlap_policy.input_looks_like_speech(self.session, event, payload):
             # Turn-mode only: skip silent chunks so they don't open a response.
             self.emit(
                 {
@@ -1612,15 +1260,15 @@ class DuplexSessionRunner:
             )
             self._maybe_schedule_vad_commit(vad_result)
             return
-        if self._should_force_listen_for_auto_response_overlap(event, payload):
+        if overlap_policy.should_force_listen_for_auto_response_overlap(event, payload, auto_responds=auto_responds):
             payload["force_listen"] = True
         if not buffer_overlap_audio:
             self._maybe_schedule_vad_commit(vad_result)
             return
         session.mark_user_input_activity()
         model_state.input_since_commit = True
-        model_state.speech_since_commit = model_state.speech_since_commit or self._input_looks_like_speech(
-            event, payload
+        model_state.speech_since_commit = model_state.speech_since_commit or overlap_policy.input_looks_like_speech(
+            self.session, event, payload
         )
         raw_audio_bytes = self._audio_payload_size_bytes(payload)
         try:
@@ -3412,7 +3060,7 @@ class DuplexSessionRunner:
                     commit_reservation.commit()
                 else:
                     if model_state.committed_audio_payload is not None:
-                        deferred_payload = self._merge_audio_payloads(
+                        deferred_payload = overlap_policy.merge_audio_payloads(
                             model_state.committed_audio_payload,
                             deferred_payload,
                         )
@@ -3450,7 +3098,9 @@ class DuplexSessionRunner:
                 final_payload = committed_input
                 if model_state.committed_audio_payload is not None:
                     if final_payload is not None:
-                        final_payload = self._merge_audio_payloads(model_state.committed_audio_payload, final_payload)
+                        final_payload = overlap_policy.merge_audio_payloads(
+                            model_state.committed_audio_payload, final_payload
+                        )
                     else:
                         final_payload = model_state.committed_audio_payload
                 commit_reservation.commit()
@@ -3538,13 +3188,13 @@ class DuplexSessionRunner:
             )
             if model_state.committed_audio_payload is not None:
                 if flushed is not None:
-                    flushed = self._merge_audio_payloads(model_state.committed_audio_payload, flushed)
+                    flushed = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, flushed)
                 else:
                     flushed = model_state.committed_audio_payload
             if commit_reservation is not None:
                 commit_reservation.commit()
             if flushed is not None:
-                if self._should_force_listen_for_short_commit(event, flushed):
+                if overlap_policy.should_force_listen_for_short_commit(self.session, event, flushed):
                     flushed = dict(flushed)
                     flushed["force_listen"] = True
                 model_state.input_since_commit = False
