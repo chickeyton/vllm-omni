@@ -568,7 +568,7 @@ async def test_stage1_audio_opens_a_response_and_streams_deltas() -> None:
         await h.run(append_audio())
         request_id = h.stage0_request_id()
 
-        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hel"))
+        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="he"))
         assert types(events) == [
             "response.created",
             "conversation.item.added",
@@ -585,14 +585,14 @@ async def test_stage1_audio_opens_a_response_and_streams_deltas() -> None:
         delta = find(events, "response.output_audio.delta")
         assert (delta.delta, delta.format, delta.sample_rate_hz) == ("wav-24000", "wav", 24000)
         assert delta.response_id == response_id
-        assert find(events, "response.output_audio_transcript.delta").delta == "hel"
+        assert find(events, "response.output_audio_transcript.delta").delta == "he"
         assert h.session.playback.sent_ms == 1000
 
         # Cumulative Stage1 audio is sliced to the new samples only.
         events = await h.deliver_and_settle(tts_output(request_id, samples=48000, text="hello"))
         assert types(events) == ["response.output_audio.delta", "response.output_audio_transcript.delta"]
         assert find(events, "response.output_audio.delta").delta == "wav-24000"
-        assert find(events, "response.output_audio_transcript.delta").delta == "lo"
+        assert find(events, "response.output_audio_transcript.delta").delta == "llo"
         assert h.session.playback.sent_ms == 2000
     finally:
         await close_harness(h)
@@ -650,7 +650,7 @@ async def test_stale_epoch_output_is_dropped_after_barge_in() -> None:
     try:
         await h.run(append_audio())
         request_id = h.stage0_request_id()
-        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hel"))
+        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="he"))
 
         events = await h.run(commands.BargeIn())
         assert h.session.epoch == 1
