@@ -87,6 +87,7 @@ from vllm_omni.config.endpoint_policy import (
     shutdown_unsupported_routes,
 )
 from vllm_omni.entrypoints.async_omni import AsyncOmni
+from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.duplex.warmup import _warmup_duplex_realtime
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni
@@ -551,7 +552,6 @@ def _init_duplex_app_state(
     state.serving_tokens = None
     state.online_renderer = None
     for attribute in (
-        "openai_serving_chat",
         "openai_serving_chat_batch",
         "openai_serving_completion",
         "openai_serving_responses",
@@ -573,9 +573,21 @@ def _init_duplex_app_state(
     ):
         setattr(state, attribute, None)
     state.openai_serving_duplex = OmniDuplexSessionHandler(duplex_omni=engine_client)
+    # /v1/chat/completions runs on a duplex session like any other Realtime
+    # client, so it needs no task support and no capability of its own. A model
+    # that should not serve it says so through the deploy config's
+    # endpoint_restrictions, which the caller applies to the routes afterwards.
+    state.openai_serving_chat = DuplexChatCompletionsAdapter(
+        duplex_omni=engine_client,
+        model_name=base_model_paths[0].name if base_model_paths else engine_client.model,
+    )
     state.enable_server_load_tracking = getattr(args, "enable_server_load_tracking", False)
     state.server_load_metrics = 0
-    logger.info("Duplex mode: serving %s over /v1/realtime?duplex=1 only", engine_client.model)
+    logger.info(
+        "Duplex mode: serving %s over /v1/realtime?duplex=1 and /v1/chat/completions "
+        "(one duplex session per chat request, so max_sessions caps HTTP concurrency too)",
+        engine_client.model,
+    )
 
 
 async def omni_init_app_state(
