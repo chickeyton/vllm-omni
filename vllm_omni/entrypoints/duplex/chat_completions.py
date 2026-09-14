@@ -310,9 +310,7 @@ class DuplexChatCompletionsAdapter:
             usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
         )
 
-    async def _stream(
-        self, handle: DuplexSessionHandle, request: ChatCompletionRequest
-    ) -> AsyncGenerator[str, None]:
+    async def _stream(self, handle: DuplexSessionHandle, request: ChatCompletionRequest) -> AsyncGenerator[str, None]:
         """SSE: one ``chat.completion.chunk`` per text delta, then ``[DONE]``."""
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
