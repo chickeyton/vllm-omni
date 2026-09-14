@@ -14,6 +14,8 @@ import base64
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
@@ -30,6 +32,7 @@ from vllm_omni.engine.duplex.events import (
 )
 from vllm_omni.engine.duplex.messages import DuplexSessionError
 from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
+from vllm_omni.entrypoints.openai import api_server
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -347,4 +350,67 @@ async def test_a_stream_that_fails_after_it_started_still_ends_and_releases_the_
 
     assert chunks[-1] == "data: [DONE]\n\n"
     assert '"finish_reason": "stop"' in chunks[-2]
+    assert omni.closed == [_SESSION_ID]
+
+
+# --------------------------------------------------------------------------- #
+# The route                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def _route_app(omni: FakeOmni) -> FastAPI:
+    """A duplex server's ``/v1/chat/completions``, served by the adapter."""
+    app = FastAPI()
+    app.include_router(api_server.router)
+    app.state.openai_serving_chat = _adapter(omni)
+    app.state.serving_tokenization = None
+    app.state.enable_server_load_tracking = False
+    app.state.server_load_metrics = 0
+    return app
+
+
+def test_the_route_returns_the_adapters_completion() -> None:
+    """The handler recognises the adapter's response as a ChatCompletionResponse, not a stream."""
+    omni = FakeOmni([TextDelta(delta="pong"), ResponseDone(response={"status": "completed"})])
+
+    with TestClient(_route_app(omni)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "fake-duplex-model", "messages": [{"role": "user", "content": "ping"}]},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["message"]["content"] == "pong"
+    assert body["object"] == "chat.completion"
+    assert omni.closed == [_SESSION_ID]
+
+
+def test_the_route_answers_no_admission_slot_with_503() -> None:
+    """The duplex error code has to survive as an HTTP status, not collapse to 400."""
+    omni = FakeOmni()
+    omni.open_error = DuplexSessionError("no slots", code="resource_exhausted")
+
+    with TestClient(_route_app(omni)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "fake-duplex-model", "messages": [{"role": "user", "content": "ping"}]},
+        )
+
+    assert response.status_code == 503
+    assert "no slots" in response.json()["error"]["message"]
+
+
+def test_the_route_streams_the_adapters_sse() -> None:
+    omni = FakeOmni([TextDelta(delta="a"), TextDelta(delta="b"), ResponseDone(response={"status": "completed"})])
+
+    with TestClient(_route_app(omni)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "fake-duplex-model", "messages": [{"role": "user", "content": "ping"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.text.endswith("data: [DONE]\n\n")
     assert omni.closed == [_SESSION_ID]
