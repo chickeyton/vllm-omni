@@ -464,6 +464,16 @@ class DuplexChatCompletionsAdapter:
             }
             return f"data: {json.dumps(body)}\n\n"
 
+        def failure(message: str, code: str) -> str:
+            """A stream that has already started cannot change its HTTP status.
+
+            The only honest way to end it is to say what went wrong in the
+            stream itself. Ending with ``finish_reason: "stop"`` instead would
+            report a failed turn as a complete, empty answer.
+            """
+            error = self.create_error_response(message, err_type=code, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return f"data: {error.model_dump_json()}\n\n"
+
         try:
             await self._start_turn(handle, request)
             yield chunk({"role": "assistant", "content": ""})
@@ -471,7 +481,7 @@ class DuplexChatCompletionsAdapter:
                 async for event in events:
                     if isinstance(event, ErrorEvent):
                         logger.warning("duplex chat completion stream failed: %s: %s", event.code, event.message)
-                        yield chunk({}, finish_reason="stop")
+                        yield failure(event.message, event.code or "duplex_error")
                         break
                     # A duplex model answers by speaking, so the transcript is
                     # the assistant's text; a model that emits text directly
@@ -484,13 +494,14 @@ class DuplexChatCompletionsAdapter:
                         break
                     elif isinstance(event, SessionClosed):
                         logger.warning("duplex session %s ended mid-stream: %s", handle.session_id, event.reason)
-                        yield chunk({}, finish_reason="stop")
+                        yield failure(
+                            f"the duplex session ended before the response completed: {event.reason}",
+                            "duplex_session_closed",
+                        )
                         break
         except Exception as exc:
-            # The stream has already started, so the only way to report this is
-            # to end it; the session still has to be released below.
             logger.exception("duplex chat completion stream failed: %s", exc)
-            yield chunk({}, finish_reason="stop")
+            yield failure(f"duplex chat completion failed: {exc}", "internal_server_error")
         finally:
             await self._close(handle)
             yield "data: [DONE]\n\n"

@@ -397,15 +397,33 @@ async def test_streaming_emits_one_chunk_per_text_delta_and_releases_the_session
 
 
 @pytest.mark.asyncio
-async def test_a_stream_that_fails_after_it_started_still_ends_and_releases_the_session() -> None:
-    """Once bytes are on the wire the only way to report a failure is to end the stream."""
+async def test_a_stream_that_fails_after_it_started_says_so_rather_than_stopping() -> None:
+    """Once bytes are on the wire the status is fixed, so the failure goes in the stream.
+
+    Ending with ``finish_reason: "stop"`` would report a failed turn as a
+    complete, empty answer -- which is what a real server did before this:
+    HTTP 200 and an empty assistant message, after 305 seconds.
+    """
     omni = FakeOmni([ErrorEvent(code="internal_error", message="boom")])
 
     generator = await _adapter(omni).create_chat_completion(_request(stream=True))
     chunks = [chunk async for chunk in generator]
 
     assert chunks[-1] == "data: [DONE]\n\n"
-    assert '"finish_reason": "stop"' in chunks[-2]
+    assert '"error"' in chunks[-2] and "boom" in chunks[-2]
+    assert not any('"finish_reason": "stop"' in chunk for chunk in chunks)
+    assert omni.closed == [_SESSION_ID]
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_dies_mid_stream_is_not_reported_as_a_complete_answer() -> None:
+    omni = FakeOmni([TextDelta(delta="par"), SessionClosed(reason="engine_dead")])
+
+    generator = await _adapter(omni).create_chat_completion(_request(stream=True))
+    chunks = [chunk async for chunk in generator]
+
+    assert '"error"' in chunks[-2] and "engine_dead" in chunks[-2]
+    assert not any('"finish_reason": "stop"' in chunk for chunk in chunks)
     assert omni.closed == [_SESSION_ID]
 
 
