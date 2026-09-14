@@ -942,7 +942,7 @@ class ModelChannel:
     # Silence continuation                                               #
     # ------------------------------------------------------------------ #
 
-    def _silence_unit_payload(self) -> dict[str, object]:
+    def silence_unit_payload(self) -> dict[str, object]:
         samples = int(self._ctx.plugin.silence_continuation_samples)
         audio = (
             self._SILENCE_UNIT_PAYLOAD_AUDIO
@@ -1069,7 +1069,7 @@ class ModelChannel:
                     model_turn_id=payload_turn_id_value,
                 )
             return
-        payload = self._silence_unit_payload()
+        payload = self.silence_unit_payload()
         if auto_response and count + 1 == continuation_limit:
             payload["force_listen"] = True
         payload["duplex_turn_id"] = payload_turn_id_value

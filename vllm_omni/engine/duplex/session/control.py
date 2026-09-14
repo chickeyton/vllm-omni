@@ -315,6 +315,9 @@ class SessionControl:
         if message is not None:
             session.append_history_message(message)
             session.register_history_item(item_id if isinstance(item_id, str) else None, message)
+            if message.get("role") == "user":
+                # A later response.create may answer this without any audio.
+                session.note_conversation_input()
         self._out.emit(
             {
                 "type": "conversation.item.created",

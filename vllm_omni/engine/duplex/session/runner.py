@@ -1394,9 +1394,15 @@ class DuplexSessionRunner:
     async def _start_response_from_committed_audio(self) -> None:
         """Answer a client ``response.create``.
 
-        A model-native session generates from audio units, so the only thing
-        this can start is a turn whose audio was already committed. Anything
-        else -- a response already running, or nothing committed -- is refused
+        A turn starts from committed input. Audio is the usual kind, but the
+        Realtime protocol also lets a client build the turn out of
+        ``conversation.item.create`` and ask for a response with no audio at
+        all; those items are input too. A model-native session still generates
+        per audio unit, so an item-only turn is primed with the model's own
+        silence unit -- the one continuations already use -- rather than with
+        anything this layer invents.
+
+        Refused only when nothing is waiting, or a response is already running,
         rather than silently producing an empty turn.
         """
         session = self.session
@@ -1423,6 +1429,7 @@ class DuplexSessionRunner:
             if operation_id is None:
                 operation_id = uuid.uuid4().hex
                 model_state.committed_audio_operation_id = operation_id
+            session.clear_conversation_input()
             await self._start_append(
                 committed_payload,
                 final=True,
@@ -1431,8 +1438,18 @@ class DuplexSessionRunner:
                 retained_committed_payload=committed_payload,
             )
             return
+        if session.has_uncommitted_conversation_input():
+            session.clear_conversation_input()
+            await self._start_append(
+                self.model.silence_unit_payload(),
+                final=True,
+                precreate_response=True,
+                operation_id=uuid.uuid4().hex,
+            )
+            return
         self._emit_error(
-            "response_create_without_input", "Native duplex response.create requires committed audio input."
+            "response_create_without_input",
+            "Duplex response.create requires committed audio or conversation items to answer.",
         )
         session.discard_response_options()
 
