@@ -34,7 +34,9 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 #: Client events the envelope handles itself (never translated into commands).
-ENVELOPE_EVENT_TYPES = frozenset({"session.resume", "session.event_ack", "conversation.item.retrieve"})
+#: ``conversation.item.retrieve`` is deliberately absent: the conversation items
+#: it reads live engine-side, so it travels as a command like any other event.
+ENVELOPE_EVENT_TYPES = frozenset({"session.resume", "session.event_ack"})
 
 
 @dataclass(frozen=True, slots=True)

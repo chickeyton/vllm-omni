@@ -121,6 +121,10 @@ class DuplexOmniEngine(OmniEngineBase):
                 message,
                 timeout=timeout,
                 timeout_message=f"duplex {operation} timed out for session {session_id}",
+                # Block rather than surface a raw queue.Full: the handlers below
+                # promise a typed DuplexSessionError, and a momentarily full
+                # request queue is backpressure, not a failed control op.
+                block_on_submit=True,
             )
         except TimeoutError as exc:
             raise DuplexSessionError(str(exc), code="timeout", retryable=True, session_id=session_id) from exc

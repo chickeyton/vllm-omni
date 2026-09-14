@@ -150,9 +150,10 @@ interchangeably.
 | Robot policy inference | `WS /v1/realtime/robot/openpi` | Send MessagePack observations and receive action arrays | [OpenPI Robot Policy](openpi_api.md) |
 
 All six routes are model- or configuration-dependent. In particular,
-`/v1/realtime` is not full duplex unless the client sets `duplex=1` and the
-model is a duplex model (its pipeline declares a `duplex_plugin` and the
-deploy configuration sets `session_mode: duplex`). Such a server is
+`/v1/realtime` is full duplex when the model is a duplex model (its pipeline
+declares a `duplex_plugin` and the deploy configuration sets
+`session_mode: duplex`); a stock Realtime client needs no vendor query
+parameter, and `duplex=0` is the explicit opt-out. Such a server is
 duplex-only and does not serve the turn-based HTTP routes. Clients should
 also verify the duplex capability payload because the query-parameter form
 falls back to the ordinary realtime handler when duplex is unavailable.

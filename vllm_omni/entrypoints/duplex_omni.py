@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import suppress
 from typing import Any
 from uuid import uuid4
 
@@ -354,6 +355,15 @@ class DuplexOmni(AsyncOmniBase):
         except BaseException:
             if self._handles.get(session_id) is handle:
                 self._handles.pop(session_id, None)
+            # Dropping the handle only forgets the id here. The engine may still
+            # be admitting this session -- a control timeout unregisters the RPC
+            # waiter but cannot cancel the manager's open -- so a late admission
+            # would hold an admission slot and a Stage0 reservation until idle
+            # expiry. Send the compensating close; the manager applies it
+            # immediately if the session already landed, and records it for the
+            # open to honour on arrival if not.
+            with suppress(Exception):
+                await self.engine.close_session_async(session_id, reason="open_abandoned", timeout=timeout)
             raise
         handle._adopt(result)
         return handle

@@ -1328,6 +1328,70 @@ async def test_expiry_emits_a_terminal_event_even_when_a_close_deferred_it() -> 
         assert terminal[0].reason == "request_cleanup"
 
 
+async def test_an_open_abandoned_by_its_caller_does_not_hold_the_admission_slot() -> None:
+    """A control-RPC timeout must not leave the engine holding a session.
+
+    The caller's timeout unregisters its RPC waiter but cannot cancel the
+    manager's open, which is already past the capacity check. Without the
+    compensating close, that session lands, keeps its slot and its Stage0
+    reservation, and with ``max_sessions=1`` the next open is refused until
+    idle expiry.
+    """
+    async with Harness.create(max_sessions=1) as harness:
+        harness.plugin.blocked_session_ids.add("blocked")
+        config = DuplexSessionConfig(model="fake-model", instructions="blocked")
+
+        open_task = asyncio.create_task(harness.open("sid-abandoned", config))
+        await asyncio.wait_for(harness.plugin.runtime_config_started.wait(), timeout=1.0)
+
+        # The caller gave up: DuplexOmni sends the compensating close while the
+        # open is still awaiting the plugin.
+        await harness.close("sid-abandoned", reason="open_abandoned")
+
+        harness.plugin.runtime_config_gate.set()
+        await open_task
+
+        assert "sid-abandoned" not in harness.manager.runners
+        # The slot came back, so a replacement is admitted.
+        assert (await harness.open("sid-replacement")).ok is True
+
+
+async def test_a_runtime_close_racing_a_manager_close_still_emits_one_terminal() -> None:
+    """Two teardown drivers, one terminal event.
+
+    The window is inside ``runner.close()``: ``cancel_append_tasks()`` is awaited
+    *before* the terminal is deferred, so an append task that dies there finds
+    the session merely CLOSING with neither ``closed_emitted`` nor
+    ``closed_deferred`` set, and emits ``session.closed`` itself. The manager
+    decided to emit before any of this and must re-check, or the session ends
+    with two terminal events.
+    """
+    async with Harness.create(max_sessions=1) as harness:
+        await harness.open("sid-race")
+        harness.events()
+        session = harness.session("sid-race")
+        session.bind_stage_request(0, stage0_request_id("sid-race"), fence=session.fence)
+        runner = harness.manager.runners["sid-race"]
+
+        async def dying_append() -> bool:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # What AppendAttempt does when its submit fails mid-teardown.
+                await runner._close_from_runtime("runtime_append_task_failed")
+                raise
+            return True
+
+        task = asyncio.ensure_future(dying_append())
+        await asyncio.sleep(0)
+        runner.tasks.track_append_task(task, epoch=session.epoch, final=True, response_bound=True)
+
+        await harness.close("sid-race")
+
+        terminal = [event for event in harness.events("sid-race") if isinstance(event, SessionClosed | SessionExpired)]
+        assert len(terminal) == 1, terminal
+
+
 async def test_a_terminal_event_is_emitted_once_even_if_expiry_runs_twice() -> None:
     async with Harness.create() as harness:
         await harness.open("sid-once")
