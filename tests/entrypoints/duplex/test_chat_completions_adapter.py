@@ -203,7 +203,11 @@ async def test_audio_content_goes_to_the_input_buffer_and_the_commit_starts_the_
     assert handle.verbs() == ["append_audio", "commit"]
     assert handle.calls[0][1]["audio"] == _PCM  # decoded, not the base64 the caller sent
     assert handle.calls[1][1] == {"final": True, "create_response": True}
-    assert omni.opened[0].initial_user_text is None
+    # The commit asks for the response, so the session must not also auto-respond.
+    assert "auto_response" not in omni.opened[0].extra_body
+    # Text alongside the audio is still seeded: it is the only way it reaches
+    # the model at all.
+    assert omni.opened[0].initial_user_text == "what is this?"
 
 
 @pytest.mark.asyncio
@@ -361,7 +365,7 @@ async def test_the_session_is_released_when_the_turn_raises() -> None:
 
     async def open_and_break(config: Any) -> FakeHandle:
         handle = await real_open(config)
-        handle.create_response = explode  # type: ignore[method-assign]
+        handle.append_audio = explode  # type: ignore[method-assign]
         return handle
 
     omni.open_session = open_and_break  # type: ignore[method-assign]
