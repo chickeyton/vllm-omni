@@ -148,8 +148,7 @@ class DuplexChatCompletionsAdapter:
         if not self._has_audio(request) and not handle.capabilities.supports_chat_completions:
             await self._close(handle)
             return self.create_error_response(
-                "this duplex model answers speech input only: send audio content, "
-                "or use /v1/realtime?duplex=1",
+                "this duplex model answers speech input only: send audio content, or use /v1/realtime?duplex=1",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
