@@ -195,13 +195,7 @@ class DuplexChatCompletionsAdapter:
         session refuses per-response overrides.
         """
         config = DuplexSessionConfig(model=request.model or self._model_name, overlap_policy="listen_only")
-        # Same spelling a websocket client uses, and no more permissive: the
-        # Realtime open path passes its own session ``extra_body`` through
-        # unfiltered too. This is how a caller asking for audio output supplies
-        # the ``ref_audio`` such a model requires.
-        extra_body = getattr(request, "extra_body", None)
-        if isinstance(extra_body, Mapping):
-            config.extra_body = dict(extra_body)
+        config.extra_body = self._session_extra_body(request)
         modalities = getattr(request, "modalities", None)
         config.modalities = [str(m) for m in modalities] if modalities else ["text"]
         if request.temperature is not None:
@@ -211,6 +205,28 @@ class DuplexChatCompletionsAdapter:
             config.max_tokens = int(max_tokens)
         self._apply_chat_template_kwargs(request, config)
         return config
+
+    @staticmethod
+    def _session_extra_body(request: ChatCompletionRequest) -> dict[str, object]:
+        """The session's ``extra_body``, however the caller spelled it.
+
+        A websocket client puts these inside the session object; an HTTP caller
+        reaches the same place two ways, and both are honoured: a literal
+        ``extra_body`` object (what raw JSON does) and bare unknown top-level
+        keys (what the OpenAI SDK's ``extra_body=`` produces, since it merges
+        them into the body). This is how a request asking for audio output
+        supplies the ``ref_audio`` such a model requires.
+
+        No more permissive than the surface beside it: the Realtime open path
+        passes its own session ``extra_body`` through unfiltered too.
+        """
+        extra = dict(request.model_extra or {})
+        nested = extra.pop("extra_body", None)
+        # ``modalities`` is a session field of its own, not plugin input.
+        extra.pop("modalities", None)
+        if isinstance(nested, Mapping):
+            extra.update(nested)
+        return extra
 
     @staticmethod
     def _apply_chat_template_kwargs(request: ChatCompletionRequest, config: DuplexSessionConfig) -> None:

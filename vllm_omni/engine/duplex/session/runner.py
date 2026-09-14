@@ -1429,7 +1429,7 @@ class DuplexSessionRunner:
             if operation_id is None:
                 operation_id = uuid.uuid4().hex
                 model_state.committed_audio_operation_id = operation_id
-            session.clear_conversation_input()
+            session.reset_unanswered_user_items()
             await self._start_append(
                 committed_payload,
                 final=True,
@@ -1438,8 +1438,8 @@ class DuplexSessionRunner:
                 retained_committed_payload=committed_payload,
             )
             return
-        if session.has_uncommitted_conversation_input():
-            session.clear_conversation_input()
+        if session.unanswered_user_items():
+            session.reset_unanswered_user_items()
             await self._start_append(
                 self.model.silence_unit_payload(),
                 final=True,

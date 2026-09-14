@@ -889,9 +889,9 @@ async def test_conversation_items_are_consumed_by_the_turn_they_start() -> None:
                 }
             )
         )
-        assert h.session.has_uncommitted_conversation_input()
+        assert h.session.unanswered_user_items() == 1
         await h.run(commands.CreateResponse(event_id="evt-first"))
-        assert not h.session.has_uncommitted_conversation_input()
+        assert h.session.unanswered_user_items() == 0
     finally:
         await close_harness(h)
 
