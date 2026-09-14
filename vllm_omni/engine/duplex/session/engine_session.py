@@ -551,15 +551,15 @@ class DuplexEngineSession:
     def append_history_message(self, message: dict[str, object]) -> None:
         self._conversation.messages.append(message)
 
-    def note_conversation_input(self) -> None:
+    def notify_new_user_item(self) -> None:
         """Record a user item that a later ``response.create`` may answer."""
         self._conversation.unanswered_user_items += 1
 
-    def has_uncommitted_conversation_input(self) -> bool:
-        """Whether user items are waiting for a response, with no audio committed."""
-        return self._conversation.unanswered_user_items > 0
+    def unanswered_user_items(self) -> int:
+        """How many user items are waiting for a response."""
+        return self._conversation.unanswered_user_items
 
-    def clear_conversation_input(self) -> None:
+    def reset_unanswered_user_items(self) -> None:
         """A turn has started: the pending items are now its input."""
         self._conversation.unanswered_user_items = 0
 
