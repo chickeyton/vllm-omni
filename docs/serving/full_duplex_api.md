@@ -48,7 +48,12 @@ Two consequences of that design are user-visible:
   speed, because a model-native session generates per audio unit.
 
 `n > 1`, `logprobs` and `tools` are refused with HTTP 400: one request is one
-duplex turn, and those have no representation in it.
+duplex turn, and those have no representation in it. So are image and video
+content parts -- a Realtime conversation item carries text and audio only, and
+answering without the image the caller sent would be worse than refusing.
+`chat_template_kwargs.use_tts_template` is honoured (the session config has the
+same switch); its other keys are logged as ignored, because a duplex session
+renders its own prompt.
 
 The deploy configuration of such a model must agree:
 
