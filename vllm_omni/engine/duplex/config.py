@@ -411,6 +411,11 @@ class DuplexSessionConfig:
             "model": resolved_model,
             "modalities": payload.get("modalities") or payload.get("output_modalities") or ["text", "audio"],
             "instructions": payload.get("instructions"),
+            # Not a Realtime field, but a session one: a client that cannot
+            # reach the model by speech seeds its opening turn here. Without
+            # this a websocket client could only use the older
+            # ``extra_body.duplex_initial_user_text`` spelling.
+            "initial_user_text": payload.get("initial_user_text"),
             "voice": voice,
             "ref_audio": payload.get("ref_audio"),
             "response_format": duplex_response_format(defaults.output_audio_format),
