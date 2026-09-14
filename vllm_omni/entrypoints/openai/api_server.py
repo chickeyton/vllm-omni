@@ -540,7 +540,7 @@ def _init_duplex_app_state(
     base_model_paths: list[BaseModelPath],
     vllm_config: Any,
 ) -> None:
-    """Minimal app state for a duplex-only server."""
+    """Minimal app state for a duplex server: only the surfaces a duplex session backs."""
     state.vllm_config = vllm_config
     state.diffusion_engine = None
     state.openai_serving_models = OpenAIServingModels(

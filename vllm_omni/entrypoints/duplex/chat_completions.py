@@ -173,7 +173,31 @@ class DuplexChatCompletionsAdapter:
         max_tokens = request.max_completion_tokens or request.max_tokens
         if max_tokens is not None:
             config.max_tokens = int(max_tokens)
+        self._apply_chat_template_kwargs(request, config)
         return config
+
+    @staticmethod
+    def _apply_chat_template_kwargs(request: ChatCompletionRequest, config: DuplexSessionConfig) -> None:
+        """Carry across the one chat-template knob a session also has.
+
+        ``chat_template_kwargs`` is a turn-based stage-0 input-processor
+        feature, and a duplex session renders its own prompt, so most of it has
+        no equivalent here. ``use_tts_template`` is the exception: it is the
+        same switch under another name, and callers of this model already pass
+        it. The rest is reported rather than silently dropped, because ignoring
+        something like ``enable_thinking`` changes what the answer contains.
+        """
+        kwargs = getattr(request, "chat_template_kwargs", None)
+        if not isinstance(kwargs, Mapping):
+            return
+        if isinstance(kwargs.get("use_tts_template"), bool):
+            config.use_tts_template = bool(kwargs["use_tts_template"])
+        ignored = sorted(key for key in kwargs if key != "use_tts_template")
+        if ignored:
+            logger.warning(
+                "chat_template_kwargs %s are ignored on a duplex model: the session renders its own prompt",
+                ", ".join(ignored),
+            )
 
     async def _start_turn(self, handle: DuplexSessionHandle, request: ChatCompletionRequest) -> None:
         """Feed the prompt in as ordinary Realtime input and ask for the answer."""

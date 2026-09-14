@@ -102,11 +102,15 @@ plugin and the session runtime config to `DuplexOrchestrator` directly.
    `AsyncOmniEngine`, `OrchestratorBase` and `Orchestrator` carry only
    template seams; `tests/engine/test_duplex_import_boundary.py` checks that
    importing the turn-based stack loads no duplex module.
-4. **Duplex models are served duplex-only.** `vllm-omni serve` constructs
-   `DuplexOmni` when the pipeline declares `duplex_plugin`; the server exposes
-   `/v1/realtime?duplex=1` (alias `/v1/duplex`), `/v1/models` and `/health`,
-   and every turn-based route reports "not available". Turn-based use of the
-   same model stays available offline through `Omni` / `AsyncOmni`.
+4. **Every surface a duplex server exposes is backed by a session.**
+   `vllm-omni serve` constructs `DuplexOmni` when the pipeline declares
+   `duplex_plugin`; the server exposes `/v1/realtime?duplex=1` (alias
+   `/v1/duplex`), `POST /v1/chat/completions`, `/v1/models` and `/health`, and
+   every other turn-based route reports "not available". The chat route is
+   served by `DuplexChatCompletionsAdapter`, a pure Realtime client that runs
+   one short-lived session per request, so the framework below it never learns
+   that chat completions exist. Turn-based use of the same model stays
+   available offline through `Omni` / `AsyncOmni`.
 5. **Serving is transport only.** The websocket handler does socket I/O,
    wire-envelope validation, command translation, event rendering and the
    attachment/resume/replay bookkeeping; it holds no session state.
@@ -127,8 +131,9 @@ vllm_omni/
 │   │   ├── realtime_input.py        RealtimeEnvelope (query rules, first message), parse_resume_request
 │   │   ├── session_attachment.py    DuplexSessionAttachmentRegistry (resume tokens, replay journal)
 │   │   ├── audio_encoding.py        encode_audio, injected into DuplexOmniEngine for the plugin's data plane
+│   │   ├── chat_completions.py      DuplexChatCompletionsAdapter (/v1/chat/completions on a session per request)
 │   │   └── websocket.py             websocket send/close/receive helpers
-│   └── openai/api_server.py         builds DuplexOmni for duplex models; duplex-only app state
+│   └── openai/api_server.py         builds DuplexOmni for duplex models; session-backed app state
 ├── engine/
 │   ├── omni_engine_base.py          OmniEngineBase (stage processes, orchestrator thread, queues, RPC)
 │   ├── async_omni_engine.py         AsyncOmniEngine (turn-based request building)
@@ -343,8 +348,9 @@ follow-up PRs port them (RFC vllm-omni#7181, PR 2/3).
   `tests/entrypoints/test_duplex_omni.py`,
   `tests/entrypoints/duplex/test_duplex_serving.py`,
   `tests/entrypoints/openai/test_duplex_session_attachment.py`,
-  `tests/entrypoints/openai_api/test_duplex_api_server.py` (the duplex-only
+  `tests/entrypoints/openai_api/test_duplex_api_server.py` (the duplex
   server: pipeline probe, app state, routes, warmup gate),
+  `tests/entrypoints/duplex/test_chat_completions_adapter.py`,
   `tests/clients/**`, `tests/engine/test_duplex_import_boundary.py`,
   `tests/model_executor/models/minicpmo_4_5/duplex/**`,
   `tests/worker/test_native_duplex_hooks.py`.

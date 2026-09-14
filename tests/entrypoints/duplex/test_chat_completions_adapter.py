@@ -414,3 +414,25 @@ def test_the_route_streams_the_adapters_sse() -> None:
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.text.endswith("data: [DONE]\n\n")
     assert omni.closed == [_SESSION_ID]
+
+
+@pytest.mark.asyncio
+async def test_the_tts_template_switch_crosses_over_and_the_rest_is_reported(caplog) -> None:
+    """``use_tts_template`` is the same switch a session has; the rest of chat_template_kwargs is not."""
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(
+        _request(chat_template_kwargs={"use_tts_template": False, "enable_thinking": False})
+    )
+
+    assert omni.opened[0].use_tts_template is False
+    assert "enable_thinking" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_requested_output_modalities_reach_the_session() -> None:
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(_request(modalities=["text", "audio"]))
+
+    assert omni.opened[0].modalities == ["text", "audio"]
