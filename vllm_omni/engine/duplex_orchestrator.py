@@ -34,7 +34,7 @@ from vllm_omni.engine.duplex.session.engine_session import DuplexFenceMismatchEr
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.messages import EngineQueueMessage, OutputMessage
 from vllm_omni.engine.orchestrator import (
-    OrchestratorBase,
+    Orchestrator,
     OrchestratorRequestState,
     build_engine_core_request_from_tokens,
 )
@@ -58,8 +58,14 @@ class DuplexOrchestratorRequestState(OrchestratorRequestState):
     config_generation: int = -1
 
 
-class DuplexOrchestrator(OrchestratorBase, DuplexStagePort):
-    """Stage management for a duplex deployment; owns one ``DuplexSessionManager``."""
+class DuplexOrchestrator(Orchestrator, DuplexStagePort):
+    """Stage management for a duplex deployment; owns one ``DuplexSessionManager``.
+
+    Extends the turn-based orchestrator rather than sitting beside it, so one
+    engine serves both a duplex session and an ordinary request. The
+    dependency runs duplex -> turn-based and never the reverse, which is what
+    keeps ``Orchestrator`` free of duplex code.
+    """
 
     def __init__(
         self,
@@ -90,7 +96,8 @@ class DuplexOrchestrator(OrchestratorBase, DuplexStagePort):
         if self.session_manager.accepts(msg):
             self.session_manager.dispatch(msg)
             return True
-        return False
+        # Not a session message: it is an ordinary turn-based request.
+        return await super()._dispatch_message(msg)
 
     # Any: ``Coroutine``'s send/yield parameters, as in the ``OrchestratorBase`` seam.
     def _background_tasks(self) -> list[Coroutine[Any, Any, None]]:

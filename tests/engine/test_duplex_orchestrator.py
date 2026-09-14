@@ -437,3 +437,49 @@ async def test_reaper_runs_as_a_background_task_and_survives_one_failure(monkeyp
     await task
     assert calls["count"] >= 2
     await orchestrator._shutdown_extensions()
+
+
+# --------------------------------------------------------------------------- #
+# The hierarchy the two surfaces depend on                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_duplex_stack_extends_the_turn_based_one() -> None:
+    """One engine serves a session and an ordinary request, so duplex must extend turn-based.
+
+    Pinned because it is the kind of relationship a later tidy-up turns back
+    into siblings over a shared base. If it does, a duplex server silently
+    stops serving /v1/chat/completions: the chat service needs a real
+    EngineClient with generate(), which only the turn-based side provides.
+    """
+    from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+    from vllm_omni.engine.duplex_omni_engine import DuplexOmniEngine
+    from vllm_omni.engine.orchestrator import Orchestrator
+    from vllm_omni.entrypoints.async_omni import AsyncOmni
+    from vllm_omni.entrypoints.duplex_omni import DuplexOmni
+
+    assert issubclass(DuplexOrchestrator, Orchestrator)
+    assert issubclass(DuplexOmniEngine, AsyncOmniEngine)
+    assert issubclass(DuplexOmni, AsyncOmni)
+    # What the chat route actually needs off the engine client.
+    assert hasattr(DuplexOmni, "generate")
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_message_reaches_the_turn_based_handler() -> None:
+    """The duplex orchestrator consumes session messages and passes the rest down.
+
+    Without the fall-through, an ordinary add_request on a duplex engine is
+    silently dropped and the chat request that sent it hangs forever.
+    """
+    orchestrator, _clients, _rpc_q, _output_q = _build()
+    handled: list[str] = []
+
+    async def _turn_based(msg: object) -> None:
+        handled.append(getattr(msg, "type", ""))
+
+    orchestrator._handle_add_request = _turn_based  # type: ignore[method-assign]
+    msg = SimpleNamespace(type="add_request")
+
+    assert await orchestrator._dispatch_message(msg) is True
+    assert handled == ["add_request"], "an add_request must reach Orchestrator, not be dropped"

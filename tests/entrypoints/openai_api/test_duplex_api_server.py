@@ -33,7 +33,6 @@ from starlette.websockets import WebSocketDisconnect
 
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni
 from vllm_omni.entrypoints.openai import api_server
@@ -78,8 +77,9 @@ _DUPLEX_APP_STATE_KEYS = {
     "server_load_metrics",
 }
 #: Every turn-based service, plus the Realtime route that is not the duplex one.
-#: ``openai_serving_chat`` is absent: it is wired, but to the duplex adapter
-#: rather than to the turn-based chat service.
+#: ``openai_serving_chat`` is absent: a duplex engine also serves chat, through
+#: the ordinary turn-based service, because DuplexOmni extends AsyncOmni.
+#: ``online_renderer`` is absent for the same reason -- the chat service needs it.
 _DUPLEX_MUST_BE_NONE = _DUPLEX_APP_STATE_KEYS - {
     "engine_client",
     "log_stats",
@@ -90,6 +90,7 @@ _DUPLEX_MUST_BE_NONE = _DUPLEX_APP_STATE_KEYS - {
     "openai_serving_models",
     "openai_serving_duplex",
     "openai_serving_chat",
+    "online_renderer",
     "enable_server_load_tracking",
     "server_load_metrics",
 }
@@ -224,7 +225,7 @@ async def test_duplex_app_state_wires_only_the_session_surfaces(monkeypatch) -> 
     unexpectedly_set = sorted(key for key in _DUPLEX_MUST_BE_NONE if getattr(state, key) is not None)
     assert not unexpectedly_set, f"turn-based services wired into a duplex server: {unexpectedly_set}"
     assert isinstance(state.openai_serving_duplex, OmniDuplexSessionHandler)
-    assert isinstance(state.openai_serving_chat, DuplexChatCompletionsAdapter)
+    assert state.openai_serving_chat is not None
     assert state.engine_client is engine
     assert state.vllm_config is engine._vllm_config
 

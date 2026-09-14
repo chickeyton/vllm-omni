@@ -44,7 +44,7 @@ from vllm_omni.engine.duplex.messages import (
     DuplexSessionEventMessage,
 )
 from vllm_omni.engine.duplex_omni_engine import DuplexOmniEngine
-from vllm_omni.entrypoints.async_omni_base import AsyncOmniBase
+from vllm_omni.entrypoints.async_omni import AsyncOmni
 
 logger = init_logger(__name__)
 
@@ -269,7 +269,7 @@ class DuplexSessionHandle:
         self._outbox.put_nowait(None)
 
 
-class DuplexOmni(AsyncOmniBase):
+class DuplexOmni(AsyncOmni):
     """Async Python API for full-duplex models (see module docstring).
 
     Construct it like ``AsyncOmni``. The pipeline must declare
