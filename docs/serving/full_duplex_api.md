@@ -32,12 +32,20 @@ available". Turn-based use of such a model stays available offline through the
 Python API (`Omni` / `AsyncOmni`).
 
 `/v1/chat/completions` is served by an adapter that runs one short-lived
-duplex session per request: the messages go in as ordinary Realtime input
-(`conversation.item.create` for text and images, `input_audio_buffer.append` +
-`commit` for audio) and the answer is read off the session. No model plugin
-and no capability flag is involved, so any duplex model gets the route; one
-that should not serve it lists it in the deploy configuration's
-`endpoint_restrictions`.
+duplex session per request. How the prompt gets in depends on what it is, and
+the difference is the model's rather than the adapter's:
+
+- **Speech is a turn.** Audio content is appended to the input buffer and
+  committed, exactly as a websocket client does it.
+- **Text is not.** A model-native model decides to speak from the audio it
+  hears, so silence is its signal *not* to take a turn and a text prompt has no
+  turn to start. It reaches the model as the session's seeded opening turn
+  (`initial_user_text`), and the session is given silence units to generate on.
+
+Only a model that declares `DuplexCapabilities.supports_chat_completions` can
+be reached with text; a request to any other is refused with 400 rather than
+left waiting out the session idle timeout. A model that should not serve the
+route at all lists it in the deploy configuration's `endpoint_restrictions`.
 
 Two consequences of that design are user-visible:
 

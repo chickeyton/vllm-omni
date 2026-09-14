@@ -107,9 +107,12 @@ plugin and the session runtime config to `DuplexOrchestrator` directly.
    `duplex_plugin`; the server exposes `/v1/realtime?duplex=1` (alias
    `/v1/duplex`), `POST /v1/chat/completions`, `/v1/models` and `/health`, and
    every other turn-based route reports "not available". The chat route is
-   served by `DuplexChatCompletionsAdapter`, a pure Realtime client that runs
-   one short-lived session per request, so the framework below it never learns
-   that chat completions exist. Turn-based use of the same model stays
+   served by `DuplexChatCompletionsAdapter`, a Realtime client that runs one
+   short-lived session per request: speech becomes a committed turn, text is
+   seeded as the session's opening turn because a model-native model takes a
+   turn only when it hears speech. Whether a model can be reached with text is
+   `DuplexCapabilities.supports_chat_completions`; one that cannot is refused
+   at once rather than left to idle out. Turn-based use of the same model stays
    available offline through `Omni` / `AsyncOmni`.
 5. **Serving is transport only.** The websocket handler does socket I/O,
    wire-envelope validation, command translation, event rendering and the
