@@ -166,6 +166,21 @@ def _minimal_args(**overrides) -> SimpleNamespace:
         enable_server_load_tracking=False,
         trust_remote_code=True,
         deploy_config=None,
+        # What the chat service reads when a duplex model also serves chat.
+        chat_template=None,
+        chat_template_content_format="auto",
+        trust_request_chat_template=False,
+        default_chat_template_kwargs=None,
+        response_role="assistant",
+        return_tokens_as_token_ids=False,
+        enable_auto_tool_choice=False,
+        exclude_tools_when_tool_choice_none=False,
+        tool_call_parser=None,
+        structured_outputs_config=SimpleNamespace(reasoning_parser=None),
+        enable_prompt_tokens_details=False,
+        enable_force_include_usage=False,
+        enable_log_outputs=False,
+        enable_log_deltas=False,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
