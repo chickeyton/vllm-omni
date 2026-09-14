@@ -73,6 +73,14 @@ logger = init_logger(__name__)
 #: Sample rate of the silence units a seeded turn is given to generate on.
 _PRIMING_SAMPLE_RATE_HZ = 16000
 
+#: Default session instruction for a chat request that brings no system
+#: message. A duplex session's own default describes a conversation to take
+#: part in, which makes the model continue the transcript rather than answer;
+#: this is the wording verified to make it answer instead. "briefly" is not
+#: style preference: a duplex session generates per audio unit, so length is
+#: latency here.
+_CHAT_INSTRUCTIONS = "You are a helpful assistant. Answer the user's question directly and briefly."
+
 #: Chat content parts carrying audio input, by OpenAI content-part type.
 _AUDIO_PART_TYPES = frozenset({"input_audio", "audio"})
 
@@ -224,8 +232,13 @@ class DuplexChatCompletionsAdapter:
         config = DuplexSessionConfig(model=request.model or self._model_name, overlap_policy="listen_only")
         config.extra_body = self._session_extra_body(request)
         instructions, prompt = self._split_messages(request)
-        if instructions:
-            config.instructions = instructions
+        # A duplex session's own default instruction describes a conversation,
+        # not a question being answered, and under it the model continues the
+        # transcript instead: "Say OK." comes back as "Say OK." rather than
+        # "OK." Saying what the turn is for is what makes it answer -- measured,
+        # same prompt: " What is 2+2? Answer in one word." -> " 4". The caller's
+        # own system message replaces this entirely.
+        config.instructions = instructions or _CHAT_INSTRUCTIONS
         if prompt:
             # The session's opening turn. A model-native session is seeded once,
             # at open, so the whole prompt goes in here rather than arriving as

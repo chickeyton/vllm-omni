@@ -144,7 +144,7 @@ async def test_a_text_prompt_seeds_the_session_and_is_primed_with_silence() -> N
     )
 
     config = omni.opened[0]
-    assert config.instructions == "be brief"
+    assert config.instructions == "be brief"  # the caller's system message wins
     assert config.initial_user_text == "hello"
     assert config.extra_body["auto_response"] is True
     handle = omni.handle
@@ -547,3 +547,21 @@ async def test_extra_body_reaches_the_session_so_audio_output_is_askable() -> No
     )
 
     assert omni.opened[0].extra_body["ref_audio"] == "/tmp/voice.wav"
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_no_system_message_gets_a_chat_shaped_instruction() -> None:
+    """The session default describes a conversation, and the model then continues it.
+
+    Measured against a real MiniCPM-o server: under the duplex default
+    instruction, "Say OK." comes back as " Say OK." and "What is 2+2? Answer in
+    one word." as itself. Told what the turn is for, the same prompt answers
+    " 4". A chat request that brings no system message must not inherit the
+    conversation default.
+    """
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(_request())
+
+    assert omni.opened[0].instructions
+    assert "answer" in omni.opened[0].instructions.lower()
