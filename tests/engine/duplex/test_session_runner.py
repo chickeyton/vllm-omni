@@ -832,11 +832,72 @@ async def test_turn_mode_commit_with_response_create_starts_one_response() -> No
 
 
 @pytest.mark.asyncio
-async def test_response_create_without_committed_audio_is_rejected() -> None:
+async def test_response_create_with_no_input_at_all_is_rejected() -> None:
+    """Nothing committed and no items: refuse rather than emit an empty turn."""
     h = await open_harness(auto_response=False)
     try:
         events = await h.run(commands.CreateResponse(event_id="evt-resp"))
         assert types(events) == ["error"]
+        assert events[0].code == "response_create_without_input"
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_an_item_only_response_create_is_refused_not_left_hanging() -> None:
+    """Items are context, not a turn, and the refusal must be immediate.
+
+    A model-native model decides to speak from the audio it hears, so a turn
+    with no audio in it is one it never answers. Opening a response anyway
+    submits work that never completes, and the caller only finds out when the
+    session idles out -- observed as a 300-second HTTP 500 against a real
+    server. Refusing costs the same information and none of the wait.
+    """
+    h = await open_harness(auto_response=False)
+    try:
+        await h.run(
+            commands.CreateItem(
+                item={
+                    "id": "item_prompt",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "What is 2+2?"}],
+                }
+            )
+        )
+        events = await h.run(commands.CreateResponse(event_id="evt-resp"))
+        assert types(events) == ["error"], events
+        assert events[0].code == "text_only_turn_unsupported"
+        assert not h.port.submissions, "nothing may be submitted for a turn the model cannot answer"
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_conversation_items_are_consumed_by_the_turn_they_start() -> None:
+    """The items belong to the turn that answered them, not to the next one.
+
+    Without this, a session that once received an item would let every later
+    ``response.create`` start an empty turn off the same stale input.
+    """
+    h = await open_harness(auto_response=False)
+    try:
+        await h.run(
+            commands.CreateItem(
+                item={
+                    "id": "item_hi",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            )
+        )
+        assert h.session.unanswered_user_items() == 1
+        # Consumed by the response.create that refused them: a later one must
+        # not see the same stale input and refuse for a second time.
+        await h.run(commands.CreateResponse(event_id="evt-first"))
+        assert h.session.unanswered_user_items() == 0
+        events = await h.run(commands.CreateResponse(event_id="evt-second"))
         assert events[0].code == "response_create_without_input"
     finally:
         await close_harness(h)

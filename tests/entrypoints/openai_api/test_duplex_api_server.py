@@ -33,6 +33,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
+from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni
 from vllm_omni.entrypoints.openai import api_server
@@ -77,6 +78,8 @@ _DUPLEX_APP_STATE_KEYS = {
     "server_load_metrics",
 }
 #: Every turn-based service, plus the Realtime route that is not the duplex one.
+#: ``openai_serving_chat`` is absent: it is wired, but to the duplex adapter
+#: rather than to the turn-based chat service.
 _DUPLEX_MUST_BE_NONE = _DUPLEX_APP_STATE_KEYS - {
     "engine_client",
     "log_stats",
@@ -86,6 +89,7 @@ _DUPLEX_MUST_BE_NONE = _DUPLEX_APP_STATE_KEYS - {
     "vllm_config",
     "openai_serving_models",
     "openai_serving_duplex",
+    "openai_serving_chat",
     "enable_server_load_tracking",
     "server_load_metrics",
 }
@@ -96,6 +100,7 @@ _DUPLEX_MUST_BE_WIRED = {
     "vllm_config",
     "openai_serving_models",
     "openai_serving_duplex",
+    "openai_serving_chat",
 }
 
 
@@ -197,12 +202,14 @@ def test_duplex_model_probe_propagates_resolution_errors(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplex_app_state_wires_only_the_session_handler(monkeypatch) -> None:
-    """Lock the duplex ``app.state``: the session handler is live, every turn-based service is None.
+async def test_duplex_app_state_wires_only_the_session_surfaces(monkeypatch) -> None:
+    """Lock the duplex ``app.state``: the two session-backed surfaces are live, every turn-based service is None.
 
     Fails if a turn-based service is wired into a duplex server (its route
     would answer instead of reporting "not available"), or if a key the routes
-    read disappears.
+    read disappears. ``openai_serving_chat`` is the one shared name: the route
+    is served, but by the adapter that runs it on a duplex session, never by
+    the turn-based chat service.
     """
     monkeypatch.setattr(api_server, "OpenAIServingModels", _FakeModels)
     engine = _FakeDuplexOmni()
@@ -217,6 +224,7 @@ async def test_duplex_app_state_wires_only_the_session_handler(monkeypatch) -> N
     unexpectedly_set = sorted(key for key in _DUPLEX_MUST_BE_NONE if getattr(state, key) is not None)
     assert not unexpectedly_set, f"turn-based services wired into a duplex server: {unexpectedly_set}"
     assert isinstance(state.openai_serving_duplex, OmniDuplexSessionHandler)
+    assert isinstance(state.openai_serving_chat, DuplexChatCompletionsAdapter)
     assert state.engine_client is engine
     assert state.vllm_config is engine._vllm_config
 

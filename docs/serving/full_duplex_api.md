@@ -24,11 +24,44 @@ capability gates, see the [Realtime Duplex API guide](realtime_duplex_api.md).
 A model is served full duplex when its registered pipeline declares a
 `duplex_plugin` (the model's `DuplexModelPlugin`). That declaration alone
 decides it: `vllm-omni serve` constructs `DuplexOmni` instead of `AsyncOmni`,
-and the server is **duplex-only**: it exposes `/v1/realtime?duplex=1` (and its
-alias `/v1/duplex`), `/v1/models` and `/health`; every turn-based HTTP route
-(`/v1/chat/completions`, speech, batch, ...) answers "not available".
-Turn-based use of such a model stays available offline through the Python API
-(`Omni` / `AsyncOmni`).
+and every surface the server exposes is backed by a duplex session. It serves
+`/v1/realtime?duplex=1` (and its alias `/v1/duplex`),
+`POST /v1/chat/completions`, `/v1/models` and `/health`; every other
+turn-based HTTP route (speech, batch, embeddings, video, ...) answers "not
+available". Turn-based use of such a model stays available offline through the
+Python API (`Omni` / `AsyncOmni`).
+
+`/v1/chat/completions` is served by an adapter that runs one short-lived
+duplex session per request. How the prompt gets in depends on what it is, and
+the difference is the model's rather than the adapter's:
+
+- **Speech is a turn.** Audio content is appended to the input buffer and
+  committed, exactly as a websocket client does it.
+- **Text is not.** A model-native model decides to speak from the audio it
+  hears, so silence is its signal *not* to take a turn and a text prompt has no
+  turn to start. It reaches the model as the session's seeded opening turn
+  (`initial_user_text`), and the session is given silence units to generate on.
+
+Only a model that declares `DuplexCapabilities.supports_chat_completions` can
+be reached with text; a request to any other is refused with 400 rather than
+left waiting out the session idle timeout. A model that should not serve the
+route at all lists it in the deploy configuration's `endpoint_restrictions`.
+
+Two consequences of that design are user-visible:
+
+- Every chat request holds an admission slot for its lifetime, so
+  `duplex_session.max_sessions` bounds HTTP concurrency as well as websocket
+  sessions; beyond it the request is refused with HTTP 503.
+- The answer arrives at the model's real-time pace rather than at turn-based
+  speed, because a model-native session generates per audio unit.
+
+`n > 1`, `logprobs` and `tools` are refused with HTTP 400: one request is one
+duplex turn, and those have no representation in it. So are image and video
+content parts -- a Realtime conversation item carries text and audio only, and
+answering without the image the caller sent would be worse than refusing.
+`chat_template_kwargs.use_tts_template` is honoured (the session config has the
+same switch); its other keys are logged as ignored, because a duplex session
+renders its own prompt.
 
 The deploy configuration of such a model must agree:
 

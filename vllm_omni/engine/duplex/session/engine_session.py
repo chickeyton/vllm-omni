@@ -88,6 +88,10 @@ class PlaybackLedger:
 @dataclass
 class ConversationHistory:
     messages: list[dict[str, object]] = field(default_factory=list)
+    #: User items added by ``conversation.item.create`` that no response has
+    #: answered yet. A turn can start from these alone, the way the Realtime
+    #: protocol allows, without any audio having been committed.
+    unanswered_user_items: int = 0
     item_ids: dict[str, dict[str, object]] = field(default_factory=dict)
     history_item_placeholders: dict[str, dict[str, object]] = field(default_factory=dict)
     item_audio_text_marks: dict[str, list[DuplexAssistantAudioTextMark]] = field(default_factory=dict)
@@ -180,6 +184,9 @@ class DuplexEngineSession:
             self.accepted_fence = self.fence
         else:
             self.accept_fence(self.fence)
+        if self.config.initial_user_text:
+            # Seeded text is user input like any other: it waits for a response.
+            self.notify_new_user_item()
 
     # ---- identity / fence ----
 
@@ -515,8 +522,11 @@ class DuplexEngineSession:
         return MappingProxyType(dict(self._conversation.pending_truncations_ms))
 
     def replace_config(self, config: DuplexSessionConfig) -> None:
+        previous_seed = self.config.initial_user_text
         self.config = config
         self.config_generation += 1
+        if config.initial_user_text and config.initial_user_text != previous_seed:
+            self.notify_new_user_item()
 
     def transition_turn(self, state: DuplexTurnState) -> None:
         self.turn_state = state
@@ -546,6 +556,18 @@ class DuplexEngineSession:
 
     def append_history_message(self, message: dict[str, object]) -> None:
         self._conversation.messages.append(message)
+
+    def notify_new_user_item(self) -> None:
+        """Record a user item that a later ``response.create`` may answer."""
+        self._conversation.unanswered_user_items += 1
+
+    def unanswered_user_items(self) -> int:
+        """How many user items are waiting for a response."""
+        return self._conversation.unanswered_user_items
+
+    def reset_unanswered_user_items(self) -> None:
+        """A turn has started: the pending items are now its input."""
+        self._conversation.unanswered_user_items = 0
 
     @property
     def pending_input_bytes(self) -> int:
