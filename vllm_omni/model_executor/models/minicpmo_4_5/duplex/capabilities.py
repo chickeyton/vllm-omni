@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from vllm_omni.engine.duplex.config import DuplexCapabilities
 
-
 #: Silence units a text-seeded turn is given to generate on. The model speaks
 #: per audio unit, so a seeded turn still needs a clock; three units is what
 #: the benchmark harness uses for the same purpose.
@@ -40,7 +39,7 @@ def minicpmo45_native_capabilities(*, max_sessions: int = 1) -> DuplexCapabiliti
         # The session template ends at the assistant turn, so seeded text puts
         # the model in position to answer; it still generates per audio unit,
         # hence the priming units.
-        supports_chat_completions=True,  # honours initial_user_text
+        supports_chat_completions=True,  # via initial_user_text
         text_turn_priming_units=MINICPMO45_TEXT_TURN_PRIMING_UNITS,
         requires_model_runner_kv=True,
         requires_native_stage_role=True,
