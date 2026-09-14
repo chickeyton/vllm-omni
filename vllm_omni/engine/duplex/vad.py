@@ -3,8 +3,8 @@
 
 """Silero server VAD for the engine-resident duplex session.
 
-The detector is split the way ``entrypoints/duplex/server_vad.py`` split it
-upstream, because the split is what makes one model serve many sessions: a
+The detector keeps the split upstream's serving-side ``server_vad`` module
+used, because the split is what makes one model serve many sessions: a
 **backend** scores one 512-sample frame and is otherwise stateless, and the
 per-stream state -- the partial frame, the model state, the endpoint counters --
 belongs to :class:`SileroStreamingVAD`, one per session.

@@ -62,6 +62,22 @@ def _valid_vad_number(value: object, *, minimum: float, maximum: float | None = 
     )
 
 
+#: Every field a ``server_vad`` object may carry. Unknown keys are refused
+#: rather than ignored: a misspelled tuning knob that silently does nothing is
+#: worse than a rejected session, because the endpointing still *looks* applied.
+_SERVER_VAD_FIELDS = frozenset(
+    {
+        "type",
+        "threshold",
+        "prefix_padding_ms",
+        "silence_duration_ms",
+        "create_response",
+        "interrupt_response",
+        "min_speech_duration_ms",
+    }
+)
+
+
 def validate_realtime_turn_detection(session_payload: Mapping[str, object]) -> str | None:
     """Validate the ``turn_detection`` object of a Realtime session payload (None when valid)."""
     field, turn_detection = configured_realtime_turn_detection(session_payload)
@@ -76,6 +92,9 @@ def validate_realtime_turn_detection(session_payload: Mapping[str, object]) -> s
     if isinstance(turn_detection, dict):
         if turn_detection.get("type") != "server_vad":
             return f"{field}.type must be 'server_vad'"
+        unknown = sorted(set(turn_detection) - _SERVER_VAD_FIELDS)
+        if unknown:
+            return f"Unknown {field} field(s): {', '.join(unknown)}"
         threshold = turn_detection.get("threshold", 0.5)
         if not _valid_vad_number(threshold, minimum=SILERO_VAD_MIN_THRESHOLD, strict=True, maximum=1):
             return f"{field}.threshold must be greater than {SILERO_VAD_MIN_THRESHOLD} and at most 1"

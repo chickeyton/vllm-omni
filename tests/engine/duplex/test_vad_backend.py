@@ -4,22 +4,26 @@
 """The engine-side Silero VAD: backend selection and endpoint rules.
 
 The endpoint rules are the part worth pinning hardest. They were reimplemented
-when turn detection moved into the engine, and drifted from the serving-side
+when turn detection moved into the engine, and drifted from upstream's
 ``ThresholdEndpointPolicy`` in two ways that only show up mid-utterance: a loud
 frame used to cancel an in-progress silence timer, and ``audio_end_ms`` used to
-exclude the trailing silence OpenAI says it should include. The first test here
-runs both implementations over the same probability sequences so the two cannot
-drift apart again silently.
+exclude the trailing silence OpenAI says it should include. The parity cases
+below hold upstream's own outputs, so neither can come back unnoticed.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from vllm_omni.engine.duplex.turn_detection import validate_realtime_turn_detection
 from vllm_omni.engine.duplex.vad import (
     SILERO_VAD_SHA256,
     ServerVADUnavailableError,
@@ -53,51 +57,48 @@ def _drive(config: SileroVADConfig, probabilities: list[float]) -> list[tuple[st
 # Parity with the serving-side policy this was ported from                    #
 # --------------------------------------------------------------------------- #
 
+#: Probability sequences with the endpoint events upstream's
+#: ``ThresholdEndpointPolicy`` produced for them, captured from
+#: ``entrypoints/duplex/server_vad.py`` at `e2d2617f` before that module was
+#: removed. Golden rather than computed because the oracle no longer ships: the
+#: serving layer is transport only, so the VAD it used to carry is gone. Any
+#: drift in the engine's rules still breaks these.
 _PARITY_CASES = {
     "one utterance": (
         [0.0, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         {"threshold": 0.5, "prefix_padding_ms": 0, "silence_duration_ms": 100, "min_speech_duration_ms": 32},
+        [("start", 32), ("stop", 256)],
     ),
     "prefix padding reaches back": (
         [0.0, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0],
         {"threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 64, "min_speech_duration_ms": 32},
+        [("start", 0), ("stop", 160)],
     ),
     "loud frames inside the silence timer": (
         [0.9, 0.9, 0.1, 0.45, 0.1, 0.1, 0.1],
         {"threshold": 0.5, "prefix_padding_ms": 0, "silence_duration_ms": 96, "min_speech_duration_ms": 32},
+        [("start", 0), ("stop", 160)],
     ),
     "min speech duration rejects a blip": (
         [0.9, 0.0, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0],
         {"threshold": 0.5, "prefix_padding_ms": 0, "silence_duration_ms": 64, "min_speech_duration_ms": 96},
+        [("start", 64), ("stop", 224)],
     ),
     "negative threshold floor at a low threshold": (
         [0.9, 0.9, 0.1, 0.1, 0.1, 0.1],
         {"threshold": 0.16, "prefix_padding_ms": 0, "silence_duration_ms": 64, "min_speech_duration_ms": 32},
+        [("start", 0)],
     ),
 }
 
 
-@pytest.mark.parametrize(("probabilities", "options"), _PARITY_CASES.values(), ids=list(_PARITY_CASES))
+@pytest.mark.parametrize(("probabilities", "options", "expected"), _PARITY_CASES.values(), ids=list(_PARITY_CASES))
 def test_endpoint_decisions_match_the_serving_side_policy(
-    probabilities: list[float], options: dict[str, object]
+    probabilities: list[float],
+    options: dict[str, object],
+    expected: list[tuple[str, int | None]],
 ) -> None:
-    """The engine detector and ``ThresholdEndpointPolicy`` must agree frame for frame."""
-    server_vad = pytest.importorskip(
-        "vllm_omni.entrypoints.duplex.server_vad",
-        reason="the serving-side policy is the oracle for this parity check",
-    )
-    policy = server_vad.ThresholdEndpointPolicy(
-        server_vad.ServerVADConfig(type="server_vad", **options),
-        sample_rate_hz=SAMPLE_RATE_HZ,
-    )
-    expected: list[tuple[str, int | None]] = []
-    for index, probability in enumerate(probabilities):
-        decision = policy.update(probability, frame_start_sample=index * FRAME, frame_samples=FRAME)
-        if decision.speech_started:
-            expected.append(("start", decision.audio_start_ms))
-        if decision.speech_stopped:
-            expected.append(("stop", decision.audio_end_ms))
-
+    """The engine detector reproduces the policy server VAD shipped with upstream."""
     assert _drive(SileroVADConfig(**options), probabilities) == expected
 
 
@@ -254,3 +255,125 @@ def test_the_onnx_backend_is_shared_by_every_session() -> None:
     probability, next_state = backend.infer(np.zeros(FRAME, dtype=np.float32), first)
     assert 0.0 <= probability <= 1.0
     assert next_state is not first
+
+
+def test_the_onnx_backend_holds_the_upstream_silero_v62_contract(monkeypatch, tmp_path) -> None:
+    """Pin the ONNX call shape without needing the real artifact or runtime.
+
+    The context carry is the part worth pinning: Silero v6.2 is fed 64 samples
+    of the previous frame ahead of the current 512, and that tail travels in the
+    caller's state rather than inside the session -- which is exactly what lets
+    one session serve every duplex session at once.
+    """
+    sessions: list[FakeInferenceSession] = []
+
+    class FakeSessionOptions:
+        inter_op_num_threads = 0
+        intra_op_num_threads = 0
+
+    class FakeInferenceSession:
+        def __init__(self, path: str, *, providers: list[str], sess_options: object) -> None:
+            self.providers = providers
+            self.sess_options = sess_options
+            self.calls: list[dict[str, np.ndarray]] = []
+            self.run_barrier: threading.Barrier | None = None
+            sessions.append(self)
+
+        def get_inputs(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(name=name) for name in ("input", "state", "sr")]
+
+        def run(self, _outputs: object, inputs: dict[str, np.ndarray]) -> list[np.ndarray]:
+            self.calls.append({name: np.array(value, copy=True) for name, value in inputs.items()})
+            if self.run_barrier is not None:
+                self.run_barrier.wait(timeout=5)
+            return [
+                np.asarray([[0.75]], dtype=np.float32),
+                np.full((2, 1, 128), len(self.calls), dtype=np.float32),
+            ]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(SessionOptions=FakeSessionOptions, InferenceSession=FakeInferenceSession),
+    )
+
+    model_path = tmp_path / "silero_vad.onnx"
+    model_path.write_bytes(b"fake-model")
+    backend = SileroVADBackend(model_path)
+    session = sessions[0]
+
+    # Single-threaded on purpose: many sessions share this one ORT session, so
+    # it must not fan out per call.
+    assert session.providers == ["CPUExecutionProvider"]
+    assert session.sess_options.inter_op_num_threads == 1
+    assert session.sess_options.intra_op_num_threads == 1
+    # Warm-up already ran: 64 context + 512 frame.
+    assert session.calls[0]["input"].shape == (1, 576)
+    assert session.calls[0]["state"].shape == (2, 1, 128)
+    assert session.calls[0]["sr"].item() == SAMPLE_RATE_HZ
+
+    state = backend.new_state()
+    first_frame = np.arange(backend.frame_samples, dtype=np.float32)
+    probability, state = backend.infer(first_frame, state)
+    first_call = session.calls[1]
+
+    assert probability == pytest.approx(0.75)
+    np.testing.assert_array_equal(
+        first_call["input"][:, : backend.context_samples],
+        np.zeros((1, backend.context_samples), dtype=np.float32),
+    )
+    np.testing.assert_array_equal(first_call["input"][:, backend.context_samples :], first_frame[None, :])
+
+    second_frame = -first_frame
+    backend.infer(second_frame, state)
+    second_call = session.calls[2]
+    # The previous frame's tail becomes this frame's context.
+    np.testing.assert_array_equal(
+        second_call["input"][:, : backend.context_samples],
+        first_frame[None, -backend.context_samples :],
+    )
+    np.testing.assert_array_equal(second_call["state"], np.full((2, 1, 128), 2, dtype=np.float32))
+
+    # Two sessions may enter the shared ORT session at the same time.
+    session.run_barrier = threading.Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(backend.infer, first_frame, backend.new_state()),
+            executor.submit(backend.infer, second_frame, backend.new_state()),
+        ]
+        assert [future.result()[0] for future in futures] == pytest.approx([0.75, 0.75])
+
+
+# --------------------------------------------------------------------------- #
+# Session payload validation                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unknown_server_vad_field_is_refused() -> None:
+    """A misspelled knob that silently does nothing is worse than a refusal.
+
+    The endpointing would still look configured while running on defaults.
+    """
+    error = validate_realtime_turn_detection({"turn_detection": {"type": "server_vad", "semantic_eagerness": "high"}})
+    assert error is not None
+    assert "semantic_eagerness" in error
+
+
+def test_the_documented_server_vad_fields_are_all_accepted() -> None:
+    assert (
+        validate_realtime_turn_detection(
+            {
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.6,
+                    "prefix_padding_ms": 200,
+                    "silence_duration_ms": 400,
+                    "create_response": True,
+                    "interrupt_response": True,
+                    "min_speech_duration_ms": 120,
+                },
+                "overlap_policy": "barge_in_on_speech",
+            }
+        )
+        is None
+    )
