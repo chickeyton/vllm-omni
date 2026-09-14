@@ -51,7 +51,10 @@ representation in one duplex turn and are refused with HTTP 400 -- a Realtime
 conversation item carries text and audio only. `temperature`,
 `max_completion_tokens`, `modalities` and
 `chat_template_kwargs.use_tts_template` apply; the other
-`chat_template_kwargs` keys are logged as ignored. A model that should not
+`chat_template_kwargs` keys are logged as ignored. `extra_body` is passed to
+the session unchanged, exactly as a websocket client's session `extra_body`
+is, which is how a request asking for `modalities: ["text", "audio"]` supplies
+the `ref_audio` MiniCPM-o requires for audio output. A model that should not
 serve the route lists it in the deploy config's `endpoint_restrictions`,
 exactly as a turn-based model does.
 
