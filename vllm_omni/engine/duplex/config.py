@@ -103,6 +103,16 @@ class DuplexCapabilities:
     supports_session_resume: bool = False
     session_admission_mode: str = "serving_managed"
     supports_audio_truncate: bool = False
+    #: Whether this model can serve ``/v1/chat/completions`` on a duplex
+    #: session. That needs one thing the protocol cannot assume: the model
+    #: honours ``DuplexSessionConfig.initial_user_text``, so a turn can be
+    #: seeded from text. A model-native model decides to speak from the audio
+    #: it hears, and silence is its signal *not* to take a turn, so without
+    #: seeding a text prompt has no representation and the turn never
+    #: completes. ``text_turn_priming_units`` is how many silence units such a
+    #: seeded turn must be given to generate on -- it still speaks per unit.
+    supports_chat_completions: bool = False
+    text_turn_priming_units: int = 0
     requires_model_runner_kv: bool = False
     requires_native_stage_role: bool = False
     adapter_patterns: list[str] = field(default_factory=lambda: ["chunk_group_append"])
@@ -209,6 +219,10 @@ class DuplexSessionConfig:
     model: str | None = None
     modalities: list[str] = field(default_factory=lambda: ["text", "audio"])
     instructions: str | None = None
+    #: Text the session treats as the user's opening turn. A caller that cannot
+    #: reach the model by speech (an HTTP request, a batch job) puts its prompt
+    #: here; ``supports_text_only_turn`` says whether the model can answer it.
+    initial_user_text: str | None = None
     voice: str | None = None
     ref_audio: str | None = None
     response_format: str = "wav"
@@ -229,6 +243,7 @@ class DuplexSessionConfig:
             "model": self.model,
             "modalities": list(self.modalities),
             "instructions": self.instructions,
+            "initial_user_text": self.initial_user_text,
             "voice": self.voice,
             "ref_audio": self.ref_audio,
             "response_format": self.response_format,
@@ -262,6 +277,8 @@ class DuplexSessionConfig:
             config.model = source["model"]
         if isinstance(source.get("instructions"), str):
             config.instructions = source["instructions"]
+        if isinstance(source.get("initial_user_text"), str):
+            config.initial_user_text = source["initial_user_text"]
         if isinstance(source.get("voice"), str):
             config.voice = source["voice"]
         if isinstance(source.get("ref_audio"), str):
