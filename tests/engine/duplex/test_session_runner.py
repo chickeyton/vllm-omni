@@ -844,12 +844,14 @@ async def test_response_create_with_no_input_at_all_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_response_create_answers_conversation_items_with_no_audio() -> None:
-    """The Realtime shape: build the turn from items, then ask for a response.
+async def test_an_item_only_response_create_is_refused_not_left_hanging() -> None:
+    """Items are context, not a turn, and the refusal must be immediate.
 
-    A model-native session still generates per audio unit, so the runner primes
-    the turn with the model's own silence unit. Before this was allowed, a
-    caller with a text prompt had no way to start a turn at all.
+    A model-native model decides to speak from the audio it hears, so a turn
+    with no audio in it is one it never answers. Opening a response anyway
+    submits work that never completes, and the caller only finds out when the
+    session idles out -- observed as a 300-second HTTP 500 against a real
+    server. Refusing costs the same information and none of the wait.
     """
     h = await open_harness(auto_response=False)
     try:
@@ -864,8 +866,9 @@ async def test_response_create_answers_conversation_items_with_no_audio() -> Non
             )
         )
         events = await h.run(commands.CreateResponse(event_id="evt-resp"))
-        assert "error" not in types(events), events
-        assert h.port.submissions, "an item-only response.create must submit a turn"
+        assert types(events) == ["error"], events
+        assert events[0].code == "text_only_turn_unsupported"
+        assert not h.port.submissions, "nothing may be submitted for a turn the model cannot answer"
     finally:
         await close_harness(h)
 
@@ -890,8 +893,12 @@ async def test_conversation_items_are_consumed_by_the_turn_they_start() -> None:
             )
         )
         assert h.session.unanswered_user_items() == 1
+        # Consumed by the response.create that refused them: a later one must
+        # not see the same stale input and refuse for a second time.
         await h.run(commands.CreateResponse(event_id="evt-first"))
         assert h.session.unanswered_user_items() == 0
+        events = await h.run(commands.CreateResponse(event_id="evt-second"))
+        assert events[0].code == "response_create_without_input"
     finally:
         await close_harness(h)
 

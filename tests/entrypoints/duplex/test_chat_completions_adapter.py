@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
-from vllm_omni.engine.duplex.config import DuplexSessionConfig
+from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig
 from vllm_omni.engine.duplex.events import (
     AudioDelta,
     DuplexEvent,
@@ -43,8 +43,16 @@ _PCM = b"\x01\x02" * 8
 class FakeHandle:
     """Records the wire verbs the adapter submits and replays a scripted response."""
 
-    def __init__(self, session_id: str, script: list[DuplexEvent]) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        script: list[DuplexEvent],
+        capabilities: DuplexCapabilities | None = None,
+    ) -> None:
         self.session_id = session_id
+        self.capabilities = capabilities or DuplexCapabilities(
+            supports_chat_completions=True, text_turn_priming_units=3
+        )
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.closed = False
         self._script = list(script)
@@ -71,19 +79,24 @@ class FakeHandle:
 
 
 class FakeOmni:
-    def __init__(self, script: list[DuplexEvent] | None = None) -> None:
+    def __init__(
+        self,
+        script: list[DuplexEvent] | None = None,
+        capabilities: DuplexCapabilities | None = None,
+    ) -> None:
         self.model = "fake-duplex-model"
         self.opened: list[DuplexSessionConfig] = []
         self.closed: list[str] = []
         self.handle: FakeHandle | None = None
         self.open_error: Exception | None = None
+        self.capabilities = capabilities
         self._script = script or [ResponseDone(response_id="r1", response={"status": "completed"})]
 
     async def open_session(self, config: Any) -> FakeHandle:
         if self.open_error is not None:
             raise self.open_error
         self.opened.append(config)
-        self.handle = FakeHandle(_SESSION_ID, self._script)
+        self.handle = FakeHandle(_SESSION_ID, self._script, self.capabilities)
         return self.handle
 
     async def close_session(self, session_id: str, *, reason: str = "client_close", **_: Any) -> None:
@@ -116,24 +129,65 @@ def _audio_message(data: bytes = _PCM, fmt: str = "pcm16") -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_text_turn_is_conversation_items_and_a_response_create() -> None:
-    """No audio in the request means no input buffer: the items are the whole turn."""
+async def test_a_text_prompt_seeds_the_session_and_is_primed_with_silence() -> None:
+    """Text is not a turn for a model-native model, so it rides the session context.
+
+    The model still generates per audio unit, so the seeded turn gets
+    ``text_turn_priming_units`` units of silence to speak on -- silence so they
+    add no content of their own. No ``response.create``: it cannot drive a
+    seeded turn, because the units are consumed as "listen" before it lands.
+    """
     omni = FakeOmni([TextDelta(delta="hi "), TextDelta(delta="there"), ResponseDone(response={"status": "completed"})])
 
     response = await _adapter(omni).create_chat_completion(
         _request(messages=[{"role": "system", "content": "be brief"}, {"role": "user", "content": "hello"}])
     )
 
+    config = omni.opened[0]
+    assert config.instructions == "be brief"
+    assert config.initial_user_text == "hello"
+    assert config.extra_body["auto_response"] is True
     handle = omni.handle
     assert handle is not None
-    assert handle.verbs() == ["create_item", "create_item", "create_response"]
-    roles = [call["item"]["role"] for _, call in handle.calls if _ == "create_item"]
-    assert roles == ["system", "user"]
-    # A user turn is Realtime ``input_text``, not the assistant's ``text``.
-    assert handle.calls[1][1]["item"]["content"] == [{"type": "input_text", "text": "hello"}]
+    assert handle.verbs() == ["append_audio"] * 3
+    assert all(set(call["audio"]) == {0} for _, call in handle.calls), "priming units must be silent"
     assert isinstance(response, ChatCompletionResponse)
     assert response.choices[0].message.content == "hi there"
     assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_turn_history_is_flattened_into_the_seeded_turn() -> None:
+    """A seeded session takes its text once, so the history has to travel with it."""
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(
+        _request(
+            messages=[
+                {"role": "system", "content": "be brief"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "and now?"},
+            ]
+        )
+    )
+
+    assert omni.opened[0].initial_user_text == "user: hello\nassistant: hi\nuser: and now?"
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_cannot_be_seeded_is_refused_before_it_can_hang() -> None:
+    """Without the capability the turn would never complete; say so instead."""
+    omni = FakeOmni(capabilities=DuplexCapabilities(supports_chat_completions=False))
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "speech input only" in response.error.message
+    assert omni.handle is not None
+    assert omni.handle.verbs() == [], "nothing may be submitted to a model that cannot answer it"
+    assert omni.closed == [_SESSION_ID], "a refused request must not hold the admission slot"
 
 
 @pytest.mark.asyncio
@@ -144,13 +198,12 @@ async def test_audio_content_goes_to_the_input_buffer_and_the_commit_starts_the_
 
     handle = omni.handle
     assert handle is not None
-    # The commit both ends the input and asks for the response, so there is no
-    # separate response.create.
-    assert handle.verbs() == ["append_audio", "create_item", "commit"]
+    # Speech is a turn on its own: the commit both ends the input and asks for
+    # the response, and nothing has to be seeded.
+    assert handle.verbs() == ["append_audio", "commit"]
     assert handle.calls[0][1]["audio"] == _PCM  # decoded, not the base64 the caller sent
-    assert handle.calls[2][1] == {"final": True, "create_response": True}
-    # The audio part is not repeated as a conversation item.
-    assert handle.calls[1][1]["item"]["content"] == [{"type": "input_text", "text": "what is this?"}]
+    assert handle.calls[1][1] == {"final": True, "create_response": True}
+    assert omni.opened[0].initial_user_text is None
 
 
 @pytest.mark.asyncio
@@ -168,7 +221,6 @@ async def test_generation_options_are_session_scoped_not_response_scoped() -> No
     # is delimited by the request.
     assert "realtime_turn_detection" not in config.extra_body
     assert omni.handle is not None
-    assert omni.handle.calls[-1] == ("create_response", {"options": None})
 
 
 # --------------------------------------------------------------------------- #
