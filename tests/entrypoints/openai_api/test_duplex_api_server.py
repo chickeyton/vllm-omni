@@ -33,6 +33,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
+from vllm_omni.engine.duplex.config import DuplexCapabilities
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni
 from vllm_omni.entrypoints.openai import api_server
@@ -117,9 +118,18 @@ class _FakeDuplexOmni(DuplexOmni):
             parallel_config=SimpleNamespace(_api_process_rank=0),
         )
         self._duplex_session_config = DuplexSessionRuntimeConfig()
+        self._capabilities = DuplexCapabilities(supports_chat_completions=True)
+        self.model_config = SimpleNamespace()
+        self.renderer = SimpleNamespace()
 
     async def get_vllm_config(self):
         return self._vllm_config
+
+    async def get_supported_tasks(self) -> tuple[str, ...]:
+        return ("generate",)
+
+    async def get_tokenizer(self):
+        return SimpleNamespace(chat_template="{{ messages }}")
 
     @property
     def stage_configs(self) -> list[object]:
@@ -128,6 +138,10 @@ class _FakeDuplexOmni(DuplexOmni):
     @property
     def duplex_session_config(self) -> DuplexSessionRuntimeConfig:
         return self._duplex_session_config
+
+    @property
+    def duplex_capabilities(self) -> DuplexCapabilities:
+        return self._capabilities
 
 
 class _FakeModels:
@@ -213,6 +227,8 @@ async def test_duplex_app_state_wires_only_the_session_surfaces(monkeypatch) -> 
     the turn-based chat service.
     """
     monkeypatch.setattr(api_server, "OpenAIServingModels", _FakeModels)
+    monkeypatch.setattr(api_server, "OnlineRenderer", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(api_server, "OmniOpenAIServingChat", lambda **kwargs: SimpleNamespace(**kwargs))
     engine = _FakeDuplexOmni()
     state = State()
 
@@ -360,3 +376,17 @@ async def test_warmup_gate_lets_the_warmup_connection_and_plain_servers_through(
     websocket = _warmup_websocket(warmup_done, query)
 
     await asyncio.wait_for(api_server._wait_for_duplex_warmup(websocket), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_does_not_declare_chat_completions_does_not_get_the_route(monkeypatch) -> None:
+    """The decision stays the model's: no capability, no chat service, and the route says so."""
+    monkeypatch.setattr(api_server, "OpenAIServingModels", _FakeModels)
+    engine = _FakeDuplexOmni()
+    engine._capabilities = DuplexCapabilities(supports_chat_completions=False)
+    state = State()
+
+    await api_server.omni_init_app_state(engine, state, _minimal_args())
+
+    assert state.openai_serving_chat is None
+    assert isinstance(state.openai_serving_duplex, OmniDuplexSessionHandler)
