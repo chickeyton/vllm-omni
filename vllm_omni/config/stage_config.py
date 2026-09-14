@@ -311,7 +311,7 @@ class PipelineConfig:
     endpoint_restrictions: tuple[EndpointRestriction, ...] = ()
     # Dotted path of the model's ``DuplexModelPlugin``. A pipeline is a duplex
     # model iff this is set: ``vllm-omni serve`` then always runs it through
-    # ``DuplexOmni`` (duplex-only server) and the engine hosts one
+    # ``DuplexOmni`` (every served surface runs on a duplex session) and the engine hosts one
     # ``DuplexOrchestrator`` with the plugin loaded.
     duplex_plugin: str | None = None
     # Legacy duplex wiring of the models that are not ported to the plugin

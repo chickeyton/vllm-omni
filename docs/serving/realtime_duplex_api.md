@@ -30,9 +30,26 @@ vllm-omni serve openbmb/MiniCPM-o-4_5 \
 `duplex_session.max_sessions: 4`. Because the MiniCPM-o 4.5 pipeline declares a
 `duplex_plugin`, `vllm-omni serve` runs it through `DuplexOmni`: the server
 mounts `ws://<host>:8099/v1/realtime?duplex=1` (this page; `ws://<host>:8099/v1/duplex`
-is an alias of the same route), `/v1/models` and `/health`, and nothing else.
-The turn-based HTTP routes (`/v1/chat/completions`, speech, batch, ...) are
-not served by a duplex model.
+is an alias of the same route), `POST /v1/chat/completions`, `/v1/models` and
+`/health`, and nothing else. The remaining turn-based HTTP routes (speech,
+batch, embeddings, video, ...) are not served by a duplex model.
+
+`/v1/chat/completions` is not a turn-based path on a duplex server: each
+request opens a short-lived duplex session, feeds the messages in as ordinary
+Realtime input and reads the answer off the session. Two consequences follow
+from that and are worth sizing for:
+
+- **Every request holds an admission slot** for its lifetime, so
+  `duplex_session.max_sessions` caps HTTP concurrency as well as websocket
+  sessions. Beyond it a request is refused with HTTP 503.
+- **Latency follows the model's own clock.** A model-native session generates
+  per audio unit, so even a short answer costs what that many units cost --
+  noticeably more than the same model would take turn-based.
+
+`n > 1`, `logprobs` and `tools` have no representation in one duplex turn and
+are refused with HTTP 400. `temperature` and `max_completion_tokens` apply.
+A model that should not serve the route lists it in the deploy config's
+`endpoint_restrictions`, exactly as a turn-based model does.
 
 ### Run the Example Client
 
@@ -318,7 +335,7 @@ declares a `duplex_plugin` and whose deploy configuration declares
 stock Realtime client needs no vendor query parameter. `?duplex=1` (`1`,
 `true` or `on`) is the spelling this page uses and stays valid;
 `?duplex=0` (`0`, `false`, `off`) explicitly opts out and selects the
-turn-based Realtime handler, which a duplex-only server does not mount --
+turn-based Realtime handler, which a duplex server does not mount --
 that connection is answered with `Realtime API is not available`.
 `ws(s)://<host>/v1/duplex` is an alias that always selects the duplex
 handler. Optional query parameters are `model`, `autostart` (`0` means
@@ -1276,7 +1293,8 @@ them out into typed events before they reach a client.
 - Session capacity is bounded by `duplex_session.max_sessions` in the deploy
   configuration; admission beyond it fails with `resource_exhausted`
   (`rate_limit_error`, retryable).
-- A duplex deployment serves duplex sessions only: `/v1/chat/completions`
-  and the other turn-based HTTP routes report "not available" on a MiniCPM-o
-  4.5 server. Turn-based use of the model stays available offline through
-  `Omni` / `AsyncOmni`.
+- A duplex deployment serves the duplex session surfaces only: the websocket
+  route and `/v1/chat/completions`, the latter on a session per request (see
+  [Start the Server](#start-the-server)). The other turn-based HTTP routes
+  report "not available" on a MiniCPM-o 4.5 server; turn-based use of the
+  model stays available offline through `Omni` / `AsyncOmni`.

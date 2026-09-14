@@ -24,11 +24,31 @@ capability gates, see the [Realtime Duplex API guide](realtime_duplex_api.md).
 A model is served full duplex when its registered pipeline declares a
 `duplex_plugin` (the model's `DuplexModelPlugin`). That declaration alone
 decides it: `vllm-omni serve` constructs `DuplexOmni` instead of `AsyncOmni`,
-and the server is **duplex-only**: it exposes `/v1/realtime?duplex=1` (and its
-alias `/v1/duplex`), `/v1/models` and `/health`; every turn-based HTTP route
-(`/v1/chat/completions`, speech, batch, ...) answers "not available".
-Turn-based use of such a model stays available offline through the Python API
-(`Omni` / `AsyncOmni`).
+and every surface the server exposes is backed by a duplex session. It serves
+`/v1/realtime?duplex=1` (and its alias `/v1/duplex`),
+`POST /v1/chat/completions`, `/v1/models` and `/health`; every other
+turn-based HTTP route (speech, batch, embeddings, video, ...) answers "not
+available". Turn-based use of such a model stays available offline through the
+Python API (`Omni` / `AsyncOmni`).
+
+`/v1/chat/completions` is served by an adapter that runs one short-lived
+duplex session per request: the messages go in as ordinary Realtime input
+(`conversation.item.create` for text and images, `input_audio_buffer.append` +
+`commit` for audio) and the answer is read off the session. No model plugin
+and no capability flag is involved, so any duplex model gets the route; one
+that should not serve it lists it in the deploy configuration's
+`endpoint_restrictions`.
+
+Two consequences of that design are user-visible:
+
+- Every chat request holds an admission slot for its lifetime, so
+  `duplex_session.max_sessions` bounds HTTP concurrency as well as websocket
+  sessions; beyond it the request is refused with HTTP 503.
+- The answer arrives at the model's real-time pace rather than at turn-based
+  speed, because a model-native session generates per audio unit.
+
+`n > 1`, `logprobs` and `tools` are refused with HTTP 400: one request is one
+duplex turn, and those have no representation in it.
 
 The deploy configuration of such a model must agree:
 
