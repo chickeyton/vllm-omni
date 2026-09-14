@@ -35,9 +35,11 @@ is an alias of the same route), `POST /v1/chat/completions`, `/v1/models` and
 batch, embeddings, video, ...) are not served by a duplex model.
 
 `/v1/chat/completions` is not a turn-based path on a duplex server: each
-request opens a short-lived duplex session, feeds the messages in as ordinary
-Realtime input and reads the answer off the session. Two consequences follow
-from that and are worth sizing for:
+request opens a short-lived duplex session and reads the answer off it. Audio
+content becomes an ordinary committed turn; text is seeded as the session's
+opening turn, because a model-native model takes a turn only when it hears
+speech. A model that cannot be seeded that way declares so, and a text request
+to it is refused with 400. Two consequences are worth sizing for:
 
 - **Every request holds an admission slot** for its lifetime, so
   `duplex_session.max_sessions` caps HTTP concurrency as well as websocket
