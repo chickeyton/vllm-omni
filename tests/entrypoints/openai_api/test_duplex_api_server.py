@@ -119,8 +119,6 @@ class _FakeDuplexOmni(DuplexOmni):
         )
         self._duplex_session_config = DuplexSessionRuntimeConfig()
         self._capabilities = DuplexCapabilities(supports_chat_completions=True)
-        self.model_config = SimpleNamespace()
-        self.renderer = SimpleNamespace()
 
     async def get_vllm_config(self):
         return self._vllm_config
@@ -142,6 +140,15 @@ class _FakeDuplexOmni(DuplexOmni):
     @property
     def duplex_capabilities(self) -> DuplexCapabilities:
         return self._capabilities
+
+    # Properties on AsyncOmni, so the fake overrides rather than assigns them.
+    @property
+    def model_config(self) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    @property
+    def renderer(self) -> SimpleNamespace:
+        return SimpleNamespace()
 
 
 class _FakeModels:
