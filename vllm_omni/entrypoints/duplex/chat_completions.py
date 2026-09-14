@@ -65,6 +65,11 @@ logger = init_logger(__name__)
 #: Chat content parts carrying audio input, by OpenAI content-part type.
 _AUDIO_PART_TYPES = frozenset({"input_audio", "audio"})
 
+#: Everything a Realtime conversation item can carry. Images and video have no
+#: place in one (``realtime_item_to_history_message`` drops them), so a request
+#: asking for them is refused rather than silently answered without them.
+_SUPPORTED_PART_TYPES = _AUDIO_PART_TYPES | {"text", "input_text"}
+
 #: Realtime ``response.status`` -> OpenAI ``finish_reason``.
 _FINISH_REASON_BY_STATUS = {
     "completed": "stop",
@@ -154,7 +159,31 @@ class DuplexChatCompletionsAdapter:
             return "logprobs is not supported by a duplex model"
         if request.tools:
             return "tools are not supported on /v1/chat/completions for a duplex model"
+        unsupported_parts = sorted(self._unsupported_content_types(request))
+        if unsupported_parts:
+            # A Realtime conversation item carries text and audio only
+            # (``realtime_item_to_history_message``). Accepting an image and
+            # dropping it would answer a question the caller did not ask.
+            return (
+                f"content of type {', '.join(unsupported_parts)} is not supported on a duplex model: "
+                "a duplex turn takes text and audio"
+            )
         return None
+
+    @staticmethod
+    def _unsupported_content_types(request: ChatCompletionRequest) -> set[str]:
+        found: set[str] = set()
+        for message in request.messages:
+            content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, Mapping):
+                    continue
+                kind = part.get("type")
+                if isinstance(kind, str) and kind not in _SUPPORTED_PART_TYPES:
+                    found.add(kind)
+        return found
 
     def _session_config(self, request: ChatCompletionRequest) -> DuplexSessionConfig:
         """One caller-driven turn.
@@ -244,7 +273,11 @@ class DuplexChatCompletionsAdapter:
 
     @staticmethod
     def _realtime_item(message: Any) -> dict[str, object] | None:
-        """The non-audio half of a chat message, as a Realtime conversation item."""
+        """The text of a chat message, as a Realtime conversation item.
+
+        Audio has already gone to the input buffer, and any other modality was
+        refused up front, so only text reaches this point.
+        """
         if isinstance(message, Mapping):
             role = message.get("role")
             content = message.get("content")
@@ -268,11 +301,6 @@ class DuplexChatCompletionsAdapter:
                 kind = part.get("type")
                 if kind in {"text", "input_text"} and isinstance(part.get("text"), str) and part["text"]:
                     parts.append({"type": text_type, "text": part["text"]})
-                elif kind in {"image_url", "input_image"}:
-                    image = part.get("image_url")
-                    url = image.get("url") if isinstance(image, Mapping) else image
-                    if isinstance(url, str) and url:
-                        parts.append({"type": "input_image", "image_url": url})
         if not parts:
             return None
         return {

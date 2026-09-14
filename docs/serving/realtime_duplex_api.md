@@ -46,10 +46,14 @@ from that and are worth sizing for:
   per audio unit, so even a short answer costs what that many units cost --
   noticeably more than the same model would take turn-based.
 
-`n > 1`, `logprobs` and `tools` have no representation in one duplex turn and
-are refused with HTTP 400. `temperature` and `max_completion_tokens` apply.
-A model that should not serve the route lists it in the deploy config's
-`endpoint_restrictions`, exactly as a turn-based model does.
+`n > 1`, `logprobs`, `tools`, and image or video content parts have no
+representation in one duplex turn and are refused with HTTP 400 -- a Realtime
+conversation item carries text and audio only. `temperature`,
+`max_completion_tokens`, `modalities` and
+`chat_template_kwargs.use_tts_template` apply; the other
+`chat_template_kwargs` keys are logged as ignored. A model that should not
+serve the route lists it in the deploy config's `endpoint_restrictions`,
+exactly as a turn-based model does.
 
 ### Run the Example Client
 

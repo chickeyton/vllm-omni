@@ -436,3 +436,28 @@ async def test_requested_output_modalities_reach_the_session() -> None:
     await _adapter(omni).create_chat_completion(_request(modalities=["text", "audio"]))
 
     assert omni.opened[0].modalities == ["text", "audio"]
+
+
+@pytest.mark.asyncio
+async def test_image_content_is_refused_rather_than_dropped() -> None:
+    """A Realtime conversation item carries text and audio; answering without the image would mislead."""
+    omni = FakeOmni()
+
+    response = await _adapter(omni).create_chat_completion(
+        _request(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is in this picture?"},
+                        {"type": "image_url", "image_url": {"url": "https://example.invalid/cat.png"}},
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "image_url" in response.error.message
+    assert omni.opened == []
