@@ -1439,17 +1439,25 @@ class DuplexSessionRunner:
             )
             return
         if session.unanswered_user_items():
-            session.reset_unanswered_user_items()
-            await self._start_append(
-                self.model.silence_unit_payload(),
-                final=True,
-                precreate_response=True,
-                operation_id=uuid.uuid4().hex,
+            # Conversation items are context, not a turn. A model-native model
+            # decides to speak from the audio it hears, and there is no audio
+            # here: opening a response anyway produces one the model never
+            # fills, which the caller only discovers when the session idles
+            # out. Text reaches such a model through the seeded opening turn
+            # (``DuplexSessionConfig.initial_user_text``) instead.
+            self._emit_error(
+                "text_only_turn_unsupported",
+                "This duplex model answers speech input only. Seed the session with "
+                "initial_user_text to ask it in text."
+                if session.capabilities.supports_chat_completions
+                else "This duplex model answers speech input only.",
             )
+            session.reset_unanswered_user_items()
+            session.discard_response_options()
             return
         self._emit_error(
             "response_create_without_input",
-            "Duplex response.create requires committed audio or conversation items to answer.",
+            "Duplex response.create requires committed audio to answer.",
         )
         session.discard_response_options()
 

@@ -645,7 +645,11 @@ class MiniCPMO45DuplexPlugin(DuplexModelPlugin):
                 code="unsupported_ref_audio_path",
             )
         runtime_config: dict[str, object] = {"instructions": config.instructions}
+        # ``duplex_initial_user_text`` is the older extra_body spelling and
+        # still works; the session field is the framework-level one.
         initial_user_text = extra_body.pop("duplex_initial_user_text", None)
+        if not (isinstance(initial_user_text, str) and initial_user_text):
+            initial_user_text = config.initial_user_text
         if isinstance(initial_user_text, str) and initial_user_text:
             runtime_config["initial_user_text"] = initial_user_text
         tokenizer = await self._tokenizer_for(model_config)

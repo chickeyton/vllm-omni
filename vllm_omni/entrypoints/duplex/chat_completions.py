@@ -4,14 +4,22 @@
 """``/v1/chat/completions`` on a duplex model, as an ordinary Realtime client.
 
 A duplex server has no turn-based request path, so one chat request becomes one
-short-lived duplex session: the messages go in through the same wire verbs any
-Realtime client uses -- ``conversation.item.create`` for text and images,
-``input_audio_buffer.append`` + ``commit`` for audio -- and the answer is read
-off ``events()`` like any other response.
+short-lived duplex session. How the prompt goes in depends on what it is, and
+that difference is the model's, not this layer's:
 
-Nothing model-specific lives here, and nothing below this layer learns that
-chat completions exist. A model that cannot answer the shape of turn a request
-describes says so on the wire, and that becomes the HTTP error.
+* **Speech is a turn.** Audio content is appended to the input buffer and
+  committed, exactly as a websocket client does it.
+* **Text is not.** A model-native model decides to speak from the audio it
+  hears, so silence is its signal *not* to take a turn and a text prompt has no
+  turn to start. It reaches the model instead as the session's seeded opening
+  turn (``DuplexSessionConfig.initial_user_text``), and the session is given
+  silence units to generate on. Only a model that declares
+  ``DuplexCapabilities.supports_chat_completions`` can be reached this way; any
+  other is told so before it can hang.
+
+Either way the session answers by itself. There is no ``response.create``: it
+cannot drive a seeded turn, because the priming units are consumed as "listen"
+before it arrives.
 
 Two properties a caller should know, both inherent to serving HTTP on a duplex
 session rather than artefacts of this adapter:
@@ -61,6 +69,9 @@ if TYPE_CHECKING:
     from vllm_omni.entrypoints.duplex_omni import DuplexOmni, DuplexSessionHandle
 
 logger = init_logger(__name__)
+
+#: Sample rate of the silence units a seeded turn is given to generate on.
+_PRIMING_SAMPLE_RATE_HZ = 16000
 
 #: Chat content parts carrying audio input, by OpenAI content-part type.
 _AUDIO_PART_TYPES = frozenset({"input_audio", "audio"})
@@ -130,6 +141,18 @@ class DuplexChatCompletionsAdapter:
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+        # Capabilities are the model's answer, and they only arrive with the
+        # open. A text prompt needs a model that can be seeded with it; without
+        # that the turn would never complete and the caller would wait out the
+        # session's idle timeout to learn so.
+        if not self._has_audio(request) and not handle.capabilities.supports_chat_completions:
+            await self._close(handle)
+            return self.create_error_response(
+                "this duplex model answers speech input only: send audio content, "
+                "or use /v1/realtime?duplex=1",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         if request.stream:
             # The generator owns the session from here, including closing it.
             return self._stream(handle, request)
@@ -170,6 +193,11 @@ class DuplexChatCompletionsAdapter:
             )
         return None
 
+    @classmethod
+    def _has_audio(cls, request: ChatCompletionRequest) -> bool:
+        """Whether the prompt contains speech, which is a turn on its own."""
+        return any(True for message in request.messages for _ in cls._audio_parts(message))
+
     @staticmethod
     def _unsupported_content_types(request: ChatCompletionRequest) -> set[str]:
         found: set[str] = set()
@@ -196,6 +224,18 @@ class DuplexChatCompletionsAdapter:
         """
         config = DuplexSessionConfig(model=request.model or self._model_name, overlap_policy="listen_only")
         config.extra_body = self._session_extra_body(request)
+        instructions, prompt = self._split_messages(request)
+        if instructions:
+            config.instructions = instructions
+        if prompt:
+            # The session's opening turn. A model-native session is seeded once,
+            # at open, so the whole prompt goes in here rather than arriving as
+            # conversation items -- which reach the history but not the model's
+            # own context. The session then answers it by itself: an explicit
+            # response.create cannot drive a seeded turn, because the priming
+            # units are consumed as "listen" before it arrives.
+            config.initial_user_text = prompt
+            config.extra_body.setdefault("auto_response", True)
         modalities = getattr(request, "modalities", None)
         config.modalities = [str(m) for m in modalities] if modalities else ["text"]
         if request.temperature is not None:
@@ -205,6 +245,49 @@ class DuplexChatCompletionsAdapter:
             config.max_tokens = int(max_tokens)
         self._apply_chat_template_kwargs(request, config)
         return config
+
+    @classmethod
+    def _split_messages(cls, request: ChatCompletionRequest) -> tuple[str, str]:
+        """The messages as (instructions, opening turn).
+
+        System messages become the session instructions, which is where a
+        duplex session keeps them; everything else is flattened into the turn
+        the model is asked to answer, speaker-labelled when there is more than
+        one message so a multi-turn history survives the flattening.
+        """
+        system: list[str] = []
+        turns: list[tuple[str, str]] = []
+        for message in request.messages:
+            role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
+            text = cls._message_text(message)
+            if not text:
+                continue
+            if role == "system" or role == "developer":
+                system.append(text)
+            else:
+                turns.append((str(role or "user"), text))
+        if len(turns) == 1:
+            prompt = turns[0][1]
+        else:
+            prompt = "\n".join(f"{role}: {text}" for role, text in turns)
+        return "\n".join(system), prompt
+
+    @staticmethod
+    def _message_text(message: Any) -> str:
+        """The text of one chat message, audio parts excluded."""
+        content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+        parts = [
+            str(part["text"])
+            for part in content
+            if isinstance(part, Mapping)
+            and part.get("type") in {"text", "input_text"}
+            and isinstance(part.get("text"), str)
+        ]
+        return " ".join(p for p in parts if p).strip()
 
     @staticmethod
     def _session_extra_body(request: ChatCompletionRequest) -> dict[str, object]:
@@ -252,21 +335,33 @@ class DuplexChatCompletionsAdapter:
             )
 
     async def _start_turn(self, handle: DuplexSessionHandle, request: ChatCompletionRequest) -> None:
-        """Feed the prompt in as ordinary Realtime input and ask for the answer."""
+        """Give the session its input, in the shape the model actually answers.
+
+        Speech is a turn on its own: append it and commit. Text is not -- a
+        model-native model decides to speak from the audio it hears, so the
+        prompt was seeded into the session at open and the session only needs
+        units to generate on. Either way the session answers by itself; there
+        is no ``response.create``, which cannot drive a seeded turn.
+        """
         appended_audio = False
         for message in request.messages:
             for audio, fmt, sample_rate in self._audio_parts(message):
                 await handle.append_audio(audio, format=fmt, sample_rate_hz=sample_rate)
                 appended_audio = True
-            item = self._realtime_item(message)
-            if item is not None:
-                await handle.create_item(item)
         if appended_audio:
             # The commit both ends the input and asks for the response.
             await handle.commit(final=True, create_response=True)
-        else:
-            # Text or images only: the runner starts the turn from the items.
-            await handle.create_response()
+            return
+        # The seeded turn generates per unit, so it needs a clock; silence
+        # keeps those units from adding content of their own.
+        units = max(1, int(handle.capabilities.text_turn_priming_units))
+        silence = self._silence_unit()
+        for _ in range(units):
+            await handle.append_audio(silence, format="pcm16", sample_rate_hz=_PRIMING_SAMPLE_RATE_HZ)
+
+    @staticmethod
+    def _silence_unit() -> bytes:
+        return bytes(_PRIMING_SAMPLE_RATE_HZ * 2)  # 1 s of PCM16 silence
 
     @staticmethod
     def _audio_parts(message: Any) -> Iterator[tuple[bytes, str, int | None]]:
@@ -293,45 +388,6 @@ class DuplexChatCompletionsAdapter:
                 fmt if isinstance(fmt, str) else "pcm16",
                 int(sample_rate) if isinstance(sample_rate, int) else None,
             )
-
-    @staticmethod
-    def _realtime_item(message: Any) -> dict[str, object] | None:
-        """The text of a chat message, as a Realtime conversation item.
-
-        Audio has already gone to the input buffer, and any other modality was
-        refused up front, so only text reaches this point.
-        """
-        if isinstance(message, Mapping):
-            role = message.get("role")
-            content = message.get("content")
-        else:
-            role = getattr(message, "role", None)
-            content = getattr(message, "content", None)
-        if not isinstance(role, str):
-            return None
-
-        # Realtime spells assistant text "text" and everything the user or the
-        # system says "input_text".
-        text_type = "text" if role == "assistant" else "input_text"
-        parts: list[dict[str, object]] = []
-        if isinstance(content, str):
-            if content:
-                parts.append({"type": text_type, "text": content})
-        elif isinstance(content, list):
-            for part in content:
-                if not isinstance(part, Mapping) or part.get("type") in _AUDIO_PART_TYPES:
-                    continue  # audio already went to the input buffer
-                kind = part.get("type")
-                if kind in {"text", "input_text"} and isinstance(part.get("text"), str) and part["text"]:
-                    parts.append({"type": text_type, "text": part["text"]})
-        if not parts:
-            return None
-        return {
-            "id": f"item_{uuid.uuid4().hex[:24]}",
-            "type": "message",
-            "role": role,
-            "content": parts,
-        }
 
     # ------------------------------------------------------------------ #
     # Session -> response                                                #
@@ -367,7 +423,11 @@ class DuplexChatCompletionsAdapter:
                         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
 
-        message = ChatMessage(role="assistant", content="".join(text))
+        # A duplex model answers by speaking, so its words arrive as the audio
+        # transcript. That transcript is the assistant's text; a chat client
+        # that asked for text would otherwise get an empty message.
+        content = "".join(text) or "".join(transcript)
+        message = ChatMessage(role="assistant", content=content)
         if audio:
             message.audio = ChatCompletionAudio(
                 id=f"audio_{uuid.uuid4().hex[:16]}",
@@ -410,7 +470,10 @@ class DuplexChatCompletionsAdapter:
                         logger.warning("duplex chat completion stream failed: %s: %s", event.code, event.message)
                         yield chunk({}, finish_reason="stop")
                         break
-                    if isinstance(event, TextDelta):
+                    # A duplex model answers by speaking, so the transcript is
+                    # the assistant's text; a model that emits text directly
+                    # sends TextDelta instead. Never both for the same words.
+                    if isinstance(event, TextDelta | TranscriptDelta):
                         if event.delta:
                             yield chunk({"content": event.delta})
                     elif isinstance(event, ResponseDone):

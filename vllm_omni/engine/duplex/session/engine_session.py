@@ -184,6 +184,9 @@ class DuplexEngineSession:
             self.accepted_fence = self.fence
         else:
             self.accept_fence(self.fence)
+        if self.config.initial_user_text:
+            # Seeded text is user input like any other: it waits for a response.
+            self.notify_new_user_item()
 
     # ---- identity / fence ----
 
@@ -519,8 +522,11 @@ class DuplexEngineSession:
         return MappingProxyType(dict(self._conversation.pending_truncations_ms))
 
     def replace_config(self, config: DuplexSessionConfig) -> None:
+        previous_seed = self.config.initial_user_text
         self.config = config
         self.config_generation += 1
+        if config.initial_user_text and config.initial_user_text != previous_seed:
+            self.notify_new_user_item()
 
     def transition_turn(self, state: DuplexTurnState) -> None:
         self.turn_state = state
