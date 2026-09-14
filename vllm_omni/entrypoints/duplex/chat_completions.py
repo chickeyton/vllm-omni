@@ -231,10 +231,14 @@ class DuplexChatCompletionsAdapter:
             # The session's opening turn. A model-native session is seeded once,
             # at open, so the whole prompt goes in here rather than arriving as
             # conversation items -- which reach the history but not the model's
-            # own context. The session then answers it by itself: an explicit
-            # response.create cannot drive a seeded turn, because the priming
-            # units are consumed as "listen" before it arrives.
+            # own context. Text that accompanies audio is seeded too: it is the
+            # only way it reaches the model at all.
             config.initial_user_text = prompt
+        if not self._has_audio(request):
+            # A seeded turn has to answer by itself. An explicit response.create
+            # cannot drive it, because the priming units are consumed as
+            # "listen" before it arrives. Speech needs none of this: its commit
+            # asks for the response.
             config.extra_body.setdefault("auto_response", True)
         modalities = getattr(request, "modalities", None)
         config.modalities = [str(m) for m in modalities] if modalities else ["text"]
