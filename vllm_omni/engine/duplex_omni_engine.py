@@ -31,8 +31,8 @@ from vllm_omni.engine.duplex.messages import (
     TouchDuplexSessionMessage,
 )
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, EncodeAudio, load_duplex_plugin
-from vllm_omni.engine.messages import EngineQueueMessage
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+from vllm_omni.engine.messages import EngineQueueMessage
 from vllm_omni.engine.orchestrator import OrchestratorBase
 
 if TYPE_CHECKING:
