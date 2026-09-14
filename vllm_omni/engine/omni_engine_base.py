@@ -219,6 +219,9 @@ class OmniEngineBase:
         # ``session_mode`` from it; the turn-based engine only keeps it for
         # introspection.
         self.deploy_config = None
+        #: Path ``self.deploy_config`` was parsed from, so the duplex runtime
+        #: config below can reuse it instead of re-reading the same yaml.
+        self._deploy_config_source: str | None = None
         deploy_config_source: str | Path | None = deploy_config_path
         if deploy_config_source is None and pipeline_config is not None:
             default_name = getattr(pipeline_config, "default_deploy_config_name", None)
@@ -231,6 +234,7 @@ class OmniEngineBase:
         if deploy_config_source is not None:
             try:
                 self.deploy_config = load_deploy_config(deploy_config_source)
+                self._deploy_config_source = str(deploy_config_source)
             except Exception:
                 if deploy_config_path is not None:
                     # The caller named this file: failing to load it is their error.
@@ -257,12 +261,9 @@ class OmniEngineBase:
             trust_remote_code=trust_remote_code,
         )
         if self._config_resolution is None:
-            pipeline_config = StageConfigFactory.get_pipeline_config(
-                model=model,
-                trust_remote_code=bool(trust_remote_code),
-                deploy_config_path=deploy_config_path,
-            )
-            self._set_pipeline_runtime_config(pipeline_config, self.config_path)
+            # Same model, trust_remote_code and deploy path as the resolution
+            # above, so reuse it rather than paying for the HF config again.
+            self._set_pipeline_runtime_config(self.pipeline_config, self.config_path)
         else:
             self._set_pipeline_runtime_config(
                 self._config_resolution.pipeline_config,
@@ -872,7 +873,11 @@ class OmniEngineBase:
         self._duplex_control_enabled = bool(pipeline_config and pipeline_config.duplex_control_enabled)
         self.duplex_session_config = DuplexSessionRuntimeConfig()
         if config_path is not None:
-            self.duplex_session_config = load_deploy_config(config_path).duplex_session
+            if self.deploy_config is not None and self._deploy_config_source == str(config_path):
+                # Already parsed in __init__; the same yaml twice is pure cost.
+                self.duplex_session_config = self.deploy_config.duplex_session
+            else:
+                self.duplex_session_config = load_deploy_config(config_path).duplex_session
 
     def _resolve_stage_configs(
         self,

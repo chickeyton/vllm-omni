@@ -389,7 +389,7 @@ class TestSingleStageModeDetection:
                 return_value=None,
             )
             mocker.patch(
-                "vllm_omni.engine.async_omni_engine.load_deploy_config",
+                "vllm_omni.engine.omni_engine_base.load_deploy_config",
                 return_value=SimpleNamespace(duplex_session=DuplexSessionRuntimeConfig()),
             )
         mocker.patch.object(
@@ -477,11 +477,11 @@ class TestSingleStageModeDetection:
         deploy_path = "/resolved/qwen3_omni_moe.yaml"
         duplex_session = DuplexSessionRuntimeConfig(server_vad_model_path="/models/silero_vad.onnx")
         mocker.patch(
-            "vllm_omni.engine.async_omni_engine.StageConfigFactory.get_pipeline_config",
+            "vllm_omni.engine.omni_engine_base.StageConfigFactory.get_pipeline_config",
             return_value=None,
         )
         load_deploy_config = mocker.patch(
-            "vllm_omni.engine.async_omni_engine.load_deploy_config",
+            "vllm_omni.engine.omni_engine_base.load_deploy_config",
             return_value=SimpleNamespace(duplex_session=duplex_session),
         )
 
@@ -558,7 +558,7 @@ class TestEndpointRestrictionsTrustRemoteCode:
 
     def _make_engine_no_thread(self, mocker: MockerFixture, **kwargs: Any) -> AsyncOmniEngine:
         mocker.patch(
-            "vllm_omni.engine.async_omni_engine.load_deploy_config",
+            "vllm_omni.engine.omni_engine_base.load_deploy_config",
             return_value=SimpleNamespace(duplex_session=DuplexSessionRuntimeConfig()),
         )
         mocker.patch.object(
