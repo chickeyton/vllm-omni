@@ -48,6 +48,7 @@ from vllm_omni.engine.duplex.messages import (
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, DuplexRuntimeConfigError, validate_duplex_plugin_sampling
 from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity, DuplexLeaseConfig, DuplexLeaseState
+from vllm_omni.engine.duplex.turn_detection import SileroVADBackendProvider
 
 if TYPE_CHECKING:
     import janus
@@ -117,6 +118,12 @@ class DuplexSessionManager:
         self._lease_config = DuplexLeaseConfig(
             idle_ttl_s=runtime_config.idle_ttl_s,
             disconnect_grace_s=runtime_config.disconnect_grace_s,
+        )
+        #: One Silero backend for the whole engine: the ONNX graph is stateless
+        #: per call, so every session's detector can share it. Resolved lazily,
+        #: on the first session that actually turns server VAD on.
+        self.vad_backend_provider = SileroVADBackendProvider(
+            model_path=getattr(runtime_config, "server_vad_model_path", None)
         )
         self.runners: dict[str, DuplexSessionRunner] = {}
         #: Sessions whose close/expiry began but whose stage cleanup has not finalized;

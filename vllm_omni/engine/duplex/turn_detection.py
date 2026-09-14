@@ -21,12 +21,14 @@ from vllm_omni.engine.duplex.vad import (
     SILERO_VAD_MIN_THRESHOLD,
     ServerVADUnavailableError,
     SileroStreamingVAD,
+    SileroVADBackendProvider,
     SileroVADConfig,
     StreamingVADResult,
 )
 
 __all__ = [
     "PendingTurnDetectionUpdate",
+    "SileroVADBackendProvider",
     "ServerTurnDetector",
     "ServerVADUnavailableError",
     "TurnDetectionConfig",
@@ -129,8 +131,8 @@ class TurnDetectionConfig:
     def overlap_policy(self) -> str:
         return "barge_in_on_speech"
 
-    def build_detector(self) -> ServerTurnDetector:
-        return ServerTurnDetector(self)
+    def build_detector(self, backend_provider: SileroVADBackendProvider | None = None) -> ServerTurnDetector:
+        return ServerTurnDetector(self, backend_provider=backend_provider)
 
 
 def normalize_turn_detection_session_payload(
@@ -193,7 +195,12 @@ class TurnDetectionResult:
 class ServerTurnDetector:
     """One Silero-backed streaming detector per session."""
 
-    def __init__(self, config: TurnDetectionConfig) -> None:
+    def __init__(
+        self,
+        config: TurnDetectionConfig,
+        *,
+        backend_provider: SileroVADBackendProvider | None = None,
+    ) -> None:
         self.config = config
         self._vad = SileroStreamingVAD(
             SileroVADConfig(
@@ -201,7 +208,8 @@ class ServerTurnDetector:
                 prefix_padding_ms=int(config.prefix_padding_ms),
                 silence_duration_ms=int(config.silence_duration_ms),
                 min_speech_duration_ms=max(32, int(config.min_speech_duration_ms)),
-            )
+            ),
+            backend_provider=backend_provider,
         )
 
     @property
@@ -259,12 +267,18 @@ class PendingTurnDetectionUpdate:
     detector: ServerTurnDetector | None
 
     @classmethod
-    def prepare(cls, session_payload: dict[str, object]) -> PendingTurnDetectionUpdate | None:
+    def prepare(
+        cls,
+        session_payload: dict[str, object],
+        *,
+        backend_provider: SileroVADBackendProvider | None = None,
+    ) -> PendingTurnDetectionUpdate | None:
         """Normalize the payload in place and stage the new detector; None when not configured."""
         configured, config = normalize_turn_detection_session_payload(session_payload)
         if not configured:
             return None
-        return cls(config=config, detector=config.build_detector() if config is not None else None)
+        detector = config.build_detector(backend_provider) if config is not None else None
+        return cls(config=config, detector=detector)
 
     def commit(
         self, current: ServerTurnDetector | None
