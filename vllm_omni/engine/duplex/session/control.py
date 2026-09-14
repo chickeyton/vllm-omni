@@ -34,6 +34,7 @@ from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
     ServerTurnDetector,
     ServerVADUnavailableError,
+    SileroVADBackendProvider,
     TurnDetectionConfig,
     TurnDetectionResult,
     apply_turn_detection_result,
@@ -69,11 +70,19 @@ class SessionControl:
         try:
             config = TurnDetectionConfig.from_realtime(turn_detection)
             self._config = config
-            self._detector = config.build_detector()
+            self._detector = config.build_detector(self._vad_backend_provider())
         except Exception as exc:
             logger.warning("Duplex session %s: turn detection disabled: %s", self._ctx.session.session_id, exc)
             self._config = None
             self._detector = None
+
+    def _vad_backend_provider(self) -> SileroVADBackendProvider | None:
+        """The engine-wide Silero backend, so one model serves every session.
+
+        Held by the manager rather than built here: the ONNX backend is shared,
+        and ``duplex_session.server_vad_model_path`` is a deploy-level setting.
+        """
+        return getattr(self._ctx.manager, "vad_backend_provider", None)
 
     def reset_vad(self) -> None:
         """Drop the detector's speech state (a barge-in or a clear starts a new turn)."""
@@ -185,7 +194,9 @@ class SessionControl:
                 pending_turn_detection.reject()
 
         try:
-            pending_turn_detection = PendingTurnDetectionUpdate.prepare(payload)
+            pending_turn_detection = PendingTurnDetectionUpdate.prepare(
+                payload, backend_provider=self._vad_backend_provider()
+            )
         except Exception as exc:
             self._out.emit_error("unsupported_turn_detection", str(exc), event_id=realtime_event_id)
             return
