@@ -649,8 +649,8 @@ def translate_realtime_command(
     """Map one OpenAI Realtime client event onto a :class:`DuplexCommand`.
 
     Raises :class:`DuplexCommandError` for malformed or unsupported payloads.
-    ``session.resume``, ``session.event_ack`` and ``conversation.item.retrieve``
-    are transport concerns and are rejected with ``code="unknown_event"``.
+    ``session.resume`` and ``session.event_ack`` are transport concerns and are
+    rejected with ``code="unknown_event"``.
     """
     defaults = defaults or RealtimeInputDefaults()
     event_type = payload.get("type")

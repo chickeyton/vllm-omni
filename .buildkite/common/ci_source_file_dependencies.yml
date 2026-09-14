@@ -45,7 +45,6 @@ x-minicpmo-4-5-duplex: &minicpmo_4_5_duplex
   - vllm_omni/entrypoints/duplex_omni.py
   - vllm_omni/entrypoints/async_omni_base.py
   - vllm_omni/clients/
-  - vllm_omni/entrypoints/duplex_request_client.py
   - vllm_omni/outputs/duplex.py
   - vllm_omni/model_executor/duplex_sampling.py
   - vllm_omni/experimental/fullduplex/

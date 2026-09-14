@@ -131,6 +131,11 @@ class DuplexSessionManager:
         self._closing: dict[str, _PendingSessionCleanup] = {}
         #: Session ids whose ``open`` passed the capacity check and is still awaiting the plugin.
         self._admitting: set[str] = set()
+        #: Opens whose caller gave up (control RPC timeout / cancellation) before
+        #: admission finished. The open completes anyway -- it is already past
+        #: the capacity check -- so it must tear itself down on arrival instead
+        #: of holding a slot and a stage resource until idle expiry.
+        self._abandoned_opens: set[str] = set()
         self._request_index: dict[str, str] = {}
         self._session_control_tails: dict[str, asyncio.Task[None]] = {}
         self._dispatched_control_tasks: set[asyncio.Task[None]] = set()
@@ -496,6 +501,11 @@ class DuplexSessionManager:
             self.ensure_stage_request(session, stage_id=0)
             runner.start()
             await self._put_result(message, operation="open", ok=True, session=session)
+            if session_id in self._abandoned_opens:
+                # The caller timed out while we were admitting; hand the slot
+                # and the stage resource straight back.
+                self._abandoned_opens.discard(session_id)
+                await self._close_runner(runner, kind="close", reason="open_abandoned")
         except Exception as exc:
             error_code, _, _ = self._control_error(exc)
             if error_code in {"resource_exhausted", "session_exists"}:
@@ -520,6 +530,7 @@ class DuplexSessionManager:
         finally:
             if holds_admission_slot:
                 self._admitting.discard(session_id)
+            self._abandoned_opens.discard(session_id)
 
     def _require_runner(self, session_id: str) -> DuplexSessionRunner:
         runner = self.runners.get(session_id)
@@ -533,6 +544,10 @@ class DuplexSessionManager:
         session_id = message.session_id
         runner = self.runners.get(session_id)
         if runner is None:
+            if session_id in self._admitting:
+                # The open is still awaiting the plugin. It cannot be cancelled
+                # from here, so leave a note it checks before returning.
+                self._abandoned_opens.add(session_id)
             # Already closing, or closed and forgotten: ids are never reused
             # (D16), so a repeated close is idempotent rather than an error.
             await self._put_result(message, operation="close", ok=True)
@@ -602,7 +617,10 @@ class DuplexSessionManager:
         try:
             await self._finalize_pending_cleanup(pending, session)
         finally:
-            if emit_after_cleanup:
+            # ``emit_after_cleanup`` was decided before the teardown awaits; a
+            # runtime close racing them may have emitted the terminal already.
+            if emit_after_cleanup and not runner.closed_emitted:
+                runner.mark_closed_emitted()
                 terminal: DuplexEvent = (
                     SessionExpired(reason=reason) if kind == "expired" else SessionClosed(reason=reason)
                 )

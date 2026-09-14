@@ -32,9 +32,12 @@ class _FakeRpcClient:
     def __init__(self, result: Any) -> None:
         self.result = result
         self.calls: list[tuple[tuple[str, str], Any, float | None]] = []
+        #: Control RPCs must block rather than raise a raw queue.Full.
+        self.block_on_submit_flags: list[bool] = []
 
-    def execute(self, key, message, *, timeout=None, timeout_message=None):
+    def execute(self, key, message, *, timeout=None, timeout_message=None, block_on_submit=False):
         self.calls.append((key, message, timeout))
+        self.block_on_submit_flags.append(block_on_submit)
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -78,6 +81,9 @@ async def test_open_session_runs_the_correlated_rpc_with_the_typed_config() -> N
     assert isinstance(message, OpenDuplexSessionMessage)
     assert message.session_id == "sid" and message.session_config is config
     assert timeout == 3.0
+    # A momentarily full request queue is backpressure, not a failed open: the
+    # control RPC blocks rather than raising an untyped queue.Full at the caller.
+    assert engine.rpc_client.block_on_submit_flags == [True]
 
 
 @pytest.mark.asyncio

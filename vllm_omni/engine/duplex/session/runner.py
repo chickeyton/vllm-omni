@@ -280,6 +280,15 @@ class DuplexSessionRunner:
         """Whether ``session.closed`` / ``session.expired`` already left this runner."""
         return self.run.closed_emitted
 
+    def mark_closed_emitted(self) -> None:
+        """Claim the session's one terminal event for the caller.
+
+        The manager emits the deferred terminal itself, after the stage cleanup;
+        recording it here stops a late runtime close emitting a second one.
+        """
+        self.run.closed_emitted = True
+        self.run.closed_deferred = False
+
     @property
     def closing(self) -> bool:
         """Whether an irreversible close has begun (commands and control ops are refused)."""
@@ -1060,7 +1069,11 @@ class DuplexSessionRunner:
         self.run.runtime_closed = True
         self._begin_close(reason)
         self._cleanup_duplex_session_state()
-        if not self.run.closed_emitted:
+        # ``closed_deferred`` means a manager-driven close already promised the
+        # terminal after its stage cleanup. Emitting here too would give the
+        # session two terminal events: this path can run concurrently, when an
+        # append task abandoned by that close fails and calls back in.
+        if not self.run.closed_emitted and not self.run.closed_deferred:
             self.run.closed_emitted = True
             self.emit({"type": "session.closed", "session_id": session.session_id, "reason": reason})
         session.close()

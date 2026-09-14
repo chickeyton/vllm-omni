@@ -36,6 +36,7 @@ from vllm_omni.engine.duplex.events import (
     SessionResyncRequired,
 )
 from vllm_omni.engine.duplex.messages import DuplexSessionError
+from vllm_omni.engine.duplex.realtime_commands import RealtimeInputDefaults
 from vllm_omni.entrypoints.duplex.realtime_input import RealtimeEnvelope, parse_resume_request
 from vllm_omni.entrypoints.duplex.session_attachment import (
     DuplexJournalGapError,
@@ -97,6 +98,10 @@ class OmniDuplexSessionHandler:
             replay_max_bytes_per_session=runtime_config.resume_replay_max_bytes_per_session,
         )
         self._resync_required_sessions: set[str] = set()
+        #: Wire defaults (input/output audio format and rate) per session. They
+        #: are negotiated on the session but live on the per-connection
+        #: envelope, so a reconnect has to be handed them back.
+        self._input_defaults: dict[str, RealtimeInputDefaults] = {}
         self._pumps: dict[str, asyncio.Task[None]] = {}
 
     # ------------------------------------------------------------------ #
@@ -133,6 +138,7 @@ class OmniDuplexSessionHandler:
                     return
             if pending_command is not None:
                 await self._submit_wire_event(attachment, envelope, pending_command, send_json)
+            self._input_defaults[attachment.handle.session_id] = envelope.defaults
             await self._read_loop(websocket, envelope, attachment, send_json)
         except WebSocketDisconnect:
             if attachment is not None:
@@ -290,6 +296,13 @@ class OmniDuplexSessionHandler:
                 )
             with suppress(Exception):
                 await replaced.close("session_replaced")
+        # A reconnect brings a fresh envelope carrying pcm16/16 kHz wire
+        # defaults. The negotiated input format is a wire default, not part of
+        # the public session object, so it has to be carried over explicitly:
+        # otherwise the first append that omits format/rate is decoded as pcm16.
+        remembered = self._input_defaults.get(session_id)
+        if remembered is not None:
+            envelope.defaults = remembered
         self._start_pump(handle, None)
         return _Attachment(handle=handle, generation=resumed.attachment_generation)
 
@@ -328,6 +341,7 @@ class OmniDuplexSessionHandler:
         finally:
             self._pumps.pop(session_id, None)
             self._resync_required_sessions.discard(session_id)
+            self._input_defaults.pop(session_id, None)
             attachment = None
             with suppress(Exception):
                 attachment = await self._attachment_registry.close(session_id)
@@ -457,6 +471,9 @@ class OmniDuplexSessionHandler:
         except DuplexCommandError as exc:
             await send_json(envelope.command_error_payload(exc))
             return
+        # ``translate`` folds a session.update's audio settings into the
+        # envelope; remember them so a later reconnect starts where this left off.
+        self._input_defaults[attachment.handle.session_id] = envelope.defaults
         await self._submit_command(attachment, envelope, command, send_json)
 
     async def _submit_command(

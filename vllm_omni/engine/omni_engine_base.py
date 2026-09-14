@@ -864,13 +864,9 @@ class OmniEngineBase:
     ) -> None:
         """Initialize engine-wide settings resolved from pipeline metadata."""
         self.endpoint_restrictions = pipeline_config.endpoint_restrictions if pipeline_config is not None else ()
-        self._duplex_runtime_extension_path = (
-            pipeline_config.duplex_runtime_extension if pipeline_config is not None else None
-        )
-        self.duplex_serving_adapter_path = (
-            pipeline_config.duplex_serving_adapter if pipeline_config is not None else None
-        )
-        self._duplex_control_enabled = bool(pipeline_config and pipeline_config.duplex_control_enabled)
+        # No duplex_runtime_extension / duplex_serving_adapter / duplex_control
+        # here: the pre-framework wiring they named is gone, and design rule 3
+        # in docs/design/fullduplex.md keeps duplex vocabulary out of the base.
         self.duplex_session_config = DuplexSessionRuntimeConfig()
         if config_path is not None:
             if self.deploy_config is not None and self._deploy_config_source == str(config_path):
