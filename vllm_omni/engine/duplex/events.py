@@ -689,8 +689,6 @@ MODEL_OUTPUT_EVENTS = frozenset(
         "response.output_item.added",
         "response.content_part.added",
         "response.output_audio.delta",
-        "response.output_audio.delta",
-        "response.output_audio.done",
         "response.output_audio.done",
         "response.output_text.delta",
         "response.output_text.done",
