@@ -27,18 +27,22 @@ session rather than artefacts of this adapter:
 * **Every request holds an admission slot** for its lifetime, so
   ``duplex_session.max_sessions`` bounds HTTP concurrency as well as realtime
   sessions.
-* **Latency follows the model's own clock.** A model-native session generates
-  per audio unit, so a short answer still costs what that many units cost.
+* **A long prompt may go unanswered.** The model decides per audio unit whether
+  to speak, and it declines a turn seeded with a long prompt: measured, a
+  ~4,000-character prompt produced no answer at all while short ones answer in
+  under half a second. Such a request fails after
+  ``_FIRST_CONTENT_TIMEOUT_S`` rather than at the session's idle TTL.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
 import uuid
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from contextlib import aclosing, suppress
+from contextlib import suppress
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +59,7 @@ from vllm.logger import init_logger
 from vllm_omni.engine.duplex.config import DuplexSessionConfig
 from vllm_omni.engine.duplex.events import (
     AudioDelta,
+    DuplexEvent,
     ErrorEvent,
     ResponseDone,
     SessionClosed,
@@ -72,6 +77,25 @@ logger = init_logger(__name__)
 
 #: Sample rate of the silence units a seeded turn is given to generate on.
 _PRIMING_SAMPLE_RATE_HZ = 16000
+
+#: How long to wait for the model to start answering before giving up. A model
+#: that declines the turn says nothing at all, and the session would otherwise
+#: sit until its idle TTL -- five minutes of a caller's time to learn there was
+#: no answer. Generous next to a working turn, which starts in well under a
+#: second; only the first content is bounded, never the length of the answer.
+_FIRST_CONTENT_TIMEOUT_S = 30.0
+
+_TURN_NOT_TAKEN_MESSAGE = (
+    "the duplex model did not begin answering within "
+    f"{_FIRST_CONTENT_TIMEOUT_S:.0f}s. A model-native model decides per audio unit "
+    "whether to speak, and it declined this turn; a shorter prompt is more likely "
+    "to be answered."
+)
+
+
+class _TurnNotTaken(Exception):
+    """The model never started answering, so there is nothing to wait for."""
+
 
 #: Default session instruction for a chat request that brings no system
 #: message. A duplex session's own default describes a conversation to take
@@ -409,6 +433,39 @@ class DuplexChatCompletionsAdapter:
     # Session -> response                                                #
     # ------------------------------------------------------------------ #
 
+    async def _answer_events(self, handle: DuplexSessionHandle) -> AsyncGenerator[DuplexEvent, None]:
+        """The session's events, giving up if the model never starts answering.
+
+        A model decides per audio unit whether to speak, and one that declines
+        the turn emits listen decisions and nothing else. The session then sits
+        until its idle TTL -- 300 seconds of a caller's time to discover there
+        was no answer, observed on a long prompt. Bounding the wait for the
+        *first* content makes that failure prompt and legible instead. Once
+        content is flowing the stream runs to completion unbounded, because a
+        long answer is not a stuck one.
+        """
+        started = False
+        deadline = time.monotonic() + _FIRST_CONTENT_TIMEOUT_S
+        events = handle.events()
+        try:
+            while True:
+                timeout = None if started else max(0.0, deadline - time.monotonic())
+                try:
+                    event = await asyncio.wait_for(events.__anext__(), timeout=timeout)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    raise _TurnNotTaken from None
+                if not started and self._carries_content(event):
+                    started = True
+                yield event
+        finally:
+            await events.aclose()
+
+    @staticmethod
+    def _carries_content(event: DuplexEvent) -> bool:
+        return isinstance(event, TextDelta | TranscriptDelta | AudioDelta) and bool(event.delta)
+
     async def _collect(
         self, handle: DuplexSessionHandle, request: ChatCompletionRequest
     ) -> ChatCompletionResponse | ErrorResponse:
@@ -418,8 +475,8 @@ class DuplexChatCompletionsAdapter:
         transcript: list[str] = []
         finish_reason = "stop"
 
-        async with aclosing(handle.events()) as events:
-            async for event in events:
+        try:
+            async for event in self._answer_events(handle):
                 if isinstance(event, ErrorEvent):
                     return self._error_from_code(event.message, event.code)
                 if isinstance(event, TextDelta):
@@ -438,6 +495,8 @@ class DuplexChatCompletionsAdapter:
                         err_type="internal_server_error",
                         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
+        except _TurnNotTaken:
+            return self.create_error_response(_TURN_NOT_TAKEN_MESSAGE, status_code=HTTPStatus.GATEWAY_TIMEOUT)
 
         # A duplex model answers by speaking, so its words arrive as the audio
         # transcript. That transcript is the assistant's text; a chat client
@@ -490,28 +549,30 @@ class DuplexChatCompletionsAdapter:
         try:
             await self._start_turn(handle, request)
             yield chunk({"role": "assistant", "content": ""})
-            async with aclosing(handle.events()) as events:
-                async for event in events:
-                    if isinstance(event, ErrorEvent):
-                        logger.warning("duplex chat completion stream failed: %s: %s", event.code, event.message)
-                        yield failure(event.message, event.code or "duplex_error")
-                        break
-                    # A duplex model answers by speaking, so the transcript is
-                    # the assistant's text; a model that emits text directly
-                    # sends TextDelta instead. Never both for the same words.
-                    if isinstance(event, TextDelta | TranscriptDelta):
-                        if event.delta:
-                            yield chunk({"content": event.delta})
-                    elif isinstance(event, ResponseDone):
-                        yield chunk({}, finish_reason=self._finish_reason(event))
-                        break
-                    elif isinstance(event, SessionClosed):
-                        logger.warning("duplex session %s ended mid-stream: %s", handle.session_id, event.reason)
-                        yield failure(
-                            f"the duplex session ended before the response completed: {event.reason}",
-                            "duplex_session_closed",
-                        )
-                        break
+            async for event in self._answer_events(handle):
+                if isinstance(event, ErrorEvent):
+                    logger.warning("duplex chat completion stream failed: %s: %s", event.code, event.message)
+                    yield failure(event.message, event.code or "duplex_error")
+                    break
+                # A duplex model answers by speaking, so the transcript is the
+                # assistant's text; a model that emits text directly sends
+                # TextDelta instead. Never both for the same words.
+                if isinstance(event, TextDelta | TranscriptDelta):
+                    if event.delta:
+                        yield chunk({"content": event.delta})
+                elif isinstance(event, ResponseDone):
+                    yield chunk({}, finish_reason=self._finish_reason(event))
+                    break
+                elif isinstance(event, SessionClosed):
+                    logger.warning("duplex session %s ended mid-stream: %s", handle.session_id, event.reason)
+                    yield failure(
+                        f"the duplex session ended before the response completed: {event.reason}",
+                        "duplex_session_closed",
+                    )
+                    break
+        except _TurnNotTaken:
+            logger.warning("duplex model did not take the turn for session %s", handle.session_id)
+            yield failure(_TURN_NOT_TAKEN_MESSAGE, "duplex_turn_not_taken")
         except Exception as exc:
             logger.exception("duplex chat completion stream failed: %s", exc)
             yield failure(f"duplex chat completion failed: {exc}", "internal_server_error")

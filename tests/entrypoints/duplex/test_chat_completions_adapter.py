@@ -10,6 +10,7 @@ on every exit.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any
 
@@ -31,6 +32,7 @@ from vllm_omni.engine.duplex.events import (
     TranscriptDelta,
 )
 from vllm_omni.engine.duplex.messages import DuplexSessionError
+from vllm_omni.entrypoints.duplex import chat_completions
 from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
 from vllm_omni.entrypoints.openai import api_server
 
@@ -565,3 +567,49 @@ async def test_a_request_with_no_system_message_gets_a_chat_shaped_instruction()
 
     assert omni.opened[0].instructions
     assert "answer" in omni.opened[0].instructions.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_the_model_never_takes_fails_promptly(monkeypatch) -> None:
+    """A declined turn must not cost the caller the session's idle TTL.
+
+    Measured against a real server: a ~4,000-character prompt produced no
+    content at all and the request died at the 300 s session timeout. Only the
+    wait for the *first* content is bounded; a long answer is not a stuck one.
+    """
+    monkeypatch.setattr(chat_completions, "_FIRST_CONTENT_TIMEOUT_S", 0.05)
+    omni = FakeOmni([])  # the session yields session.created and then says nothing
+
+    async def silent_events(self):
+        yield SessionCreated(session_id=self.session_id, session={"id": self.session_id})
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(FakeHandle, "events", silent_events)
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 504
+    assert "did not begin answering" in response.error.message
+    assert omni.closed == [_SESSION_ID], "a turn the model declined must not hold the slot"
+
+
+@pytest.mark.asyncio
+async def test_a_long_answer_is_not_cut_off_by_the_first_content_bound(monkeypatch) -> None:
+    """The bound is on starting, not on finishing."""
+    monkeypatch.setattr(chat_completions, "_FIRST_CONTENT_TIMEOUT_S", 0.05)
+    omni = FakeOmni()
+
+    async def slow_after_first(self):
+        yield SessionCreated(session_id=self.session_id, session={"id": self.session_id})
+        yield TextDelta(delta="start")
+        await asyncio.sleep(0.2)  # longer than the bound, but content has begun
+        yield TextDelta(delta=" and end")
+        yield ResponseDone(response={"status": "completed"})
+
+    monkeypatch.setattr(FakeHandle, "events", slow_after_first)
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].message.content == "start and end"
