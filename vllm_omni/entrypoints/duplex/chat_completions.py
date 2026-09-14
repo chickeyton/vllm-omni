@@ -93,7 +93,7 @@ _TURN_NOT_TAKEN_MESSAGE = (
 )
 
 
-class _TurnNotTaken(Exception):
+class _TurnNotTakenError(Exception):
     """The model never started answering, so there is nothing to wait for."""
 
 
@@ -455,7 +455,7 @@ class DuplexChatCompletionsAdapter:
                 except StopAsyncIteration:
                     return
                 except TimeoutError:
-                    raise _TurnNotTaken from None
+                    raise _TurnNotTakenError from None
                 if not started and self._carries_content(event):
                     started = True
                 yield event
@@ -495,7 +495,7 @@ class DuplexChatCompletionsAdapter:
                         err_type="internal_server_error",
                         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
-        except _TurnNotTaken:
+        except _TurnNotTakenError:
             return self.create_error_response(_TURN_NOT_TAKEN_MESSAGE, status_code=HTTPStatus.GATEWAY_TIMEOUT)
 
         # A duplex model answers by speaking, so its words arrive as the audio
@@ -570,7 +570,7 @@ class DuplexChatCompletionsAdapter:
                         "duplex_session_closed",
                     )
                     break
-        except _TurnNotTaken:
+        except _TurnNotTakenError:
             logger.warning("duplex model did not take the turn for session %s", handle.session_id)
             yield failure(_TURN_NOT_TAKEN_MESSAGE, "duplex_turn_not_taken")
         except Exception as exc:
