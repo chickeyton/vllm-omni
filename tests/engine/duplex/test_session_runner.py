@@ -832,12 +832,66 @@ async def test_turn_mode_commit_with_response_create_starts_one_response() -> No
 
 
 @pytest.mark.asyncio
-async def test_response_create_without_committed_audio_is_rejected() -> None:
+async def test_response_create_with_no_input_at_all_is_rejected() -> None:
+    """Nothing committed and no items: refuse rather than emit an empty turn."""
     h = await open_harness(auto_response=False)
     try:
         events = await h.run(commands.CreateResponse(event_id="evt-resp"))
         assert types(events) == ["error"]
         assert events[0].code == "response_create_without_input"
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_response_create_answers_conversation_items_with_no_audio() -> None:
+    """The Realtime shape: build the turn from items, then ask for a response.
+
+    A model-native session still generates per audio unit, so the runner primes
+    the turn with the model's own silence unit. Before this was allowed, a
+    caller with a text prompt had no way to start a turn at all.
+    """
+    h = await open_harness(auto_response=False)
+    try:
+        await h.run(
+            commands.CreateItem(
+                item={
+                    "id": "item_prompt",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "What is 2+2?"}],
+                }
+            )
+        )
+        events = await h.run(commands.CreateResponse(event_id="evt-resp"))
+        assert "error" not in types(events), events
+        assert h.port.submissions, "an item-only response.create must submit a turn"
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_conversation_items_are_consumed_by_the_turn_they_start() -> None:
+    """The items belong to the turn that answered them, not to the next one.
+
+    Without this, a session that once received an item would let every later
+    ``response.create`` start an empty turn off the same stale input.
+    """
+    h = await open_harness(auto_response=False)
+    try:
+        await h.run(
+            commands.CreateItem(
+                item={
+                    "id": "item_hi",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            )
+        )
+        assert h.session.has_uncommitted_conversation_input()
+        await h.run(commands.CreateResponse(event_id="evt-first"))
+        assert not h.session.has_uncommitted_conversation_input()
     finally:
         await close_harness(h)
 
