@@ -87,7 +87,6 @@ from vllm_omni.config.endpoint_policy import (
     shutdown_unsupported_routes,
 )
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
 from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.entrypoints.duplex.warmup import _warmup_duplex_realtime
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni
@@ -533,12 +532,13 @@ async def build_async_omni_from_stage_config(
             async_omni.shutdown()
 
 
-def _init_duplex_app_state(
+async def _init_duplex_app_state(
     engine_client: DuplexOmni,
     state: State,
     args: Namespace,
     base_model_paths: list[BaseModelPath],
     vllm_config: Any,
+    request_logger: RequestLogger | None,
 ) -> None:
     """Minimal app state for a duplex server: only the surfaces a duplex session backs."""
     state.vllm_config = vllm_config
@@ -550,6 +550,7 @@ def _init_duplex_app_state(
     )
     state.serving_tokenization = None
     state.serving_tokens = None
+    # Replaced by the chat init below when the model serves chat.
     state.online_renderer = None
     for attribute in (
         "openai_serving_chat_batch",
@@ -573,20 +574,89 @@ def _init_duplex_app_state(
     ):
         setattr(state, attribute, None)
     state.openai_serving_duplex = OmniDuplexSessionHandler(duplex_omni=engine_client)
-    # /v1/chat/completions runs on a duplex session like any other Realtime
-    # client, so it needs no task support and no capability of its own. A model
-    # that should not serve it says so through the deploy config's
-    # endpoint_restrictions, which the caller applies to the routes afterwards.
-    state.openai_serving_chat = DuplexChatCompletionsAdapter(
-        duplex_omni=engine_client,
-        model_name=base_model_paths[0].name if base_model_paths else engine_client.model,
-    )
+    # One engine, both surfaces. ``DuplexOmni`` extends ``AsyncOmni``, so the
+    # ordinary chat service runs on it unchanged: a chat request is a turn-based
+    # request on the same pipeline, not a session, and costs no admission slot.
+    state.openai_serving_chat = await _init_duplex_chat(engine_client, state, args, request_logger)
     state.enable_server_load_tracking = getattr(args, "enable_server_load_tracking", False)
     state.server_load_metrics = 0
-    logger.info(
-        "Duplex mode: serving %s over /v1/realtime?duplex=1 and /v1/chat/completions "
-        "(one duplex session per chat request, so max_sessions caps HTTP concurrency too)",
-        engine_client.model,
+    if state.openai_serving_chat is not None:
+        logger.info(
+            "Duplex mode: serving %s over /v1/realtime?duplex=1 and /v1/chat/completions",
+            engine_client.model,
+        )
+    else:
+        logger.info(
+            "Duplex mode: serving %s over /v1/realtime?duplex=1 only "
+            "(/v1/chat/completions unavailable: the model does not declare supports_chat_completions)",
+            engine_client.model,
+        )
+
+
+async def _init_duplex_chat(
+    engine_client: DuplexOmni,
+    state: State,
+    args: Namespace,
+    request_logger: RequestLogger | None,
+) -> OmniOpenAIServingChat | None:
+    """The ordinary chat service, on a duplex engine, when the model allows it.
+
+    Gated on ``DuplexCapabilities.supports_chat_completions`` so the decision
+    stays the model's: a duplex model that should not answer chat requests says
+    so in its plugin, and the route reports "not available" rather than
+    answering badly. ``endpoint_restrictions`` remains the per-deployment
+    opt-out on top of this.
+    """
+    if not engine_client.duplex_capabilities.supports_chat_completions:
+        return None
+    supported_tasks: set[str] = {"generate"}
+    if hasattr(engine_client, "get_supported_tasks"):
+        supported_tasks = set(await engine_client.get_supported_tasks())
+    if "generate" not in supported_tasks:
+        return None
+
+    resolved_chat_template = load_chat_template(args.chat_template)
+    if resolved_chat_template is None:
+        try:
+            tokenizer = await engine_client.get_tokenizer()
+        except Exception as exc:
+            logger.debug("Could not inspect tokenizer chat_template before duplex chat init: %s", exc)
+            tokenizer = None
+        if tokenizer is None or getattr(tokenizer, "chat_template", None) is None:
+            resolved_chat_template = _load_model_chat_template_json(args.model)
+
+    state.online_renderer = OnlineRenderer(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+    )
+    return OmniOpenAIServingChat(
+        engine_client=engine_client,
+        models=state.openai_serving_models,
+        response_role=args.response_role,
+        online_renderer=state.online_renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        trust_request_chat_template=args.trust_request_chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        enable_log_deltas=args.enable_log_deltas,
     )
 
 
@@ -644,7 +714,7 @@ async def omni_init_app_state(
     # run over /v1/realtime?duplex=1; every turn-based HTTP route reports
     # "not available".
     if isinstance(engine_client, DuplexOmni):
-        _init_duplex_app_state(engine_client, state, args, base_model_paths, vllm_config)
+        await _init_duplex_app_state(engine_client, state, args, base_model_paths, vllm_config, request_logger)
         return
 
     # Pure Diffusion mode: use simplified initialization logic

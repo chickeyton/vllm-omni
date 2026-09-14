@@ -32,7 +32,7 @@ from vllm_omni.engine.duplex.messages import (
 )
 from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, EncodeAudio, load_duplex_plugin
 from vllm_omni.engine.messages import EngineQueueMessage
-from vllm_omni.engine.omni_engine_base import OmniEngineBase
+from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.orchestrator import OrchestratorBase
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ _DEFAULT_CONTROL_TIMEOUT_S = 10.0
 _COMMAND_PUT_TIMEOUT_S = 30.0
 
 
-class DuplexOmniEngine(OmniEngineBase):
+class DuplexOmniEngine(AsyncOmniEngine):
     """Engine for full-duplex models; sessions run inside ``DuplexOrchestrator``."""
 
     plugin: DuplexModelPlugin | None = None
