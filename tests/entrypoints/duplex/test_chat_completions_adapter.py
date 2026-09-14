@@ -1,0 +1,350 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
+"""``/v1/chat/completions`` served on a duplex session.
+
+What these pin down: the adapter speaks only ordinary Realtime verbs, it never
+asks the framework for anything chat-shaped, and it releases the admission slot
+on every exit.
+"""
+
+from __future__ import annotations
+
+import base64
+from typing import Any
+
+import pytest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+
+from vllm_omni.engine.duplex.config import DuplexSessionConfig
+from vllm_omni.engine.duplex.events import (
+    AudioDelta,
+    DuplexEvent,
+    ErrorEvent,
+    ResponseDone,
+    SessionClosed,
+    SessionCreated,
+    TextDelta,
+    TranscriptDelta,
+)
+from vllm_omni.engine.duplex.messages import DuplexSessionError
+from vllm_omni.entrypoints.duplex.chat_completions import DuplexChatCompletionsAdapter
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+_SESSION_ID = "duplex-test"
+_PCM = b"\x01\x02" * 8
+
+
+class FakeHandle:
+    """Records the wire verbs the adapter submits and replays a scripted response."""
+
+    def __init__(self, session_id: str, script: list[DuplexEvent]) -> None:
+        self.session_id = session_id
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.closed = False
+        self._script = list(script)
+
+    async def append_audio(self, audio: bytes, *, format: str = "pcm16", sample_rate_hz: int | None = None) -> None:
+        self.calls.append(("append_audio", {"audio": audio, "format": format, "sample_rate_hz": sample_rate_hz}))
+
+    async def create_item(self, item: Any, *, previous_item_id: str | None = None) -> None:
+        self.calls.append(("create_item", {"item": dict(item)}))
+
+    async def commit(self, *, final: bool = True, create_response: bool | None = None, **_: Any) -> None:
+        self.calls.append(("commit", {"final": final, "create_response": create_response}))
+
+    async def create_response(self, options: Any = None) -> None:
+        self.calls.append(("create_response", {"options": options}))
+
+    async def events(self):
+        yield SessionCreated(session_id=self.session_id, session={"id": self.session_id})
+        for event in self._script:
+            yield event
+
+    def verbs(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+
+class FakeOmni:
+    def __init__(self, script: list[DuplexEvent] | None = None) -> None:
+        self.model = "fake-duplex-model"
+        self.opened: list[DuplexSessionConfig] = []
+        self.closed: list[str] = []
+        self.handle: FakeHandle | None = None
+        self.open_error: Exception | None = None
+        self._script = script or [ResponseDone(response_id="r1", response={"status": "completed"})]
+
+    async def open_session(self, config: Any) -> FakeHandle:
+        if self.open_error is not None:
+            raise self.open_error
+        self.opened.append(config)
+        self.handle = FakeHandle(_SESSION_ID, self._script)
+        return self.handle
+
+    async def close_session(self, session_id: str, *, reason: str = "client_close", **_: Any) -> None:
+        self.closed.append(session_id)
+
+
+def _adapter(omni: FakeOmni) -> DuplexChatCompletionsAdapter:
+    return DuplexChatCompletionsAdapter(duplex_omni=omni, model_name="fake-duplex-model")
+
+
+def _request(**kwargs: Any) -> ChatCompletionRequest:
+    kwargs.setdefault("model", "fake-duplex-model")
+    kwargs.setdefault("messages", [{"role": "user", "content": "hello"}])
+    return ChatCompletionRequest(**kwargs)
+
+
+def _audio_message(data: bytes = _PCM, fmt: str = "pcm16") -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "input_audio", "input_audio": {"data": base64.b64encode(data).decode(), "format": fmt}},
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The prompt becomes ordinary Realtime input                                  #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_text_turn_is_conversation_items_and_a_response_create() -> None:
+    """No audio in the request means no input buffer: the items are the whole turn."""
+    omni = FakeOmni([TextDelta(delta="hi "), TextDelta(delta="there"), ResponseDone(response={"status": "completed"})])
+
+    response = await _adapter(omni).create_chat_completion(
+        _request(messages=[{"role": "system", "content": "be brief"}, {"role": "user", "content": "hello"}])
+    )
+
+    handle = omni.handle
+    assert handle is not None
+    assert handle.verbs() == ["create_item", "create_item", "create_response"]
+    roles = [call["item"]["role"] for _, call in handle.calls if _ == "create_item"]
+    assert roles == ["system", "user"]
+    # A user turn is Realtime ``input_text``, not the assistant's ``text``.
+    assert handle.calls[1][1]["item"]["content"] == [{"type": "input_text", "text": "hello"}]
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].message.content == "hi there"
+    assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_audio_content_goes_to_the_input_buffer_and_the_commit_starts_the_turn() -> None:
+    omni = FakeOmni([TextDelta(delta="a bell"), ResponseDone(response={"status": "completed"})])
+
+    await _adapter(omni).create_chat_completion(_request(messages=[_audio_message()]))
+
+    handle = omni.handle
+    assert handle is not None
+    # The commit both ends the input and asks for the response, so there is no
+    # separate response.create.
+    assert handle.verbs() == ["append_audio", "create_item", "commit"]
+    assert handle.calls[0][1]["audio"] == _PCM  # decoded, not the base64 the caller sent
+    assert handle.calls[2][1] == {"final": True, "create_response": True}
+    # The audio part is not repeated as a conversation item.
+    assert handle.calls[1][1]["item"]["content"] == [{"type": "input_text", "text": "what is this?"}]
+
+
+@pytest.mark.asyncio
+async def test_generation_options_are_session_scoped_not_response_scoped() -> None:
+    """A model-native session refuses per-response overrides, so they must be set at open time."""
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(_request(temperature=0.3, max_tokens=64))
+
+    config = omni.opened[0]
+    assert isinstance(config, DuplexSessionConfig)
+    assert (config.temperature, config.max_tokens) == (0.3, 64)
+    assert config.modalities == ["text"]
+    # Nothing in the session config asks for voice activity detection: this turn
+    # is delimited by the request.
+    assert "realtime_turn_detection" not in config.extra_body
+    assert omni.handle is not None
+    assert omni.handle.calls[-1] == ("create_response", {"options": None})
+
+
+# --------------------------------------------------------------------------- #
+# The response                                                                #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_audio_output_becomes_the_message_audio_field() -> None:
+    omni = FakeOmni(
+        [
+            AudioDelta(delta=base64.b64encode(b"\x00\x01").decode()),
+            TranscriptDelta(delta="spoken"),
+            AudioDelta(delta=base64.b64encode(b"\x02\x03").decode()),
+            ResponseDone(response={"status": "completed"}),
+        ]
+    )
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ChatCompletionResponse)
+    audio = response.choices[0].message.audio
+    assert audio is not None
+    assert base64.b64decode(audio.data) == b"\x00\x01\x02\x03"
+    assert audio.transcript == "spoken"
+
+
+@pytest.mark.asyncio
+async def test_an_incomplete_response_reports_length() -> None:
+    omni = FakeOmni([TextDelta(delta="cut"), ResponseDone(response={"status": "incomplete"})])
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].finish_reason == "length"
+
+
+# --------------------------------------------------------------------------- #
+# Errors                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"n": 2},
+        {"logprobs": True},
+        {"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]},
+    ],
+    ids=["n", "logprobs", "tools"],
+)
+@pytest.mark.asyncio
+async def test_options_a_duplex_turn_cannot_express_are_rejected_without_a_session(kwargs: dict[str, Any]) -> None:
+    """Rejected before ``open_session``: a refused request must not cost an admission slot."""
+    omni = FakeOmni()
+
+    response = await _adapter(omni).create_chat_completion(_request(**kwargs))
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert omni.opened == []
+
+
+@pytest.mark.asyncio
+async def test_no_admission_slot_is_backpressure_not_a_bad_request() -> None:
+    omni = FakeOmni()
+    omni.open_error = DuplexSessionError("no slots", code="resource_exhausted")
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 503
+
+
+@pytest.mark.asyncio
+async def test_a_turn_the_model_refuses_is_the_callers_error() -> None:
+    """The framework rejects the turn on the wire; the adapter forwards it as a 400."""
+    omni = FakeOmni(
+        [
+            ErrorEvent(
+                code="response_create_without_input",
+                message="Duplex response.create requires committed audio or conversation items to answer.",
+            )
+        ]
+    )
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "conversation items" in response.error.message
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_ends_before_the_response_is_a_server_error() -> None:
+    omni = FakeOmni([TextDelta(delta="par"), SessionClosed(reason="engine_dead")])
+
+    response = await _adapter(omni).create_chat_completion(_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 500
+    assert "engine_dead" in response.error.message
+
+
+# --------------------------------------------------------------------------- #
+# The admission slot                                                          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        [ResponseDone(response={"status": "completed"})],
+        [ErrorEvent(code="internal_error", message="boom")],
+        [SessionClosed(reason="engine_dead")],
+    ],
+    ids=["completed", "error", "session_closed"],
+)
+@pytest.mark.asyncio
+async def test_the_session_is_released_however_the_turn_ends(script: list[DuplexEvent]) -> None:
+    omni = FakeOmni(script)
+
+    await _adapter(omni).create_chat_completion(_request())
+
+    assert omni.closed == [_SESSION_ID]
+
+
+@pytest.mark.asyncio
+async def test_the_session_is_released_when_the_turn_raises() -> None:
+    """A handle that fails mid-turn still costs a slot until it is closed."""
+    omni = FakeOmni()
+    adapter = _adapter(omni)
+
+    async def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("submit failed")
+
+    real_open = omni.open_session
+
+    async def open_and_break(config: Any) -> FakeHandle:
+        handle = await real_open(config)
+        handle.create_response = explode  # type: ignore[method-assign]
+        return handle
+
+    omni.open_session = open_and_break  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        await adapter.create_chat_completion(_request())
+
+    assert omni.closed == [_SESSION_ID]
+
+
+# --------------------------------------------------------------------------- #
+# Streaming                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_one_chunk_per_text_delta_and_releases_the_session() -> None:
+    omni = FakeOmni([TextDelta(delta="one"), TextDelta(delta=" two"), ResponseDone(response={"status": "completed"})])
+
+    generator = await _adapter(omni).create_chat_completion(_request(stream=True))
+    chunks = [chunk async for chunk in generator]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert all(chunk.startswith("data: ") for chunk in chunks)
+    contents = [chunk for chunk in chunks if '"content": "one"' in chunk or '"content": " two"' in chunk]
+    assert len(contents) == 2
+    assert '"finish_reason": "stop"' in chunks[-2]
+    assert omni.closed == [_SESSION_ID]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_fails_after_it_started_still_ends_and_releases_the_session() -> None:
+    """Once bytes are on the wire the only way to report a failure is to end the stream."""
+    omni = FakeOmni([ErrorEvent(code="internal_error", message="boom")])
+
+    generator = await _adapter(omni).create_chat_completion(_request(stream=True))
+    chunks = [chunk async for chunk in generator]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert '"finish_reason": "stop"' in chunks[-2]
+    assert omni.closed == [_SESSION_ID]
