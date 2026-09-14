@@ -461,3 +461,15 @@ async def test_image_content_is_refused_rather_than_dropped() -> None:
     assert response.error.code == 400
     assert "image_url" in response.error.message
     assert omni.opened == []
+
+
+@pytest.mark.asyncio
+async def test_extra_body_reaches_the_session_so_audio_output_is_askable() -> None:
+    """A model that wants ``ref_audio`` for audio output has to be able to receive it."""
+    omni = FakeOmni()
+
+    await _adapter(omni).create_chat_completion(
+        _request(modalities=["text", "audio"], extra_body={"ref_audio": "/tmp/voice.wav"})
+    )
+
+    assert omni.opened[0].extra_body["ref_audio"] == "/tmp/voice.wav"

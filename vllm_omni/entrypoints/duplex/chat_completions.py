@@ -195,6 +195,13 @@ class DuplexChatCompletionsAdapter:
         session refuses per-response overrides.
         """
         config = DuplexSessionConfig(model=request.model or self._model_name, overlap_policy="listen_only")
+        # Same spelling a websocket client uses, and no more permissive: the
+        # Realtime open path passes its own session ``extra_body`` through
+        # unfiltered too. This is how a caller asking for audio output supplies
+        # the ``ref_audio`` such a model requires.
+        extra_body = getattr(request, "extra_body", None)
+        if isinstance(extra_body, Mapping):
+            config.extra_body = dict(extra_body)
         modalities = getattr(request, "modalities", None)
         config.modalities = [str(m) for m in modalities] if modalities else ["text"]
         if request.temperature is not None:
