@@ -507,11 +507,13 @@ def test_duplex_sequential_sessions_are_independent(omni_server) -> None:
 def test_duplex_text_only_response_create_is_rejected(omni_server) -> None:
     """A duplex session generates from audio: a text-only prompt is refused, not ignored.
 
-    Every session on this route is model-native, so the chat-completion
-    fallback that used to answer ``conversation.item.create`` +
-    ``response.create`` with synthesized speech is gone. What a text-prompt
-    client gets instead is this typed rejection, which is the contract the
-    Seed-TTS Realtime backend has to be ported to.
+    Every session on this route is model-native, and such a model decides per
+    audio unit whether to speak: conversation items are context, not a turn.
+    Refusing is the point -- opening a response the model never fills costs the
+    caller the session's whole idle timeout to discover. A text prompt reaches
+    the model through the session's seeded opening turn
+    (``initial_user_text``) instead, which is what ``/v1/chat/completions``
+    uses and what the Seed-TTS Realtime backend has to be ported to.
     """
     outcome = asyncio.run(
         _run_text_only_response_create(
@@ -525,7 +527,7 @@ def test_duplex_text_only_response_create_is_rejected(omni_server) -> None:
     assert outcome.get("type") == "error", outcome
     error = outcome.get("error")
     assert isinstance(error, dict), outcome
-    assert error.get("code") == "response_create_without_input", outcome
+    assert error.get("code") == "text_only_turn_unsupported", outcome
     assert error.get("type") == "invalid_request_error", outcome
 
 
