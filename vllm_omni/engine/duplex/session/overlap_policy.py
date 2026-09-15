@@ -74,17 +74,17 @@ def decide(
     if auto_responds:
         if is_speech:
             session.accumulate_overlap_speech(duration_ms)
-        vad_speech_started = vad_speech_started(event, payload)
+        speech_started = vad_speech_started(event, payload)
         if (
             session.capabilities.supports_barge_in
             and is_speech
             and session.config.overlap_policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value
-            and vad_speech_started is not False
+            and speech_started is not False
         ):
             return {
                 "action": "barge_in",
-                "reason": ("server_vad_speech_started" if vad_speech_started is True else "barge_in_on_speech"),
-                "cancel_reason": "turn_detected" if vad_speech_started is True else "barge_in",
+                "reason": ("server_vad_speech_started" if speech_started is True else "barge_in_on_speech"),
+                "cancel_reason": "turn_detected" if speech_started is True else "barge_in",
                 "duration_ms": duration_ms,
                 "overlap_speech_ms": session.overlap_speech_ms,
                 "buffer_audio": True,
@@ -148,8 +148,8 @@ def decide(
 
     session.accumulate_overlap_speech(duration_ms)
     if policy == DuplexOverlapPolicy.BARGE_IN_ON_SPEECH.value:
-        vad_speech_started = vad_speech_started(event, payload)
-        if vad_speech_started is False:
+        speech_started = vad_speech_started(event, payload)
+        if speech_started is False:
             return {
                 "action": "listen",
                 "reason": "server_vad_utterance_active",
@@ -162,8 +162,8 @@ def decide(
             }
         return {
             "action": "barge_in",
-            "reason": ("server_vad_speech_started" if vad_speech_started is True else "policy_barge_in_on_speech"),
-            "cancel_reason": "turn_detected" if vad_speech_started is True else "barge_in",
+            "reason": ("server_vad_speech_started" if speech_started is True else "policy_barge_in_on_speech"),
+            "cancel_reason": "turn_detected" if speech_started is True else "barge_in",
             "duration_ms": duration_ms,
             "overlap_speech_ms": session.overlap_speech_ms,
             "buffer_audio": True,
