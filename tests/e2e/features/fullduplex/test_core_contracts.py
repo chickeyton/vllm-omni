@@ -14,7 +14,7 @@ import dataclasses
 
 import pytest
 
-from vllm_omni.engine.duplex.messages import DuplexFence
+from vllm_omni.engine.duplex.contracts import DuplexFence
 from vllm_omni.experimental.fullduplex.core import protocol as ev
 from vllm_omni.experimental.fullduplex.core.adapter import (
     DuplexAdapter,
