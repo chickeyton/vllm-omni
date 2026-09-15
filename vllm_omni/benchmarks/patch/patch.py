@@ -2329,6 +2329,13 @@ class _RealtimeTTSProbe:
     request time.
     """
 
+    #: How long ``configure`` waits for a free duplex session. Every Seed-TTS
+    #: utterance is one session and the deploy config admits ``max_sessions``
+    #: of them, so a benchmark run above that concurrency queues for a slot
+    #: rather than counting the server's (retryable) refusal as a failed
+    #: request.
+    _SESSION_SLOT_WAIT_S = 120.0
+
     def __init__(self, url: str) -> None:
         from vllm_omni.clients.duplex import EventCollector
 
@@ -2359,7 +2366,7 @@ class _RealtimeTTSProbe:
         extra_body: dict[str, object] | None = None,
         timeout_s: float = 120.0,
     ) -> None:
-        from vllm_omni.clients.duplex import AudioFormat, DuplexClient, SessionConfig
+        from vllm_omni.clients.duplex import AudioFormat, DuplexClient, DuplexProtocolError, SessionConfig
 
         session_extra_body: dict[str, object] = dict(extra_body or {})
         config = SessionConfig(
@@ -2370,15 +2377,33 @@ class _RealtimeTTSProbe:
             playback_commit_policy="ack_only",
             extra_body=session_extra_body,
         )
-        self._client = DuplexClient(
-            self._url,
-            model=model,
-            config=config,
-            reconnect=None,
-            heartbeat_interval_s=None,
-            handshake_timeout_s=timeout_s,
-        )
-        await self._client.__aenter__()
+        deadline = time.monotonic() + self._SESSION_SLOT_WAIT_S
+        delay_s = 0.25
+        waited = False
+        while True:
+            # A failed handshake closes the socket on the client's side, so
+            # a refused attempt leaves nothing behind to clean up.
+            client = DuplexClient(
+                self._url,
+                model=model,
+                config=config,
+                reconnect=None,
+                heartbeat_interval_s=None,
+                handshake_timeout_s=timeout_s,
+            )
+            try:
+                await client.__aenter__()
+            except DuplexProtocolError as exc:
+                if exc.code != "resource_exhausted" or time.monotonic() >= deadline:
+                    raise
+                if not waited:
+                    logger.info("Seed-TTS Realtime TTS: no free duplex session (%s); waiting for a slot", exc)
+                    waited = True
+                await asyncio.sleep(delay_s)
+                delay_s = min(delay_s * 2.0, 2.0)
+                continue
+            self._client = client
+            break
         self._consume_task = asyncio.create_task(self.events.consume(self._client))
 
     async def send(self, event: dict[str, object]) -> None:
