@@ -1106,3 +1106,90 @@ async def test_stage0_metrics_from_several_units_are_summed_into_one_response() 
         assert stage_metrics["0"]["num_tokens_out"] == 7
     finally:
         await close_harness(h)
+
+
+# --------------------------------------------------------------------------- #
+# Server VAD                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+class _ScriptedDetector:
+    """A turn detector that answers each appended chunk with a pre-decided result."""
+
+    def __init__(self, results: list[object]) -> None:
+        self._results = list(results)
+        self.resets = 0
+
+    def process(self, base64_audio: str, *, fmt: str, sample_rate_hz: int | None, audio_end_ms: int | None = None):
+        del base64_audio, fmt, sample_rate_hz, audio_end_ms
+        return self._results.pop(0)
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+def _speech_then_stop() -> _ScriptedDetector:
+    from vllm_omni.engine.duplex.turn_detection import TurnDetectionResult
+
+    return _ScriptedDetector(
+        [
+            TurnDetectionResult(is_speech=True, speech_active=True, speech_started=True, speech_probability=0.9),
+            TurnDetectionResult(
+                is_speech=False,
+                speech_active=False,
+                speech_stopped=True,
+                speech_probability=0.05,
+                should_commit=True,
+                create_response=True,
+            ),
+        ]
+    )
+
+
+def _final_submissions(h: Harness) -> list[object]:
+    return [s for s in h.port.submissions if s.prompt["model_intermediate_buffer"]["duplex"].get("final") is True]
+
+
+@pytest.mark.asyncio
+async def test_server_vad_speech_stopped_does_not_end_the_turn_of_an_auto_response_session() -> None:
+    """A model-native session keeps its turn open past the detector's stop.
+
+    Committing at ``speech_stopped`` cut the utterance short: the model
+    listened on that early final unit, the trailing silence became a second,
+    near-empty turn, and the client's own commit answered nothing (the
+    server-VAD hard-interrupt E2E timed out waiting for the follow-up
+    response). The old translator synthesized that commit for turn-based
+    server VAD only.
+    """
+    h = await open_harness()
+    try:
+        h.runner.control._detector = _speech_then_stop()
+        first = await h.run(append_audio())
+        assert "input_audio_buffer.speech_started" in types(first)
+        # A partial unit, like the trailing silence of a real utterance: it is
+        # what a commit here would submit as the turn's final append.
+        second = await h.run(append_audio(samples=8000, is_speech=False, value=0.0))
+        assert "input_audio_buffer.speech_stopped" in types(second)
+        assert "input_audio_buffer.committed" not in types(first) + types(second)
+        assert _final_submissions(h) == [], "the detector must not close a model-native turn"
+
+        events = await h.run(commands.Commit())
+        assert types(events).count("input_audio_buffer.committed") == 1
+        assert len(_final_submissions(h)) == 1, "the client's commit closes the turn exactly once"
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_server_vad_speech_stopped_still_commits_a_turn_mode_session() -> None:
+    """Turn-based server VAD keeps the contract the old translator implemented."""
+    h = await open_harness(auto_response=False)
+    try:
+        h.runner.control._detector = _speech_then_stop()
+        await h.run(append_audio())
+        events = await h.run(append_audio(is_speech=False, value=0.0))
+        assert "input_audio_buffer.speech_stopped" in types(events)
+        assert "input_audio_buffer.committed" in types(events)
+        assert len(_final_submissions(h)) == 1, "the detector's stop commits the turn and starts the response"
+    finally:
+        await close_harness(h)

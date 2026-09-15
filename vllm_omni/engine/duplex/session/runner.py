@@ -871,6 +871,15 @@ class DuplexSessionRunner:
         """Server VAD ended the user turn: run the same commit the old translator synthesized."""
         if vad_result is None or not vad_result.should_commit:
             return
+        if self._session_auto_responds():
+            # A model-native session decides its own turns; server VAD is there
+            # to hear the user (speech_started / speech_stopped, barge-in), not
+            # to end the turn. Committing at the detector's stop cuts the
+            # utterance short: the model listens on that early final unit, the
+            # trailing silence lands in a second, near-empty turn, and the
+            # client's own commit then has nothing left to answer. The old
+            # translator synthesized this commit for turn-based server VAD only.
+            return
         command = Commit(final=True, create_response=vad_result.create_response)
         resolved = resolve_commit(self._require_projector(), command)
         self._emit_events(resolved.events)
