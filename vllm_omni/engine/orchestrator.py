@@ -1252,6 +1252,13 @@ class OrchestratorBase:
             await self._cleanup_request_ids(
                 [req_id, *self._cfg_tracker.cleanup_parent(req_id)],
                 abort=True,
+                # A session-owned request has an owner that outlives the stage
+                # request: without this the runner and its admission slot
+                # survive the replica that was serving them, and the client is
+                # told nothing -- the request-scoped ErrorMessage has no
+                # frontend request_states entry to land in. No-op for
+                # turn-based requests, which have no owner.
+                release_owners=True,
             )
 
     async def _fail_request_dead_stage(self, req_id: str, stage_id: int) -> None:

@@ -19,6 +19,8 @@ from tests.engine.test_orchestrator import (
     FakeStageClient,
     _build_stage_pools,
 )
+from vllm.v1.engine.exceptions import EngineDeadError
+
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
 from vllm_omni.engine.duplex import commands
 from vllm_omni.engine.duplex.config import DuplexSessionConfig, DuplexSessionState
@@ -483,3 +485,33 @@ async def test_an_unrecognised_message_reaches_the_turn_based_handler() -> None:
 
     assert await orchestrator._dispatch_message(msg) is True
     assert handled == ["add_request"], "an add_request must reach Orchestrator, not be dropped"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_replica_closes_the_sessions_it_was_serving() -> None:
+    """A session outlives its stage request, so replica death has to release the owner.
+
+    ``_handle_dead_replica`` cleaned the stage request but not the runner that
+    owned it: the session stayed alive holding an admission slot, and the client
+    was told nothing — the request-scoped ``ErrorMessage`` it emits has no
+    frontend ``request_states`` entry to land in for a session-owned request, so
+    the frontend drops it. Heartbeats would then keep an unusable session
+    occupying capacity.
+    """
+    orchestrator, clients, rpc_q, output_q = _build()
+    await _open(orchestrator, rpc_q)
+    request_id = _stage0_request_id()
+    await _submit(orchestrator, _append_audio())
+    session = orchestrator.session_manager.get(SESSION_ID)
+    assert session is not None
+    assert orchestrator.session_manager.active_count() == 1
+
+    await orchestrator._handle_dead_replica(0, 0, EngineDeadError("stage 0 replica 0 died"))
+    await _settle(orchestrator)
+
+    assert request_id not in orchestrator.request_states
+    assert SESSION_ID not in orchestrator.session_manager.runners
+    assert session.state == DuplexSessionState.CLOSED
+    assert orchestrator.session_manager.active_count() == 0, "the admission slot must come back"
+    types = [message.event.type for message in [output_q.get_nowait() for _ in range(output_q.qsize())]]
+    assert types[-1] in {"session.expired", "session.closed"}, "the client gets a terminal event"
