@@ -356,6 +356,56 @@ async def test_non_resumable_session_is_closed_on_disconnect() -> None:
     assert omni.detached == []
 
 
+@pytest.mark.asyncio
+async def test_a_client_close_still_delivers_session_closed_before_the_socket_goes() -> None:
+    """The read loop must not outrun the pump's terminal event.
+
+    ``DuplexSessionHandle._deliver`` queues ``SessionClosed`` and marks the
+    handle closed in one synchronous step, so ``handle.closed`` is already true
+    while the event is still sitting in the outbox. ``_read_loop`` loops on
+    exactly that flag: it returned, the endpoint returned, and the ASGI server
+    tore the socket down with ``session.closed`` unsent -- the client saw an
+    abrupt close (no close frame) instead of the terminal event it was waiting
+    for.
+
+    The teardown is what makes this observable, so it is modelled here: a real
+    connection stops accepting writes the moment the endpoint returns, which is
+    why a pump that is merely *still scheduled* is already too late.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws = FakeWebSocket({"duplex": "1", "autostart": "0"})
+
+    async def serve() -> None:
+        try:
+            await handler.handle_realtime_session(ws)
+        finally:
+            # The ASGI server drops the connection when the endpoint returns;
+            # anything the pump writes after this never reaches the client.
+            ws.break_sends()
+
+    task = asyncio.create_task(serve())
+    ws.feed(_session_update())
+    created = await ws.wait_for("session.created")
+    handle = omni.handles[created["session"]["id"]]
+    submit = handle.submit
+
+    async def closing_submit(command: commands.DuplexCommand) -> None:
+        await submit(command)
+        if isinstance(command, commands.CloseSession):
+            # Same order as the real handle: queue the event, then flip the flag.
+            handle.deliver(SessionClosed(session_id=handle.session_id, reason="client_close"))
+            handle.closed = True
+
+    handle.submit = closing_submit  # type: ignore[method-assign]
+
+    ws.feed({"type": "session.close"})
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert ws.types()[-1] == "session.closed", f"terminal event never reached the wire: {ws.types()}"
+    assert ws.closed and ws.closed[0][0] == 1000, "the socket must close with a normal close frame"
+
+
 # --------------------------------------------------------------------------- #
 # Resume and takeover                                                         #
 # --------------------------------------------------------------------------- #

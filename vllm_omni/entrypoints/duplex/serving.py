@@ -59,6 +59,10 @@ __all__ = ["OmniDuplexSessionHandler"]
 
 _DEFAULT_CONFIG_TIMEOUT_S = 10.0
 _DEFAULT_IDLE_TIMEOUT_S = 300.0
+#: How long the endpoint waits for the session pump to deliver its terminal
+#: event once the session is closed. Bounded so a wedged pump cannot pin the
+#: connection open; the pump itself closes the socket on its way out.
+_PUMP_DRAIN_TIMEOUT_S = 5.0
 #: session.created is journaled by the registry when it hands out the resume credential.
 _UNJOURNALED_EVENTS = (SessionCreated,)
 
@@ -140,6 +144,7 @@ class OmniDuplexSessionHandler:
                 await self._submit_wire_event(attachment, envelope, pending_command, send_json)
             self._input_defaults[attachment.handle.session_id] = envelope.defaults
             await self._read_loop(websocket, envelope, attachment, send_json)
+            await self._drain_terminal_pump(attachment)
         except WebSocketDisconnect:
             if attachment is not None:
                 await self._on_disconnect(attachment)
@@ -352,6 +357,32 @@ class OmniDuplexSessionHandler:
             if attachment is not None:
                 with suppress(Exception):
                     await attachment.close(close_reason)
+
+    async def _drain_terminal_pump(self, attachment: _Attachment) -> None:
+        """Let the pump deliver ``session.closed`` before the endpoint returns.
+
+        ``DuplexSessionHandle._deliver`` queues ``SessionClosed`` on the outbox
+        and marks the handle closed in the same synchronous step, so
+        ``handle.closed`` is already true while that event is still sitting in
+        the queue. ``_read_loop`` stops on exactly that flag: if the engine
+        closes the session between two reads, the loop returns, this endpoint
+        returns, and the ASGI server tears the socket down with the terminal
+        event unsent -- the client sees an abrupt close instead of
+        ``session.closed``. Waiting for the pump keeps the two in order; it is
+        the pump that sends the event and then closes with code 1000.
+
+        Only for a closed session. A takeover or a resumable disconnect leaves
+        the pump running for the next attachment, and must not be waited on.
+        """
+        if not attachment.handle.closed:
+            return
+        pump = self._pumps.get(attachment.handle.session_id)
+        if pump is None or pump.done():
+            return
+        # shield: a drain timeout must not cancel a pump that is still the
+        # session's only writer.
+        with suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(pump), _PUMP_DRAIN_TIMEOUT_S)
 
     async def _send_event(self, session_id: str, event: DuplexEvent) -> None:
         payload = event.to_realtime()
