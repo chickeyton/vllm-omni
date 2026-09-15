@@ -517,34 +517,43 @@ def test_parse_resume_request_requires_the_three_fields_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_losing_resume_cannot_detach_the_connection_that_won() -> None:
+async def test_a_resume_that_fails_to_activate_does_not_detach_the_live_attachment() -> None:
     """A rejected resume must roll back only what it owns.
 
-    Two reconnects can both pass authentication and both complete the engine
-    resume; only one activates. The loser's activation raises, and the rollback
-    used to detach the *session*, which starts the engine's disconnect grace for
-    the winner -- a grace ordinary heartbeats do not clear. The rollback is now
-    conditional on nobody being attached.
+    Two reconnects can both authenticate and both complete the engine resume;
+    only one activates. The loser's activation raises, and the rollback used to
+    detach the *session*, starting the engine's disconnect grace for the winner
+    -- a grace ordinary heartbeats do not clear.
+
+    The activation failure is injected rather than raced for: what is under test
+    is the rollback's precondition, not the window that produces it.
     """
     omni = FakeOmni()
     handler = _handler(omni)
     ws, handle, task = await _open(handler, omni)
-    token = ws.sent[0]["session"]["resume_token"]
+    token = ws.sent[0]["resume_token"]
+    registry = handler._attachment_registry
     try:
-        # The winner reconnects and is the live attachment.
-        ws_win, task_win = await _resume(handler, handle.session_id, token)
-        await ws_win.wait_for("session.resumed")
-        assert await handler._attachment_registry.has_attachment(handle.session_id)
+        assert await registry.has_attachment(handle.session_id), "the opener is attached"
         detached_before = list(omni.detached)
 
-        # The loser arrives with the now-rotated (stale) token and is refused.
-        ws_lose, task_lose = await _resume(handler, handle.session_id, token)
-        await ws_lose.wait_for("error")
+        async def failing_resume(*args, **kwargs):
+            raise RuntimeError("transport activation lost the race")
 
-        assert omni.detached == detached_before, "the loser must not detach the winner's session"
-        assert await handler._attachment_registry.has_attachment(handle.session_id)
+        original_resume = registry.resume
+        registry.resume = failing_resume  # type: ignore[method-assign]
+        try:
+            ws_lose, task_lose = await _resume(handler, handle.session_id, token)
+            error = await ws_lose.wait_for("error")
+        finally:
+            registry.resume = original_resume  # type: ignore[method-assign]
+
+        assert error["error"]["code"] == "session_resume_conflict"
+        assert omni.detached == detached_before, "the loser must not detach the winner"
+        assert await registry.has_attachment(handle.session_id), "the winner is still attached"
     finally:
-        for t in (task, task_win, task_lose):
-            t.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await t
+        for pending in (task, locals().get("task_lose")):
+            if pending is not None:
+                pending.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending
