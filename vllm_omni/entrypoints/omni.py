@@ -106,11 +106,11 @@ class Omni(OmniBase):
         sampling_params_list: Sequence[OmniSamplingParams],
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> Generator[OmniRequestOutput, None, None]:
-        gen = self._run_generation(prompts, sampling_params_list, use_tqdm)
-        try:
-            yield from gen
-        finally:
-            self.close()
+        yield from self._run_generation(
+            prompts,
+            sampling_params_list,
+            use_tqdm,
+        )
 
     def _run_generation(
         self,
@@ -205,6 +205,10 @@ class Omni(OmniBase):
                     if pbar is not None:
                         pbar.update(1)
                     self._log_summary_and_cleanup(req_id)
+        except GeneratorExit:
+            if "active_reqs" in locals() and active_reqs:
+                self.abort(list(active_reqs))
+            raise
         except Exception:
             if "active_reqs" in locals() and active_reqs:
                 for req_id in active_reqs:

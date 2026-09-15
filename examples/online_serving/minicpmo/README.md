@@ -1,19 +1,13 @@
 # MiniCPM-o 4.5: Online serving
 
-This directory contains the MiniCPM-o 4.5 full-duplex serving demos for
-vLLM-Omni. A MiniCPM-o 4.5 server is a **duplex-only** server: it speaks the
-OpenAI Realtime protocol over `/v1/realtime?duplex=1` (alias `/v1/duplex`),
-plus `/v1/models` and `/health`. The turn-based HTTP routes
-(`/v1/chat/completions`, speech, batch, ...) are not served by a duplex model;
-turn-based use of MiniCPM-o 4.5 stays available offline through the Python
-API (`Omni` / `AsyncOmni`, see
-[`examples/offline_inference/minicpmo/`](../../offline_inference/minicpmo/)).
+This directory contains MiniCPM-o 4.5 online serving demos for vLLM-Omni.
+Inputs can include text, image, audio, or video; outputs are text and optional
+24 kHz speech.
 
-For the duplex framework architecture, lifecycle invariants, capability
-boundary, and validation scope, see
+For the native duplex runtime architecture, lifecycle invariants,
+capability boundary, and validation scope, see
 [`docs/design/fullduplex.md`](../../../docs/design/fullduplex.md); for the
-`DuplexClient` / `InlineDuplexClient` API and the `/v1/realtime?duplex=1`
-wire protocol, see
+`DuplexClient` API and the `/v1/realtime?duplex=1` wire protocol, see
 [`docs/serving/realtime_duplex_api.md`](../../../docs/serving/realtime_duplex_api.md).
 
 ## Installation
@@ -46,9 +40,8 @@ profile admits at most four concurrent sequences per stage.
 | `minicpmo_4_5_3gpu.yaml` | 3 | One GPU per stage. |
 | `minicpmo_4_5_8x4090.yaml` | 8 | Full 8x4090 layout. |
 
-Every profile sets `session_mode: duplex`; `vllm-omni serve` detects the
-pipeline's `duplex_plugin` and runs the model through `DuplexOmni`, so the
-whole process serves duplex sessions only.
+Every profile sets `session_mode: duplex`, so native full-duplex is served
+from the same process as `/v1/chat/completions`.
 
 The split pipeline preserves native-duplex epoch/turn identity, segment text,
 turn completion, reference voice, and terminal-audio metadata through
@@ -66,11 +59,8 @@ vllm serve openbmb/MiniCPM-o-4_5 \
 ```
 
 For local ModelScope checkpoints, replace `openbmb/MiniCPM-o-4_5` with the
-checkpoint path. Clients connect to `/v1/realtime?duplex=1` on this server
-(`vllm_omni.clients.duplex.DuplexClient`, the CLI demo below, or the browser
-client). To drive the model in-process without a server, use
-`vllm_omni.clients.inline_duplex.InlineDuplexClient` over a `DuplexOmni`
-(`examples/online_serving/barge_in_client.py --inline`).
+checkpoint path. For native full-duplex, connect `/v1/realtime?duplex=1` on
+this same server.
 
 ### Per-stage overrides
 
@@ -78,6 +68,84 @@ client). To drive the model in-process without a server, use
 vllm serve openbmb/MiniCPM-o-4_5 --omni --trust-remote-code --port 8099 \
     --stage-overrides '{"0": {"gpu_memory_utilization": 0.55}}'
 ```
+
+## Send multimodal requests
+
+```bash
+cd examples/online_serving/minicpmo
+```
+
+### curl
+
+```bash
+bash run_curl_multimodal_generation.sh text
+bash run_curl_multimodal_generation.sh use_image
+bash run_curl_multimodal_generation.sh use_audio '["text"]'
+
+python openai_chat_completion_client_for_multimodal_generation.py \
+    --query-type use_image \
+    --port 8099 \
+    --host localhost
+
+# Text-only (faster; no <|tts_bos|>)
+python openai_chat_completion_client_for_multimodal_generation.py \
+    --query-type text \
+    --modalities text \
+    --prompt "Briefly introduce yourself."
+```
+
+Streaming text + audio (use `--stream`):
+
+```bash
+python openai_chat_completion_client_for_multimodal_generation.py \
+    --query-type text \
+    --prompt "Briefly introduce yourself." \
+    --port 8099 \
+    --stream
+```
+
+The client prints text deltas as they arrive and saves streamed audio chunks
+to WAV files.
+
+Shared helpers also work if you pass MiniCPM defaults yourself:
+
+```bash
+python ../openai_chat_completion_client_for_multimodal_generation.py \
+    --model openbmb/MiniCPM-o-4_5 \
+    --query-type text \
+    --port 8099
+```
+
+Speech output no longer depends on a MiniCPM-specific default in the generic
+serving layer. `chat_template_kwargs.use_tts_template=true` remains an
+explicitly supported model option.
+
+## Launch the Gradio demo
+
+```bash
+bash examples/online_serving/minicpmo/run_gradio_demo.sh
+
+# Or run the Python entry point directly:
+python examples/online_serving/minicpmo/gradio_demo.py \
+    --minicpmo45-api-base http://localhost:8099/v1 \
+    --minicpmo45-model openbmb/MiniCPM-o-4_5 \
+    --port 7862
+```
+
+Open `http://<host>:7862` in a browser.
+
+## Daily-Omni accuracy
+
+Daily-Omni requires one A–D letter. Set
+`chat_template_kwargs.enable_thinking=false` explicitly in `--extra-body`;
+the generic benchmark CLI does not inject a MiniCPM-specific default.
+Leaving reasoning enabled can exhaust the 256-token answer budget inside
+`<think>` and make first-letter extraction score reasoning text.
+
+For the established text benchmark, send
+`--extra_body '{"modalities":["text"],"chat_template_kwargs":{"enable_thinking":false}}'`.
+Requesting audio also benchmarks Talker and Code2Wav and changes the
+assistant template, so it is not an apples-to-apples accuracy run.
 
 ## Run the Realtime duplex CLI demo
 
@@ -115,10 +183,20 @@ python examples/online_serving/minicpmo/realtime_duplex_demo.py \
     --output-dir /tmp/minicpmo_realtime_duplex_video_demo
 ```
 
-Detail inside a composite is capped by `scale_resolution=448` at
-`max_slice_nums=1`: official suggests HD slicing (`max_slice_nums=[2, 1]`) for
-stacked frames, which the MiniCPM-o duplex plugin does not implement yet. Reading small
-text or digits out of a wide scene is limited by that, not by frame timing.
+Stage 0 processes a stacked unit the way official HD mode does
+(`max_slice_nums=[2, 1]`): the base frame keeps its own 66-token block plus the
+patches `get_sliced_grid` cuts for its size at `scale_resolution=448`, and the
+composite adds one block. The wire still rejects a caller-supplied
+`max_slice_nums`, so slicing is Stage 0's decision, not the client's.
+
+That detail costs context. One 960x540 frame is 66 vision tokens per unit and a
+stacked pair is 264, on top of the unit's audio, so the Stage 0 prompt grows by
+277 tokens per second stacked against 79 with a single frame. Against the
+40960-token context this model ships with, a listen-heavy call reaches the limit
+after about 2.5 minutes stacked and about 8.5 minutes unstacked (measured on a
+264 s 960x540 clip). Duplex sessions cannot yet evict old units, so keep
+multi-minute calls on the default `--stack-frames 1`; a stacked session that
+outgrows the context ends with a context-length error.
 
 ## Open the experimental browser client
 
@@ -146,13 +224,6 @@ python -m examples.online_serving.minicpmo.realtime_web \
 ```
 
 ## Validate soft-interrupt behavior
-
-```bash
-python tests/e2e/online_serving/run_minicpmo_realtime_duplex_soft_interrupt.py \
-    --url ws://localhost:8099/v1/realtime?duplex=1 \
-    --input-wav /path/to/two_response_16k.wav \
-    --ref-audio /path/to/ref_audio.wav
-```
 
 The soft-interrupt E2E driver defaults to `--validation-mode model-policy`,
 which checks lifecycle and streaming invariants for arbitrary input audio. The
@@ -240,7 +311,7 @@ them unless `--allow-invalid-clock` is explicit.
 - Co-locating all three stages minimizes hardware requirements but makes their
   CUDA contexts contend for one GPU. Use the 8x4090 layout or a custom
   multi-GPU deploy config when throughput is the primary goal.
-- Output audio streams as base64 PCM16 (24 kHz mono) in `response.output_audio.delta`.
+- Output audio is base64 WAV in `message.audio.data` (24 kHz mono).
 - Offline counterpart:
   [`examples/offline_inference/minicpmo/`](../../offline_inference/minicpmo/)
 - Recipe:
