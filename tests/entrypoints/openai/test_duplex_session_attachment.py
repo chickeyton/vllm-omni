@@ -133,7 +133,7 @@ async def test_registry_failed_send_is_accepted_only_when_journaled(mocker, jour
         assert accepted.call_args_list == expected_calls
         raise RuntimeError("transport lost")
 
-    await registry.create("sid-send-failure", incarnation=0, send=failing_send, close=mocker.AsyncMock())
+    await registry.create("sid-send-failure", send=failing_send, close=mocker.AsyncMock())
 
     with pytest.raises(RuntimeError, match="transport lost"):
         await registry.send_event(
@@ -152,7 +152,7 @@ async def test_registry_detached_event_is_accepted_only_when_journaled(mocker, j
     registry = DuplexSessionAttachmentRegistry(replay_ttl_s=60.0, replay_max_bytes_per_session=4096)
     send = mocker.AsyncMock()
     accepted = mocker.Mock()
-    created = await registry.create("sid-detached-acceptance", incarnation=0, send=send, close=mocker.AsyncMock())
+    created = await registry.create("sid-detached-acceptance", send=send, close=mocker.AsyncMock())
     await registry.detach("sid-detached-acceptance", attachment_generation=created.attachment_generation)
 
     entry = await registry.send_event(
@@ -175,7 +175,7 @@ async def test_registry_unjournaled_event_is_accepted_after_successful_send(mock
     async def send(payload):
         accepted.assert_not_called()
 
-    await registry.create("sid-live-acceptance", incarnation=0, send=send, close=mocker.AsyncMock())
+    await registry.create("sid-live-acceptance", send=send, close=mocker.AsyncMock())
 
     entry = await registry.send_event(
         "sid-live-acceptance",
@@ -193,7 +193,7 @@ async def test_registry_overflow_does_not_accept_or_send_event(mocker) -> None:
     registry = DuplexSessionAttachmentRegistry(replay_ttl_s=60.0, replay_max_bytes_per_session=100)
     accepted = mocker.Mock()
     send = mocker.AsyncMock()
-    await registry.create("sid-overflow-acceptance", incarnation=0, send=send, close=mocker.AsyncMock())
+    await registry.create("sid-overflow-acceptance", send=send, close=mocker.AsyncMock())
 
     with pytest.raises(DuplexJournalOverflowError, match="byte limit"):
         await registry.send_event(
