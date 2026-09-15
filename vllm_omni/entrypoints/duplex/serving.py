@@ -282,10 +282,14 @@ class OmniDuplexSessionHandler:
                 activation_payload_factory=activation_payload_factory,
             )
         except Exception as exc:
-            # The engine lease was already resumed above: put the session back
-            # into its disconnect grace instead of leaving it attached to nothing.
-            with suppress(DuplexSessionError):
-                await self._omni.detach_session(session_id)
+            # The engine lease was already resumed above, so a failed activation
+            # would leave the session attached to nothing -- unless another
+            # connection won the race and is attached right now. Detaching then
+            # would start the disconnect grace for the *winner*, which ordinary
+            # heartbeats do not clear. Roll back only what this attempt owns.
+            if not await self._attachment_registry.has_attachment(session_id):
+                with suppress(DuplexSessionError):
+                    await self._omni.detach_session(session_id)
             await send_json(envelope.error_payload("session_resume_conflict", str(exc)))
             return None
         replaced = resumed.replaced_attachment

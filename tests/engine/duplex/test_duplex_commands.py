@@ -424,3 +424,30 @@ def test_turn_signal_renders_payload_only_when_present_and_dispatches_known_even
     )
     assert isinstance(created, CreateItem)
     assert created.item["role"] == "system"
+
+
+def test_raw_wire_hints_cannot_override_the_normalized_typed_fields():
+    """``build_append_audio`` normalizes; a client's raw value must not undo it.
+
+    A wire ``"is_speech": 0`` used to land in ``hints`` and overwrite the
+    computed ``bool | None`` in the rendered payload, so the runner's
+    silent-commit fast path (``event.get("is_speech") is False``) missed and
+    overlap classification followed the unvalidated value.
+    """
+    command = AppendAudio(
+        audio=b"\x00\x00" * 8,
+        is_speech=False,
+        hints={"is_speech": 0, "rms": 0.001},
+    )
+
+    payload = command.payload()
+
+    assert payload["is_speech"] is False, "the normalized field wins over the raw hint"
+    assert payload["rms"] == 0.001, "a hint with no typed counterpart still comes through"
+
+
+def test_a_hint_survives_when_its_typed_field_is_unset():
+    """Unset typed fields are absent from the payload, so the hint is the only value."""
+    command = AppendAudio(audio=b"\x00\x00" * 8, hints={"is_speech": True})
+
+    assert command.payload()["is_speech"] is True

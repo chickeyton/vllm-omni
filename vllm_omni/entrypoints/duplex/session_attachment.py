@@ -319,6 +319,18 @@ class DuplexSessionAttachmentRegistry:
             state.attachment = None
             return True
 
+    async def has_attachment(self, session_id: str) -> bool:
+        """Whether some connection is attached right now, whoever it is.
+
+        A resume that failed to activate has no generation of its own, so it
+        cannot ask ``is_current_attachment``. What it needs to know before
+        rolling the engine lease back into its disconnect grace is only whether
+        it would be rolling back somebody else's live attachment.
+        """
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            return state is not None and state.attachment is not None
+
     async def is_current_attachment(self, session_id: str, attachment_generation: int) -> bool:
         async with self._lock:
             state = self._sessions.get(session_id)

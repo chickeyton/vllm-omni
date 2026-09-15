@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from contextlib import suppress
 from typing import Any
 
 import pytest
@@ -513,3 +514,37 @@ def test_parse_resume_request_requires_the_three_fields_only() -> None:
     assert parse_resume_request({"session_id": "s", "resume_token": "t", "incarnation": 1}) is not None
     assert parse_resume_request({"session_id": "s"}) is None
     assert parse_resume_request({"session_id": "s", "resume_token": "t", "last_received_server_event_seq": -1}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_losing_resume_cannot_detach_the_connection_that_won() -> None:
+    """A rejected resume must roll back only what it owns.
+
+    Two reconnects can both pass authentication and both complete the engine
+    resume; only one activates. The loser's activation raises, and the rollback
+    used to detach the *session*, which starts the engine's disconnect grace for
+    the winner -- a grace ordinary heartbeats do not clear. The rollback is now
+    conditional on nobody being attached.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws, handle, task = await _open(handler, omni)
+    token = ws.sent[0]["session"]["resume_token"]
+    try:
+        # The winner reconnects and is the live attachment.
+        ws_win, task_win = await _resume(handler, handle.session_id, token)
+        await ws_win.wait_for("session.resumed")
+        assert await handler._attachment_registry.has_attachment(handle.session_id)
+        detached_before = list(omni.detached)
+
+        # The loser arrives with the now-rotated (stale) token and is refused.
+        ws_lose, task_lose = await _resume(handler, handle.session_id, token)
+        await ws_lose.wait_for("error")
+
+        assert omni.detached == detached_before, "the loser must not detach the winner's session"
+        assert await handler._attachment_registry.has_attachment(handle.session_id)
+    finally:
+        for t in (task, task_win, task_lose):
+            t.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await t

@@ -60,6 +60,7 @@ REALTIME_ERROR_TYPES_BY_CODE: dict[str, str] = {
     "response_not_active": "invalid_request_error",
     "response_create_without_input": "invalid_request_error",
     "text_only_turn_unsupported": "invalid_request_error",
+    "commit_aborted": "server_error",
     "input_audio_buffer_empty": "invalid_request_error",
     "missing_item_id": "invalid_request_error",
     "item_not_found": "invalid_request_error",

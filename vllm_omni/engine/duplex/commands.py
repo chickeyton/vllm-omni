@@ -72,10 +72,18 @@ class AppendAudio(DuplexCommand):
 
     def payload(self) -> dict[str, object]:
         data = DuplexCommand.payload(self)
-        data["audio"] = base64.b64encode(self.audio).decode("ascii")
         hints = data.pop("hints", None)
         if isinstance(hints, Mapping):
-            data.update(hints)
+            # Hints are raw wire values; the typed fields went through
+            # ``build_append_audio``'s normalization, so they have to win. An
+            # unset typed field is simply absent here (``payload`` skips None),
+            # which is what lets a hint still carry it. Merging the other way
+            # round let a client's ``"is_speech": 0`` override the computed
+            # ``bool | None`` and silently miss the runner's silent-commit path.
+            merged: dict[str, object] = dict(hints)
+            merged.update(data)
+            data = merged
+        data["audio"] = base64.b64encode(self.audio).decode("ascii")
         if not data.get("video_frames"):
             data.pop("video_frames", None)
         return data

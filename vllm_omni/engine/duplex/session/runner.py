@@ -1633,6 +1633,16 @@ class DuplexSessionRunner:
             event_type == "input_audio_buffer.commit" and isinstance(realtime_item_id, str) and bool(realtime_item_id)
         )
         if event_type in {"input.commit", "input_audio_buffer.commit"} and not await self._wait_for_append_tail():
+            # resolve_commit has already applied this commit's side effects
+            # (speech_stopped emitted, input flags cleared), so returning
+            # silently leaves the client with those effects, no
+            # input_audio_buffer.committed and no error. The session.update
+            # path says so explicitly; this one now does too.
+            self._emit_error(
+                "commit_aborted",
+                "the commit was not applied because the preceding append failed",
+                event_id=event.get("realtime_event_id"),
+            )
             return
         if event_type == "input_audio_buffer.commit" and event.get("is_speech") is False:
             self._commit_silent_input()
