@@ -391,10 +391,17 @@ class ModelChannel:
             engine_output = OmniRequestOutput.from_stage_output(
                 output,
                 request_id=item.request_id,
-                finished=True,
                 stage_id=item.stage_id,
                 final_output_type=item.decision.final_output_type,
             )
+            # Set after construction, not as a keyword: ``from_stage_output``
+            # copies ``finished`` from the source last, and a resumable stage
+            # request never finishes -- only its segment does. The decision
+            # closes that segment, and the projector recognises a listen only
+            # on a finished output. The orchestrator queue used to re-assert
+            # ``finished`` on every direct-response message; the mailbox hands
+            # the raw stage output over, so it has to happen here.
+            engine_output.finished = True
             engine_output = attach_duplex_output_decision(engine_output, item.decision)
         elif isinstance(output, OmniRequestOutput):
             engine_output = output

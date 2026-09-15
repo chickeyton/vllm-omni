@@ -741,6 +741,81 @@ async def test_listen_decision_is_consumed_and_never_forwarded_to_tts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_listen_decision_on_a_resumable_request_closes_the_bounded_response() -> None:
+    """A live stage-0 request is resumable: its output never says ``finished``,
+    only its segment does. The listen that answers the last continuation unit
+    must still close the response, or the session sits forever with no
+    terminal event (the live-client E2E hang)."""
+    h = await open_harness()
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hello"))
+        response_id = h.session.active_response_id
+        assert response_id is not None
+        # The continuation budget is spent: the unit being answered was the forced listen.
+        model_state = h.runner.model_state
+        model_state.continuation_owner_id = f"response:{response_id}"
+        model_state.continuation_units = h.runner.model._AUTO_RESPONSE_MAX_CONTINUATION_UNITS
+
+        listen = listen_output(request_id)
+        listen.finished = False
+        events = await h.deliver_and_settle(
+            listen,
+            stage_id=0,
+            segment_finished=True,
+            segment_token_ids=[11, 12, LISTEN_TOKEN_ID],
+            segment_output_metadata={"meta.listen_token_id": LISTEN_TOKEN_ID},
+        )
+
+        assert types(events)[0] == "response.listen"
+        assert events[0].details["model_listen"] is True
+        assert find(events, "response.done").response_id == response_id
+        assert h.session.active_response_id is None
+        assert model_state.continuation_units == 0
+        assert len(h.port.submissions) == 1  # no further silence unit was scheduled
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_listen_decision_on_a_resumable_request_keeps_the_turn_going() -> None:
+    """Same unfinished listen, budget left: it must schedule the next unit.
+
+    A non-terminal auto-response listen is answered with the next silence
+    unit, not with a ``response.listen`` event, so the submission is the
+    observable. Before the fix the projector saw ``finished=False`` and
+    yielded nothing: no silence unit, the response left open with nothing in
+    flight -- the same hang, one unit earlier.
+    """
+    h = await open_harness()
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hello"))
+        response_id = h.session.active_response_id
+        assert response_id is not None
+        submissions_before = len(h.port.submissions)
+
+        listen = listen_output(request_id)
+        listen.finished = False
+        events = await h.deliver_and_settle(
+            listen,
+            stage_id=0,
+            segment_finished=True,
+            segment_token_ids=[11, 12, LISTEN_TOKEN_ID],
+            segment_output_metadata={"meta.listen_token_id": LISTEN_TOKEN_ID},
+        )
+
+        assert not [event for event in events if event.type == "error"], types(events)
+        assert len(h.port.submissions) == submissions_before + 1, "the next silence unit was not scheduled"
+        assert h.runner.model_state.continuation_units == 1
+        assert h.session.active_response_id == response_id
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
 async def test_tts_segment_end_schedules_a_silence_continuation_unit() -> None:
     h = await open_harness()
     try:
