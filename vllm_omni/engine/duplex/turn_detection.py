@@ -135,17 +135,6 @@ class TurnDetectionConfig:
             interrupt_response=bool(turn_detection.get("interrupt_response", True)),
         )
 
-    def as_realtime(self) -> dict[str, object]:
-        return {
-            "type": "server_vad",
-            "interrupt_response": self.interrupt_response,
-            "create_response": self.create_response,
-            "threshold": self.threshold,
-            "prefix_padding_ms": self.prefix_padding_ms,
-            "silence_duration_ms": self.silence_duration_ms,
-            "min_speech_duration_ms": self.min_speech_duration_ms,
-        }
-
     @property
     def overlap_policy(self) -> str:
         return "barge_in_on_speech"
