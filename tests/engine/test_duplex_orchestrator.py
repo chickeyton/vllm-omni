@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from tests.engine.test_orchestrator import (
     FakeOutputProcessor,
@@ -19,8 +20,6 @@ from tests.engine.test_orchestrator import (
     FakeStageClient,
     _build_stage_pools,
 )
-from vllm.v1.engine.exceptions import EngineDeadError
-
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
 from vllm_omni.engine.duplex import commands
 from vllm_omni.engine.duplex.config import DuplexSessionConfig, DuplexSessionState
@@ -513,5 +512,6 @@ async def test_a_dead_replica_closes_the_sessions_it_was_serving() -> None:
     assert SESSION_ID not in orchestrator.session_manager.runners
     assert session.state == DuplexSessionState.CLOSED
     assert orchestrator.session_manager.active_count() == 0, "the admission slot must come back"
-    types = [message.event.type for message in [output_q.get_nowait() for _ in range(output_q.qsize())]]
-    assert types[-1] in {"session.expired", "session.closed"}, "the client gets a terminal event"
+    messages = [output_q.get_nowait() for _ in range(output_q.qsize())]
+    types = [getattr(getattr(m, "event", None), "type", type(m).__name__) for m in messages]
+    assert types[-1] in {"session.expired", "session.closed"}, f"the client needs a terminal event, got {types}"
