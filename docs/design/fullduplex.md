@@ -45,7 +45,7 @@ the model plugins.
                    │                          └──────────────────┬───────────────────┘
                    ▼                                             ▼   DuplexSessionHandle
         ┌──────────────────────────────────────────────────────────────────────────────┐
-        │ DuplexOmni(AsyncOmniBase)                  [entrypoints/duplex_omni.py, thin] │
+        │ DuplexOmni(AsyncOmni)                      [entrypoints/duplex_omni.py, thin] │
         │   open_session / get_session / resume_session / detach_session / close_session│
         │   DuplexSessionHandle: submit(DuplexCommand) / events() -> DuplexEvent       │
         └──────────────────────────────────────┬───────────────────────────────────────┘
@@ -53,9 +53,9 @@ the model plugins.
                                                │ engine.submit_command_async (one-way)
                                                ▼
         ┌──────────────────────────────────────────────────────────────────────────────┐
-        │ DuplexOmniEngine(OmniEngineBase)  [engine/duplex_omni_engine.py, thin]        │
+        │ DuplexOmniEngine(AsyncOmniEngine) [engine/duplex_omni_engine.py, thin]        │
         │   loads the plugin, validates session_mode, builds queue messages            │
-        │  └─ DuplexOrchestrator(OrchestratorBase)        [engine/duplex_orchestrator.py]│
+        │  └─ DuplexOrchestrator(Orchestrator)            [engine/duplex_orchestrator.py]│
         │       template seams + DuplexStagePort over the shared stage machinery       │
         │       ├─ DuplexSessionManager      admission, backpressure, lease reaper,     │
         │       │                            open/close/resume/touch, command dispatch  │
@@ -67,14 +67,20 @@ the model plugins.
         └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each layer has one turn-based and one duplex sibling over a shared base:
+In each layer the duplex class extends the turn-based one, which extends
+the shared base. The dependency runs duplex -> turn-based and never the
+reverse, so the turn-based stack is unchanged and the duplex stack reuses
+its request machinery instead of duplicating it:
 
 ```text
-OmniBase                        OmniEngineBase                       OrchestratorBase
- ├─ Omni        (sync, turn)     ├─ AsyncOmniEngine  (turn requests)  ├─ Orchestrator        (turn-based admission)
- └─ AsyncOmniBase                └─ DuplexOmniEngine (session msgs)   └─ DuplexOrchestrator  (hosts DuplexSessionManager)
-     ├─ AsyncOmni   (EngineClient)  _create_engine -> AsyncOmniEngine   _create_orchestrator -> Orchestrator
-     └─ DuplexOmni                  _create_engine -> DuplexOmniEngine  _create_orchestrator -> DuplexOrchestrator
+OmniBase                          OmniEngineBase                        OrchestratorBase
+ ├─ Omni       (sync, turn)        └─ AsyncOmniEngine  (turn requests)   └─ Orchestrator        (turn-based admission)
+ └─ AsyncOmniBase                      └─ DuplexOmniEngine (session msgs)    └─ DuplexOrchestrator  (hosts DuplexSessionManager,
+     └─ AsyncOmni  (EngineClient)                                                                     implements DuplexStagePort)
+         └─ DuplexOmni
+
+AsyncOmni._create_engine  -> AsyncOmniEngine     AsyncOmniEngine._create_orchestrator  -> Orchestrator
+DuplexOmni._create_engine -> DuplexOmniEngine    DuplexOmniEngine._create_orchestrator -> DuplexOrchestrator
 ```
 
 Each concrete class constructs its collaborator in an explicit factory
@@ -97,7 +103,7 @@ plugin and the session runtime config to `DuplexOrchestrator` directly.
    `DuplexEvent.to_realtime()` derive the OpenAI Realtime JSON, so the wire
    format is never hand-built, and the websocket handler and the inline client
    share one conversion.
-3. **Generic bases and turn-based siblings have zero duplex vocabulary.**
+3. **Generic bases and the turn-based classes have zero duplex vocabulary.**
    `OmniBase`, `AsyncOmniBase`, `AsyncOmni`, `OmniEngineBase`,
    `AsyncOmniEngine`, `OrchestratorBase` and `Orchestrator` carry only
    template seams; `tests/engine/test_duplex_import_boundary.py` checks that
@@ -270,7 +276,10 @@ Everything below runs on the orchestrator asyncio loop; there is no lock.
 `OrchestratorBase` keeps the generic machinery (request handler skeleton,
 abort, collective RPC, output loops, stage error and dead-replica handling,
 `_route_output`, stage forwarding, prewarm, cleanup, shutdown) and offers
-these seams:
+these seams. `DuplexOrchestrator` extends `Orchestrator` rather than sitting
+beside it: a seam it does not override falls through to the turn-based
+implementation, and `_dispatch_message` hands anything that is not a session
+message to `super()`:
 
 | Seam | `Orchestrator` | `DuplexOrchestrator` |
 | --- | --- | --- |
