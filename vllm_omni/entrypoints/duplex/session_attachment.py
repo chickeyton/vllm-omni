@@ -389,14 +389,20 @@ class DuplexSessionAttachmentRegistry:
                     await send(dict(activation_payload_factory(rotated_token, attachment_generation)))
                     for entry in replay_entries:
                         await send(dict(entry.payload))
-                except Exception:
-                    async with self._lock:
-                        if (
-                            self._sessions.get(session_id) is state
-                            and state.attachment_generation == attachment_generation
-                        ):
-                            state.attachment = None
-                            state.recovery_token_digest = accepted_token_digest
+                except (Exception, asyncio.CancelledError):
+                    # CancelledError derives from BaseException, so an
+                    # ``except Exception`` here would let a cancellation during
+                    # activation or replay skip the rollback: the dead
+                    # attachment would stay current while the token it rotated
+                    # past is gone, leaving the session attached to an unusable
+                    # transport with no way back. Both failures take the same
+                    # path deliberately, so they cannot drift apart.
+                    await self._rollback_resume(
+                        session_id,
+                        state=state,
+                        attachment_generation=attachment_generation,
+                        accepted_token_digest=accepted_token_digest,
+                    )
                     raise
             return DuplexSessionResumeResult(
                 session_id=session_id,
@@ -405,6 +411,25 @@ class DuplexSessionAttachmentRegistry:
                 replay_entries=replay_entries,
                 replaced_attachment=replaced,
             )
+
+    async def _rollback_resume(
+        self,
+        session_id: str,
+        *,
+        state: _DuplexSessionAttachmentState,
+        attachment_generation: int,
+        accepted_token_digest: bytes,
+    ) -> None:
+        """Undo a resume whose activation never reached the client.
+
+        Generation-checked: a later resume that already took over must keep its
+        attachment. Restoring ``recovery_token_digest`` is what lets the caller
+        retry with the token it presented, which ``resume`` had rotated past.
+        """
+        async with self._lock:
+            if self._sessions.get(session_id) is state and state.attachment_generation == attachment_generation:
+                state.attachment = None
+                state.recovery_token_digest = accepted_token_digest
 
     async def close(self, session_id: str) -> DuplexTransportAttachment | None:
         async with self._lock:

@@ -488,3 +488,67 @@ async def test_registry_repr_never_contains_plaintext_tokens() -> None:
     assert created.resume_token.plaintext not in repr(created)
     assert created.resume_token.plaintext not in repr(entry)
     assert created.resume_token.plaintext not in repr(registry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_on", ["activation", "replay"])
+async def test_registry_resume_cancelled_mid_delivery_rolls_back_like_a_failure(cancel_on: str) -> None:
+    """Cancellation must take the same rollback as an ordinary delivery failure.
+
+    ``CancelledError`` derives from ``BaseException``, so an ``except
+    Exception`` around the activation and replay sends let a cancelled resume
+    keep its attachment as the current generation while the token it rotated
+    past was already gone — the session left attached to an unusable transport
+    with no way back. Both send points are covered because either can be the
+    one that gets cancelled.
+    """
+    registry = DuplexSessionAttachmentRegistry(replay_ttl_s=60.0, replay_max_bytes_per_session=4096)
+
+    async def send(payload):
+        del payload
+
+    async def close(reason):
+        del reason
+
+    created = await registry.create("sid-cancel", send=send, close=close)
+    # One journaled event, so the replay loop has something to send.
+    await registry.send_event("sid-cancel", {"type": "response.output_text.delta", "delta": "a"})
+    await registry.detach("sid-cancel", attachment_generation=1)
+
+    sends = 0
+    cancel_at = 1 if cancel_on == "activation" else 2
+
+    async def cancelling_send(payload):
+        del payload
+        nonlocal sends
+        sends += 1
+        if sends == cancel_at:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await registry.resume(
+            "sid-cancel",
+            resume_token=created.resume_token.plaintext,
+            last_received_server_event_seq=0,
+            send=cancelling_send,
+            close=close,
+            activation_payload_factory=lambda token, generation: {
+                "type": "session.resumed",
+                "resume_token": token.plaintext,
+                "attachment_generation": generation,
+            },
+        )
+
+    assert sends == cancel_at, "the send that was cancelled is the one under test"
+    # The cancelled attachment must not remain current...
+    assert not await registry.has_attachment("sid-cancel")
+    # ...and the token the caller presented has to work again, or the session
+    # is unreachable: resume() had already rotated past it.
+    recovered = await registry.resume(
+        "sid-cancel",
+        resume_token=created.resume_token.plaintext,
+        last_received_server_event_seq=0,
+        send=send,
+        close=close,
+    )
+    assert recovered.attachment_generation == 3

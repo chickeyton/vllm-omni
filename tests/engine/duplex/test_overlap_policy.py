@@ -157,3 +157,52 @@ def test_mergeable_payloads_are_concatenated_in_order() -> None:
     merged = overlap_policy.merge_audio_payloads(first, second)
     assert base64.b64decode(merged["audio"]) == head + tail
     assert merged["sample_rate_hz"] == 16000
+
+
+# --------------------------------------------------------------------------- #
+# Server VAD + barge_in_on_speech                                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_server_vad_speech_started_reaches_a_barge_in_decision() -> None:
+    """The configuration this PR introduces must decide, not raise.
+
+    Both call sites read the VAD verdict through the module-level
+    ``vad_speech_started`` helper while binding its result to a local of the
+    same name, which made the name local for the whole scope and raised
+    ``UnboundLocalError`` on the call itself. Every ``server_vad`` +
+    ``barge_in_on_speech`` append hit it, and the client saw ``internal_error``
+    instead of a barge-in. The MiniCPM-o preset is ``listen_only``, so no demo
+    exercised this branch.
+    """
+    session = _session(overlap_policy="barge_in_on_speech")
+    payload = {"format": "pcm16", "audio": _pcm16(0.5)}
+    event = {"vad": {"speech_started": True}}
+
+    decision = overlap_policy.decide(session, event, payload, auto_responds=True)
+
+    assert decision["action"] == "barge_in"
+    assert decision["reason"] == "server_vad_speech_started"
+    assert decision["cancel_reason"] == "turn_detected"
+
+
+def test_server_vad_mid_utterance_keeps_listening_instead_of_barging_in() -> None:
+    """``speech_started`` false means the utterance is already running: not a new turn."""
+    session = _session(overlap_policy="barge_in_on_speech")
+    payload = {"format": "pcm16", "audio": _pcm16(0.5)}
+    event = {"vad": {"speech_started": False}}
+
+    decision = overlap_policy.decide(session, event, payload, auto_responds=True)
+
+    assert decision["action"] != "barge_in"
+
+
+def test_barge_in_on_speech_without_vad_still_barges_in_on_speech() -> None:
+    """No VAD verdict: the policy falls back to its own speech classification."""
+    session = _session(overlap_policy="barge_in_on_speech")
+    payload = {"format": "pcm16", "audio": _pcm16(0.5)}
+
+    decision = overlap_policy.decide(session, {}, payload, auto_responds=True)
+
+    assert decision["action"] == "barge_in"
+    assert decision["reason"] == "barge_in_on_speech"
