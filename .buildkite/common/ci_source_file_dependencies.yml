@@ -217,6 +217,7 @@ source_file_dependencies:
   omni_minicpmo_4_5_function:
     - *minicpmo_4_5
     - tests/e2e/offline_inference/test_minicpmo_4_5.py
+    - tests/e2e/online_serving/test_minicpmo_4_5.py
     - tests/e2e/online_serving/test_minicpmo_4_5_expansion.py
 
   omni_minicpmo_4_5_accuracy:
