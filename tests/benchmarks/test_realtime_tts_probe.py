@@ -173,7 +173,7 @@ def test_stall_report_says_the_model_never_answered() -> None:
 
 
 def test_stall_report_lists_a_response_that_never_finished() -> None:
-    events = _TurnEvents(["r1"], {"r1": b"\x01\x00\x02\x00"}, {"r1": "hel"})
+    events = _TurnEvents(["r1"], {"r1": b"\x01\x00\x02\x00"}, {"r1": "hello"})
     report = bench_patch._seed_tts_turn_stall_report(events, 0, 0, 4.2)
     assert "started 1 response(s) after 4.2s of silence" in report
-    assert "r1 (4 audio bytes, text 'hel')" in report
+    assert "r1 (4 audio bytes, text 'hello')" in report
