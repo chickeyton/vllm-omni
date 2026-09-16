@@ -14,7 +14,7 @@ import time
 import traceback
 import uuid
 import wave
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -2153,12 +2153,37 @@ async def async_request_openai_audio_speech(
     return output
 
 
-#: Silence appended per Seed-TTS turn so a model-native duplex session has audio
-#: units to generate on. The target text rides the session context, so this only
-#: advances the clock; the model stops on its own turn_eos well before the cap.
+#: Cap on the silence appended per Seed-TTS turn so a model-native duplex
+#: session has audio units to generate on. The target text rides the session
+#: context, so this only advances the clock; the silence stops at the turn's
+#: response.done (the model reaches turn_eos well before the cap), because a
+#: native model that keeps hearing silence after its turn may decide to speak
+#: again, and the benchmark measures one response per utterance.
 _SEED_TTS_SILENCE_SECONDS = 12.0
 #: MiniCPM-o emits 24 kHz mono; used to report audio_frames after the session closed.
 _SEED_TTS_OUTPUT_SAMPLE_RATE_HZ = 24_000
+
+
+def _seed_tts_turn_response_id(events: object, response_offset: int, request_index: int) -> str:
+    """The response id the Seed-TTS turn is measured on: the first one with audio.
+
+    A model-native session answers the seeded text once, but nothing in the
+    protocol stops it from speaking again on silence it hears afterwards, so
+    a later audio response is the model's own and not a failed turn.
+    """
+    response_ids = getattr(events, "response_ids")
+    audio_bytes = getattr(events, "audio_bytes")
+    audio_response_ids = [response_id for response_id in response_ids[response_offset:] if audio_bytes(response_id)]
+    if not audio_response_ids:
+        raise RuntimeError(f"Seed-TTS Realtime TTS turn {request_index} produced no audio response")
+    if len(audio_response_ids) > 1:
+        logger.warning(
+            "Seed-TTS Realtime TTS turn %d: model spoke again after its response (%d audio responses); "
+            "measuring the first",
+            request_index,
+            len(audio_response_ids),
+        )
+    return audio_response_ids[0]
 
 
 def _realtime_websocket_url(api_url: str) -> str:
@@ -2416,16 +2441,31 @@ class _RealtimeTTSProbe:
         assert self._client is not None
         await acknowledge_collected_playback(self._client, self.events)
 
-    async def stream_silence(self, *, seconds: float, chunk_ms: int = 200) -> None:
+    async def stream_silence(
+        self,
+        *,
+        seconds: float,
+        chunk_ms: int = 200,
+        until: Callable[[], bool] | None = None,
+    ) -> float:
         """Append silent PCM16 units so a model-native session has units to speak on.
 
         A duplex model generates per audio unit. The target text rides the
         session context (``duplex_initial_user_text``), so the audio only has
         to advance the clock; silence keeps it from adding content of its own.
+        Streams in real time for at most ``seconds``, stopping as soon as
+        ``until`` holds, and returns the seconds actually appended.
         """
         assert self._client is not None
-        samples = int(16_000 * max(0.0, seconds))
-        await self._client.stream_pcm(bytes(2 * samples), chunk_ms=chunk_ms, realtime=True, is_speech=False)
+        input_format = self._client.config.input_audio
+        chunk = bytes(max(input_format.byte_count(chunk_ms), input_format.bytes_per_sample))
+        chunk_s = input_format.duration_ms(len(chunk)) / 1000.0
+        streamed_s = 0.0
+        while streamed_s < seconds and not (until is not None and until()):
+            await self._client.append_audio(chunk, is_speech=False)
+            streamed_s += chunk_s
+            await asyncio.sleep(chunk_s)
+        return streamed_s
 
     async def close_session(self, *, timeout_s: float = 20.0) -> None:
         assert self._client is not None
@@ -2498,30 +2538,24 @@ async def async_request_openai_realtime_duplex(
                 response_offset = len(client.events.response_ids)
                 done_before = client.events.count("response.done")
                 errors_before = len(client.events.errors())
-                turn_started_at_s = time.monotonic()
-                await client.stream_silence(seconds=silence_seconds)
-                await wait_for_condition(
-                    lambda: (
+
+                def turn_settled() -> bool:
+                    return (
                         client.events.count("response.done") > done_before
                         or len(client.events.errors()) > errors_before
-                    ),
+                    )
+
+                turn_started_at_s = time.monotonic()
+                await client.stream_silence(seconds=silence_seconds, until=turn_settled)
+                await wait_for_condition(
+                    turn_settled,
                     timeout_s=180.0,
                     label=f"Seed-TTS Realtime TTS turn {request_index} response.done",
                 )
                 errors = client.events.errors()
                 if len(errors) > errors_before:
                     raise RuntimeError(f"Seed-TTS Realtime TTS server error: {errors[-1]}")
-                new_audio_response_ids = [
-                    response_id
-                    for response_id in client.events.response_ids[response_offset:]
-                    if client.events.audio_bytes(response_id)
-                ]
-                if len(new_audio_response_ids) != 1:
-                    raise RuntimeError(
-                        f"Seed-TTS Realtime TTS turn {request_index} expected one audio response, "
-                        f"got {len(new_audio_response_ids)}"
-                    )
-                response_id = new_audio_response_ids[0]
+                response_id = _seed_tts_turn_response_id(client.events, response_offset, request_index)
                 timing = client.events.timing_summary(
                     after_s=turn_started_at_s,
                     input_committed_at_s=turn_started_at_s,

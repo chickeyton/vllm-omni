@@ -87,3 +87,75 @@ async def test_configure_gives_up_when_the_slot_wait_budget_is_spent(gate, monke
         await _configure(probe)
     assert excinfo.value.code == "resource_exhausted"
     assert len(gate.instances) == 1
+
+
+class _SilenceSink:
+    """Stands in for a configured ``DuplexClient``: records every appended chunk."""
+
+    def __init__(self) -> None:
+        self.config = duplex_client.SessionConfig()
+        self.chunks: list[bytes] = []
+
+    async def append_audio(self, pcm: bytes, *, is_speech: bool | None = None, video_frames=None) -> None:
+        del video_frames
+        assert is_speech is False
+        self.chunks.append(pcm)
+
+
+@pytest.mark.asyncio
+async def test_stream_silence_stops_at_the_turn_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence is fed until the turn settles, not for the whole cap."""
+    probe = bench_patch._RealtimeTTSProbe("ws://test/v1/realtime?duplex=1")
+    sink = _SilenceSink()
+    probe._client = sink
+
+    async def no_wait(_: float) -> None:
+        return
+
+    monkeypatch.setattr(bench_patch.asyncio, "sleep", no_wait)
+    streamed = await probe.stream_silence(seconds=12.0, chunk_ms=200, until=lambda: len(sink.chunks) >= 3)
+    assert len(sink.chunks) == 3
+    assert streamed == pytest.approx(0.6)
+    assert all(len(chunk) == sink.config.input_audio.byte_count(200) for chunk in sink.chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_silence_runs_to_the_cap_when_the_turn_never_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = bench_patch._RealtimeTTSProbe("ws://test/v1/realtime?duplex=1")
+    sink = _SilenceSink()
+    probe._client = sink
+
+    async def no_wait(_: float) -> None:
+        return
+
+    monkeypatch.setattr(bench_patch.asyncio, "sleep", no_wait)
+    streamed = await probe.stream_silence(seconds=1.0, chunk_ms=200, until=lambda: False)
+    assert len(sink.chunks) == 5
+    assert streamed == pytest.approx(1.0)
+
+
+class _TurnEvents:
+    def __init__(self, response_ids: list[str], audio: dict[str, bytes]) -> None:
+        self.response_ids = response_ids
+        self._audio = audio
+
+    def audio_bytes(self, response_id: str) -> bytes:
+        return self._audio.get(response_id, b"")
+
+
+def test_turn_response_is_the_first_one_with_audio_even_if_the_model_spoke_again(caplog) -> None:
+    events = _TurnEvents(["r0", "r1", "r2"], {"r1": b"\x01\x00", "r2": b"\x02\x00"})
+    with caplog.at_level("WARNING", logger=bench_patch.logger.name):
+        assert bench_patch._seed_tts_turn_response_id(events, 0, 0) == "r1"
+    assert "spoke again" in caplog.text
+
+
+def test_turn_response_ignores_responses_from_before_the_turn() -> None:
+    events = _TurnEvents(["r0", "r1"], {"r0": b"\x01\x00", "r1": b"\x02\x00"})
+    assert bench_patch._seed_tts_turn_response_id(events, 1, 0) == "r1"
+
+
+def test_turn_without_audio_is_an_error() -> None:
+    events = _TurnEvents(["r0"], {})
+    with pytest.raises(RuntimeError, match="no audio response"):
+        bench_patch._seed_tts_turn_response_id(events, 0, 0)

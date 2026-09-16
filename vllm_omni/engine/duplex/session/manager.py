@@ -667,6 +667,11 @@ class DuplexSessionManager:
             else:
                 session.touch_lease(activity)
             await self._put_result(message, operation="touch", ok=True, session=session)
+        except DuplexSessionError as exc:
+            # A lease touch racing the session's own close is routine: the
+            # caller learns the session is gone from the result, not a fault.
+            logger.debug("touch_duplex_session skipped: %s", exc)
+            await self._put_result(message, operation="touch", ok=False, session=session, error=exc)
         except Exception as exc:
             logger.exception("touch_duplex_session failed: %s", exc)
             await self._put_result(message, operation="touch", ok=False, session=session, error=exc)
