@@ -12,6 +12,7 @@ request handling lives in ``AsyncOmni``; duplex sessions in ``DuplexOmni``.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncGenerator, Iterable
 from typing import Any
@@ -38,6 +39,8 @@ _FINAL_OUTPUT_IDLE_SLEEP_S = 0.001
 # the janus queue's condition variable; this timeout only bounds how often the
 # orchestrator liveness check runs while the pipeline is idle.
 _FINAL_OUTPUT_BLOCKING_WAIT_S = 1.0
+# Shared DELETE / generate() cleanup abort bound. Env is the documented knob.
+ABORT_TIMEOUT_S = float(os.environ.get("VLLM_OMNI_ABORT_TIMEOUT", 2.0))
 
 
 class AsyncEventResolver:
@@ -421,16 +424,32 @@ class AsyncOmniBase(OmniBase):
         self.final_output_task = asyncio.create_task(_final_output_loop())
         logger.debug("[AsyncOmni] Final output handler started")
 
-    async def _abort_internal_requests(self, request_id: str | Iterable[str]):
+    async def _abort_internal_requests(
+        self,
+        request_id: str | Iterable[str],
+        *,
+        timeout: float = ABORT_TIMEOUT_S,
+    ):
         """Abort request(s) via the Orchestrator given internal request IDs,
         which take the format <external_request_id>-<UUID>.
         """
         request_ids = [request_id] if isinstance(request_id, str) else list(request_id)
         # Request IDs are already internal, so we just need to get the matching states.
         internal_req_ids = [rid for rid in request_ids if rid in self.request_states]
-        await self._abort(internal_req_ids)
+        try:
+            # Unbind generate() if abort_async blocks in the executor.
+            await asyncio.wait_for(self._abort(internal_req_ids, timeout=timeout), timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "[AsyncOmni] Timed out aborting %s after %.1fs; "
+                "engine abort is best-effort until the current batch drains",
+                ",".join(internal_req_ids),
+                timeout,
+            )
+        except Exception:
+            logger.exception("[AsyncOmni] Cleanup abort failed for %s", ",".join(internal_req_ids))
 
-    async def _abort(self, request_ids: list[str]) -> None:
+    async def _abort(self, request_ids: list[str], *, timeout: float | None = None) -> None:
         """Abort request IDs via the engine and enqueue terminal abort outputs.
 
         Waits for orchestrator abort acknowledgment, enqueues any AR terminal
@@ -443,7 +462,7 @@ class AsyncOmniBase(OmniBase):
         registered yet, unbound replica, or orchestrator id drop), enqueue a
         synthetic finished abort so ``generate()`` cannot hang on ``queue.get``.
         """
-        abort_outputs = await self.engine.abort_async(request_ids) or []
+        abort_outputs = await self.engine.abort_async(request_ids, timeout=timeout) or []
         delivered: set[str] = set()
         for output_msg in abort_outputs:
             req_id = getattr(output_msg, "request_id", None)

@@ -34,6 +34,7 @@ from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.stats import IterationStats
 
+from vllm_omni.diffusion.data import is_diffusion_request_started_output
 from vllm_omni.distributed.omni_connectors.utils.config import stage_receives_chunks
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.cfg_companion_tracker import CfgCompanionTracker
@@ -839,7 +840,8 @@ class OrchestratorBase:
                                 idle = False
                                 continue
 
-                            pool.record_output_timestamps([diffusion_output])
+                            if not is_diffusion_request_started_output(diffusion_output):
+                                pool.record_output_timestamps([diffusion_output])
                             processed = [diffusion_output]
                         else:
                             raw_outputs = await pool.poll_llm_raw_output(replica_id, timeout_s=0.001)
@@ -1081,7 +1083,8 @@ class OrchestratorBase:
                         if self._absorb_diffusion_metrics(stage_id, replica_id, payload):
                             self._orch_monitor.note_loop(idle=False)
                             continue
-                        pool.record_output_timestamps([payload])
+                        if not is_diffusion_request_started_output(payload):
+                            pool.record_output_timestamps([payload])
                         processed = [payload]
                     else:
                         processed = await self._process_llm_stage_outputs(

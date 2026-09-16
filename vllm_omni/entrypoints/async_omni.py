@@ -29,7 +29,7 @@ from vllm.tasks import SupportedTask
 from vllm_omni.diffusion.data import CuMemTag, OmniACK, OmniSleepTask, OmniWakeTask
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.messages import ErrorMessage
-from vllm_omni.entrypoints.async_omni_base import AsyncOmniBase
+from vllm_omni.entrypoints.async_omni_base import ABORT_TIMEOUT_S, AsyncOmniBase
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.errors import client_error_metadata
 from vllm_omni.inputs.data import OmniSamplingParams
@@ -301,12 +301,12 @@ class AsyncOmni(AsyncOmniBase, EngineClient):
 
         except (asyncio.CancelledError, GeneratorExit):
             self._record_request_failure_once(request_id, reason="client_disconnect")
-            await self._abort_internal_requests(request_id)
+            await self._abort_internal_requests(request_id, timeout=ABORT_TIMEOUT_S)
             logger.info(f"[AsyncOmni] Request {request_id} aborted.")
             raise
         except Exception as e:
             self._record_request_failure_once(request_id, reason="stage_error")
-            await self._abort_internal_requests(request_id)
+            await self._abort_internal_requests(request_id, timeout=ABORT_TIMEOUT_S)
             logger.info(f"[AsyncOmni] Request {request_id} failed (input error): {e}")
             raise
         finally:
@@ -568,14 +568,14 @@ class AsyncOmni(AsyncOmniBase, EngineClient):
             return all(bool(item) for item in result)
         return bool(result)
 
-    async def abort(self, request_id: str | Iterable[str]) -> None:
+    async def abort(self, request_id: str | Iterable[str], *, timeout: float | None = None) -> None:
         """Abort request(s) via the Orchestrator."""
         request_ids = [request_id] if isinstance(request_id, str) else list(request_id)
         # Map the external user request IDs to internal IDs used by the Orchestrator.
         # NOTE: If the user request_id matches multiple requests, all of them will be
         # aborted. This is also what happens in this case in vLLM's output processor.
         internal_ids = [s.request_id for s in self.request_states.values() if s.external_request_id in request_ids]
-        await self._abort(internal_ids)
+        await self._abort(internal_ids, timeout=timeout)
 
     async def submit_interaction_async(
         self,
