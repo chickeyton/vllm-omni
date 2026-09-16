@@ -135,12 +135,16 @@ async def test_stream_silence_runs_to_the_cap_when_the_turn_never_settles(monkey
 
 
 class _TurnEvents:
-    def __init__(self, response_ids: list[str], audio: dict[str, bytes]) -> None:
+    def __init__(self, response_ids: list[str], audio: dict[str, bytes], text: dict[str, str] | None = None) -> None:
         self.response_ids = response_ids
         self._audio = audio
+        self._text = text or {}
 
     def audio_bytes(self, response_id: str) -> bytes:
         return self._audio.get(response_id, b"")
+
+    def response_text(self, response_id: str) -> str:
+        return self._text.get(response_id, "")
 
 
 def test_turn_response_is_the_first_one_with_audio_even_if_the_model_spoke_again(caplog) -> None:
@@ -159,3 +163,17 @@ def test_turn_without_audio_is_an_error() -> None:
     events = _TurnEvents(["r0"], {})
     with pytest.raises(RuntimeError, match="no audio response"):
         bench_patch._seed_tts_turn_response_id(events, 0, 0)
+
+
+def test_stall_report_says_the_model_never_answered() -> None:
+    events = _TurnEvents(["r0"], {"r0": b"\x01\x00"})
+    report = bench_patch._seed_tts_turn_stall_report(events, 1, 3, 30.0)
+    assert "turn 3 never started a response" in report
+    assert "30.0s of silence" in report
+
+
+def test_stall_report_lists_a_response_that_never_finished() -> None:
+    events = _TurnEvents(["r1"], {"r1": b"\x01\x00\x02\x00"}, {"r1": "hel"})
+    report = bench_patch._seed_tts_turn_stall_report(events, 0, 0, 4.2)
+    assert "started 1 response(s) after 4.2s of silence" in report
+    assert "r1 (4 audio bytes, text 'hel')" in report

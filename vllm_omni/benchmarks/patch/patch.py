@@ -2153,15 +2153,40 @@ async def async_request_openai_audio_speech(
     return output
 
 
-#: Cap on the silence appended per Seed-TTS turn so a model-native duplex
-#: session has audio units to generate on. The target text rides the session
-#: context, so this only advances the clock; the silence stops at the turn's
-#: response.done (the model reaches turn_eos well before the cap), because a
-#: native model that keeps hearing silence after its turn may decide to speak
-#: again, and the benchmark measures one response per utterance.
-_SEED_TTS_SILENCE_SECONDS = 12.0
+#: Silence budget per Seed-TTS turn: a model-native duplex session generates
+#: per audio unit, and the target text rides the session context, so the
+#: silence only advances the clock. It stops at the turn's response.done --
+#: a native model that keeps hearing silence after its turn may decide to
+#: speak again, and the benchmark measures one response per utterance -- so
+#: the budget is only spent on a turn the model is slow to take: it may
+#: choose to listen on a few units first, and a turn that has not settled
+#: when the budget runs out is reported with what the model did.
+_SEED_TTS_SILENCE_SECONDS = 30.0
+#: A native model normally answers the seeded text within this much silence;
+#: a turn that needs more is logged so a slow-to-speak model shows in the run.
+_SEED_TTS_PROMPT_RESPONSE_S = 12.0
 #: MiniCPM-o emits 24 kHz mono; used to report audio_frames after the session closed.
 _SEED_TTS_OUTPUT_SAMPLE_RATE_HZ = 24_000
+
+
+def _seed_tts_turn_stall_report(events: object, response_offset: int, request_index: int, silence_s: float) -> str:
+    """Explain a Seed-TTS turn that never settled: what the model did with the silence."""
+    response_ids = list(getattr(events, "response_ids")[response_offset:])
+    if not response_ids:
+        return (
+            f"Seed-TTS Realtime TTS turn {request_index} never started a response: the model listened "
+            f"through {silence_s:.1f}s of silence and the wait that followed"
+        )
+    audio_bytes = getattr(events, "audio_bytes")
+    response_text = getattr(events, "response_text")
+    started = ", ".join(
+        f"{response_id} ({len(audio_bytes(response_id))} audio bytes, text {response_text(response_id)!r})"
+        for response_id in response_ids
+    )
+    return (
+        f"Seed-TTS Realtime TTS turn {request_index} started {len(response_ids)} response(s) after "
+        f"{silence_s:.1f}s of silence but none reached response.done: {started}"
+    )
 
 
 def _seed_tts_turn_response_id(events: object, response_offset: int, request_index: int) -> str:
@@ -2546,12 +2571,23 @@ async def async_request_openai_realtime_duplex(
                     )
 
                 turn_started_at_s = time.monotonic()
-                await client.stream_silence(seconds=silence_seconds, until=turn_settled)
-                await wait_for_condition(
-                    turn_settled,
-                    timeout_s=180.0,
-                    label=f"Seed-TTS Realtime TTS turn {request_index} response.done",
-                )
+                silence_s = await client.stream_silence(seconds=silence_seconds, until=turn_settled)
+                if silence_s > _SEED_TTS_PROMPT_RESPONSE_S:
+                    logger.warning(
+                        "Seed-TTS Realtime TTS turn %d: the model took %.1fs of silence to settle its response",
+                        request_index,
+                        silence_s,
+                    )
+                try:
+                    await wait_for_condition(
+                        turn_settled,
+                        timeout_s=180.0,
+                        label=f"Seed-TTS Realtime TTS turn {request_index} response.done",
+                    )
+                except TimeoutError as exc:
+                    raise RuntimeError(
+                        _seed_tts_turn_stall_report(client.events, response_offset, request_index, silence_s)
+                    ) from exc
                 errors = client.events.errors()
                 if len(errors) > errors_before:
                     raise RuntimeError(f"Seed-TTS Realtime TTS server error: {errors[-1]}")

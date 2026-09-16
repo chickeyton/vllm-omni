@@ -159,11 +159,14 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
             assert model == "openbmb/MiniCPM-o-4_5"
             self.configure_kwargs = kwargs
 
-        async def stream_silence(self, *, seconds, chunk_ms=200):
+        async def stream_silence(self, *, seconds, chunk_ms=200, until=None):
             # A model-native session speaks off its seeded context once audio
-            # units arrive; the silence itself carries no content.
+            # units arrive; the silence itself carries no content. The probe
+            # stops the silence as soon as the turn settles.
             self.silence_seconds.append(seconds)
             self._emit_response()
+            assert until is not None and until()
+            return 1.0
 
         async def send(self, event):
             self.sent.append(event)
