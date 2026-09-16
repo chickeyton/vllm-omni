@@ -416,10 +416,11 @@ class SileroStreamingVAD:
         min_silence_samples = max(1, round(self.config.silence_duration_ms * self._SAMPLE_RATE_HZ / 1000))
         negative_threshold = max(self.config.threshold - SILERO_VAD_MIN_THRESHOLD, 0.01)
 
-        while self._pending.size >= self._WINDOW_SAMPLES:
-            frame = np.ascontiguousarray(self._pending[: self._WINDOW_SAMPLES], dtype=np.float32)
-            # Copy the residual so a large input chunk is not pinned by a view.
-            self._pending = self._pending[self._WINDOW_SAMPLES :].copy()
+        pending = self._pending
+        offset = 0
+        while pending.size - offset >= self._WINDOW_SAMPLES:
+            frame = np.ascontiguousarray(pending[offset : offset + self._WINDOW_SAMPLES], dtype=np.float32)
+            offset += self._WINDOW_SAMPLES
             frame_start = self._processed_samples
             self._processed_samples += self._WINDOW_SAMPLES
             probability = min(1.0, max(0.0, self._score_frame(frame)))
@@ -463,6 +464,10 @@ class SileroStreamingVAD:
             else:
                 self._candidate_samples = 0
                 self._candidate_start_sample = None
+
+        # Copy the residual once, after the frames are scored, so a large input
+        # chunk is neither pinned by a view nor re-copied for every frame.
+        self._pending = pending[offset:].copy()
 
         return StreamingVADResult(
             contained_speech, self._speech_active, started, stopped, max_probability, start_ms, end_ms

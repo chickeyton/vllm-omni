@@ -118,10 +118,31 @@ def test_auto_response_overlap_forces_listen_only_when_auto_responding() -> None
 # --------------------------------------------------------------------------- #
 
 
-def test_merging_two_appends_keeps_speech_if_either_half_was_speech() -> None:
-    first = {"format": "pcm_f32le", "audio": "", "is_speech": False}
-    second = {"format": "pcm_f32le", "audio": "", "is_speech": True}
-    assert overlap_policy.merge_audio_payloads(first, second)["is_speech"] is True
+@pytest.mark.parametrize("speech_first", [True, False], ids=["speech-then-silence", "silence-then-speech"])
+def test_merging_two_appends_keeps_speech_if_either_half_was_speech(speech_first: bool) -> None:
+    """Matching rates and decodable audio, so the halves really are concatenated.
+
+    Without a ``sample_rate_hz`` on both, ``merge_audio_payloads`` falls back
+    to the newer chunk before merging, and the speech flag it returned was the
+    second chunk's own -- the test passed without exercising the merge.
+    """
+    speech = {
+        "format": "pcm_f32le",
+        "audio": base64.b64encode(b"\x01" * 8).decode("ascii"),
+        "sample_rate_hz": 16000,
+        "is_speech": True,
+    }
+    silence = {
+        "format": "pcm_f32le",
+        "audio": base64.b64encode(b"\x00" * 8).decode("ascii"),
+        "sample_rate_hz": 16000,
+        "is_speech": False,
+    }
+    first, second = (speech, silence) if speech_first else (silence, speech)
+    merged = overlap_policy.merge_audio_payloads(first, second)
+    assert base64.b64decode(merged["audio"]) == base64.b64decode(first["audio"]) + base64.b64decode(second["audio"])
+    assert merged["sample_rate_hz"] == 16000
+    assert merged["is_speech"] is True
 
 
 @pytest.mark.parametrize(
