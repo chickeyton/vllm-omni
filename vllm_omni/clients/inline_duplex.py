@@ -98,7 +98,7 @@ class InlineDuplexClient(DuplexClientBase):
             command = command_from_realtime(payload, defaults=self._input_defaults())
         except RealtimeProtocolError as exc:
             await self._dispatch(
-                error_event(exc.code, str(exc), event_id=exc.event_id or payload.get("event_id")).to_realtime()
+                error_event(exc.code, str(exc), event_id=exc.event_id or payload.get("event_id")).to_wire()
             )
             return
         await handle.submit(command)
@@ -126,7 +126,7 @@ class InlineDuplexClient(DuplexClientBase):
         reason = "closed"
         try:
             async for event in handle.events():
-                await self._dispatch(event.to_realtime())
+                await self._dispatch(event.to_wire())
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

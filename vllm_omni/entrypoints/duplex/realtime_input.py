@@ -169,8 +169,8 @@ class RealtimeEnvelope:
         param: object | None = None,
     ) -> dict[str, object]:
         """Wire JSON of a transport-level error (derived from the typed ``ErrorEvent``)."""
-        return error_event(code, message, event_id=event_id, param=param).to_realtime()
+        return error_event(code, message, event_id=event_id, param=param).to_wire()
 
     @staticmethod
     def command_error_payload(exc: RealtimeProtocolError) -> dict[str, object]:
-        return error_event(exc.code, str(exc), event_id=exc.event_id).to_realtime()
+        return error_event(exc.code, str(exc), event_id=exc.event_id).to_wire()

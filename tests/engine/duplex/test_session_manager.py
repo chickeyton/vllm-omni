@@ -420,7 +420,7 @@ async def test_open_answers_with_capabilities_and_emits_session_created() -> Non
         assert isinstance(events[0], SessionCreated)
         assert events[0].epoch == 0
         assert events[0].session["id"] == "sid-open"
-        wire = events[0].to_realtime()
+        wire = events[0].to_wire()
         assert wire["type"] == "session.created"
         assert "incarnation" not in wire and "incarnation" not in wire["session"]
 
@@ -594,7 +594,7 @@ async def test_command_for_unknown_session_emits_unknown_session_error() -> None
         assert error.related_event_id == "evt-hb"
         assert error.session_id == "sid-missing"
         assert error.epoch is None
-        assert error.to_realtime()["error"]["code"] == "unknown_session"
+        assert error.to_wire()["error"]["code"] == "unknown_session"
 
 
 async def test_command_for_closed_session_emits_unknown_session_error() -> None:
@@ -855,7 +855,7 @@ async def test_reaper_expires_idle_sessions_and_emits_session_expired() -> None:
         assert len(expired) == 1
         assert isinstance(expired[0], SessionExpired)
         assert expired[0].reason == "idle_ttl_expired"
-        assert expired[0].to_realtime() == {
+        assert expired[0].to_wire() == {
             "type": "session.expired",
             "event_id": expired[0].event_id,
             "session_id": "sid-idle",

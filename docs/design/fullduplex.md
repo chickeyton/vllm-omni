@@ -46,7 +46,7 @@ the model plugins.
                    │                          ┌──────────────────────────────────────┐
                    │                          │ OmniDuplexSessionHandler (thin)      │
                    │                          │  websocket I/O, command_from_realtime│
-                   │                          │  event.to_realtime(), attachment /   │
+                   │                          │  event.to_wire(), attachment /   │
                    │                          │  resume tokens / replay journal      │
                    │                          └──────────────────┬───────────────────┘
                    ▼                                             ▼   DuplexSessionHandle
@@ -106,7 +106,7 @@ plugin and the session runtime config to `DuplexOrchestrator` directly.
 2. **Typed contract.** Commands into a session are `DuplexCommand`
    dataclasses (`protocol/duplex/commands.py`); outputs are `DuplexEvent`
    dataclasses (`protocol/duplex/events.py`). `command_from_realtime()` and
-   `DuplexEvent.to_realtime()` derive the OpenAI Realtime JSON, so the wire
+   `DuplexEvent.to_wire()` derive the OpenAI Realtime JSON, so the wire
    format is never hand-built, and the websocket handler and the inline client
    share one conversion.
 3. **Generic bases and the turn-based classes have zero duplex vocabulary.**
@@ -415,7 +415,7 @@ follow-up PRs port them (RFC vllm-omni#7181, PR 2/3).
    envelope-level errors (invalid JSON, oversize frame, unknown type,
    event acks) are answered locally;
 4. writer pump (session-scoped, survives reconnects): `async for ev in
-   handle.events(): attachment.send_event(ev.to_realtime())`, journaling
+   handle.events(): attachment.send_event(ev.to_wire())`, journaling
    for replay until the journal overflows (`session.resync_required`);
 5. disconnect: a resumable session is detached (`attachment.detach` +
    `omni.detach_session`, engine-owned grace); a superseded socket's

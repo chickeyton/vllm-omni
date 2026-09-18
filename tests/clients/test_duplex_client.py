@@ -122,7 +122,7 @@ class _WireEvent:
     def is_terminal(self) -> bool:
         return self.raw.get("type") in {"session.closed", "session.expired"}
 
-    def to_realtime(self) -> dict[str, object]:
+    def to_wire(self) -> dict[str, object]:
         return dict(self.raw)
 
 

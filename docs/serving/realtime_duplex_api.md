@@ -286,7 +286,7 @@ convenience wrapper per command (`append_audio`, `commit`, `create_response`,
 `delete_item`, `truncate_item`, `heartbeat`, ...). `events()` is a
 single-consumer async iterator that ends after `session.closed` /
 `session.expired`; rejected commands come back as `ErrorEvent`s on it.
-Every event renders the wire JSON with `to_realtime()`, so anything written
+Every event renders the wire JSON with `to_wire()`, so anything written
 against the WebSocket protocol works unchanged on the typed stream.
 
 `vllm_omni.clients.inline_duplex.InlineDuplexClient` wraps a `DuplexOmni`
@@ -1284,7 +1284,7 @@ unprojected: the session-internal events the runner produces
 `response.output_audio.delta`, `response.text.delta`, `function_call.done`)
 — their Realtime projections are the examples above (see the name map at the
 end of this section). Every public event is a typed `DuplexEvent` whose
-`to_realtime()` is the wire object; every client event is parsed into a
+`to_wire()` is the wire object; every client event is parsed into a
 typed `DuplexCommand` by `command_from_realtime()`.
 
 #### Internal to Realtime name map
