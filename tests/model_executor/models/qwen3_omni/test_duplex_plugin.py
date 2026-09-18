@@ -95,7 +95,7 @@ async def test_two_committed_turns_stream_text_and_audio_and_release_requests():
             await h.run(append_audio())
             assert len(h.port.submissions) == i
             await h.run(Commit(final=True, create_response=True))
-            assert len(h.port.submissions) == i + 1, [e.to_realtime() for e in h.events]
+            assert len(h.port.submissions) == i + 1, [e.to_wire() for e in h.events]
             request_id = h.port.submissions[-1].context.request_id
             ids.append(request_id)
             assert h.session.active_request_id == request_id
@@ -214,7 +214,7 @@ async def test_late_playback_ack_keeps_answer_before_new_user_input():
         await h.run(Commit(final=True, create_response=True))
         current_response = h.session.active_response_id
         events = await h.run(AckPlayback(response_id=response_id, played_ms=1000))
-        assert not any(e.to_realtime().get("type") == "error" for e in events)
+        assert not any(e.to_wire().get("type") == "error" for e in events)
         assert [m["role"] for m in h.session.history] == ["user", "assistant", "user"]
         assert h.session.history[1]["content"] == "first answer"
         assert h.session.active_response_id == current_response
@@ -491,7 +491,7 @@ async def test_image_limit_rejects_atomically_and_delete_reclaims_capacity():
         for i in range(8):
             await h.run(CreateItem(item=image_item(f"camera_{i}")))
         events = await h.run(CreateItem(item=image_item("overflow")))
-        assert any(e.to_realtime()["type"] == "error" for e in events)
+        assert any(e.to_wire()["type"] == "error" for e in events)
         assert len(h.session.history) == 8
         await h.run(DeleteItem(item_id="camera_0"))
         await h.run(CreateItem(item=image_item("replacement")))

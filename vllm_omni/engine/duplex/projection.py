@@ -6,7 +6,7 @@
 The session runner owns one :class:`RealtimeProjectionState` per session. The
 projection consumes that state (response / item ids, content-part
 bookkeeping) when it *constructs* events; rendering an event to wire JSON
-(``event.to_realtime()``) is pure and lives on the event classes in
+(``event.to_wire()``) is pure and lives on the event classes in
 ``vllm_omni.protocol.duplex.events``.
 
 Besides the output projection (:func:`project_internal_event`) the state also

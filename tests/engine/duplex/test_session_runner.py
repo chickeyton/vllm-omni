@@ -355,8 +355,8 @@ async def test_open_announces_the_session_and_reserves_the_stage0_request() -> N
         assert created.session_id == SESSION_ID
         assert created.session["id"] == SESSION_ID
         assert created.session["capabilities"]["supports_input_append"] is True
-        assert created.to_realtime()["type"] == "session.created"
-        assert "incarnation" not in created.to_realtime()
+        assert created.to_wire()["type"] == "session.created"
+        assert "incarnation" not in created.to_wire()
         assert h.session.state == DuplexSessionState.OPEN
         # Admission reserves the resumable Stage0 request atomically with the open.
         assert [context.request_id for context in h.port.ensured] == [h.stage0_request_id(epoch=0)]
@@ -734,7 +734,7 @@ async def test_listen_decision_is_consumed_and_never_forwarded_to_tts() -> None:
         assert types(events) == ["response.listen"]
         assert events[0].details["reason"] == "model_listen"
         assert events[0].details["model_listen"] is True
-        assert events[0].to_realtime()["response"]["status"] == "listening"
+        assert events[0].to_wire()["response"]["status"] == "listening"
         assert h.session.active_response_id is None
     finally:
         await close_harness(h)
@@ -1035,7 +1035,7 @@ async def test_conversation_items_can_be_injected_and_deleted() -> None:
 
 def _stage_metrics_of(event: object) -> dict[str, dict[str, object]]:
     """Per-stage engine metrics as the client reads them off one wire event."""
-    payload = event.to_realtime()
+    payload = event.to_wire()
     metadata = payload.get("metadata")
     assert isinstance(metadata, dict), payload
     vllm_omni = metadata.get("vllm_omni")

@@ -282,7 +282,7 @@ def test_signal_turn_transitions_and_returns_typed_turn_event(event_type, turn_s
 
     assert isinstance(event, TurnEvent)
     assert session.turn_state == turn_state
-    wire = event.to_realtime()
+    wire = event.to_wire()
     assert wire["type"] == "turn.event"
     assert wire["event"] == event_type.value
     assert wire["turn_state"] == turn_state.value
