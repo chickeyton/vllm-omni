@@ -25,9 +25,10 @@ engine-side half of that story:
 
 from __future__ import annotations
 
-import base64
 from collections.abc import Callable, Mapping
 from dataclasses import fields
+
+import pybase64 as base64
 
 from vllm_omni.protocol.duplex import RealtimeInputDefaults, RealtimeProtocolCapabilities, decode_duplex_command
 from vllm_omni.protocol.duplex.commands import (
