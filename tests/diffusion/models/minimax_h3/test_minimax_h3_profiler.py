@@ -99,6 +99,9 @@ def test_request_mode_stage_durations_reset_between_requests():
 
     assert len(loop_wall_times) == 2
     # forward() clears the previous request's records, so the second report
-    # matches the second loop alone rather than the running total.
-    assert second.stage_durations["MiniMaxH3Pipeline.diffuse"] == pytest.approx(loop_wall_times[1], abs=0.05)
-    assert second.stage_durations["MiniMaxH3Pipeline.diffuse"] < sum(loop_wall_times)
+    # covers the second loop alone rather than the running total. The upper
+    # bound leaves room for wrapper overhead on a slow CI host while still
+    # rejecting an accumulated value (which would be at least twice the loop).
+    second_diffuse = second.stage_durations["MiniMaxH3Pipeline.diffuse"]
+    assert second_diffuse >= loop_wall_times[1]
+    assert second_diffuse < loop_wall_times[1] + _NUM_STEPS * _STEP_SLEEP_S / 2
