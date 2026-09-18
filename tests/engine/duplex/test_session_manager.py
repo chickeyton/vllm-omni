@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.engine.duplex.commands import AppendAudio, CloseSession, Commit, DuplexCommand, Heartbeat
 from vllm_omni.engine.duplex.config import DuplexCapabilities, DuplexSessionConfig, DuplexSessionState
 from vllm_omni.engine.duplex.contracts import (
     DuplexAppendPlan,
@@ -24,14 +23,6 @@ from vllm_omni.engine.duplex.contracts import (
     DuplexStageSubmission,
     DuplexStageSubmissionResult,
     duplex_resource_request_belongs_to_session,
-)
-from vllm_omni.engine.duplex.events import (
-    DuplexEvent,
-    ErrorEvent,
-    SessionClosed,
-    SessionCreated,
-    SessionExpired,
-    SessionHeartbeatAck,
 )
 from vllm_omni.engine.duplex.messages import (
     CloseDuplexSessionMessage,
@@ -55,6 +46,15 @@ from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession
 from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session.runner import _Internal
+from vllm_omni.protocol.duplex.commands import AppendAudio, CloseSession, Commit, DuplexCommand, Heartbeat
+from vllm_omni.protocol.duplex.events import (
+    DuplexEvent,
+    ErrorEvent,
+    SessionClosed,
+    SessionCreated,
+    SessionExpired,
+    SessionHeartbeatAck,
+)
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

@@ -26,15 +26,6 @@ from dataclasses import dataclass, replace
 from fastapi import WebSocket, WebSocketDisconnect
 from vllm.logger import init_logger
 
-from vllm_omni.engine.duplex.commands import DuplexCommand, DuplexCommandError
-from vllm_omni.engine.duplex.events import (
-    DuplexEvent,
-    SessionClosed,
-    SessionCreated,
-    SessionReplaced,
-    SessionResumed,
-    SessionResyncRequired,
-)
 from vllm_omni.engine.duplex.messages import DuplexSessionError
 from vllm_omni.entrypoints.duplex.realtime_input import RealtimeEnvelope, parse_resume_request
 from vllm_omni.entrypoints.duplex.session_attachment import (
@@ -51,7 +42,14 @@ from vllm_omni.entrypoints.duplex.websocket import (
     receive_text_with_timeout,
 )
 from vllm_omni.entrypoints.duplex_omni import DuplexOmni, DuplexSessionHandle
-from vllm_omni.protocol.duplex import RealtimeInputDefaults
+from vllm_omni.protocol.duplex import DuplexCommand, DuplexEvent, RealtimeInputDefaults, RealtimeProtocolError
+from vllm_omni.protocol.duplex.events import (
+    SessionClosed,
+    SessionCreated,
+    SessionReplaced,
+    SessionResumed,
+    SessionResyncRequired,
+)
 
 logger = init_logger(__name__)
 
@@ -503,7 +501,7 @@ class OmniDuplexSessionHandler:
     ) -> None:
         try:
             command = envelope.translate(payload)
-        except DuplexCommandError as exc:
+        except RealtimeProtocolError as exc:
             await send_json(envelope.command_error_payload(exc))
             return
         # ``translate`` folds a session.update's audio settings into the

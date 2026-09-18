@@ -19,11 +19,11 @@ from vllm_omni.engine.duplex.config import (
     ResponseCreateOptions,
 )
 from vllm_omni.engine.duplex.contracts import DuplexFence
-from vllm_omni.engine.duplex.events import TurnEvent
 from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
     minicpmo45_native_capabilities,
 )
+from vllm_omni.protocol.duplex.events import TurnEvent
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
