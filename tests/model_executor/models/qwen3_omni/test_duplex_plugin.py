@@ -17,7 +17,6 @@ from tests.engine.duplex.test_session_runner import (
     tts_output,
 )
 from vllm_omni.config.stage_config import DuplexSessionRuntimeConfig
-from vllm_omni.engine.duplex.commands import AckPlayback, CancelResponse, Commit, UpdateSession
 from vllm_omni.engine.duplex.config import DuplexSessionConfig
 from vllm_omni.engine.duplex.messages import OpenDuplexSessionMessage
 from vllm_omni.engine.duplex.plugin import DuplexRuntimeConfigError
@@ -25,6 +24,7 @@ from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.model_executor.models.qwen3_omni.duplex.input import QwenPcmBuffer
 from vllm_omni.model_executor.models.qwen3_omni.duplex.plugin import MAX_PROMPT_IMAGES, Qwen3OmniDuplexPlugin
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.protocol.duplex.commands import AckPlayback, CancelResponse, Commit, UpdateSession
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -372,13 +372,13 @@ def image_item(item_id="camera"):
 
 @pytest.mark.asyncio
 async def test_image_item_is_context_until_response_create_and_delete_removes_it():
-    from vllm_omni.engine.duplex.commands import CreateResponse, DeleteItem
+    from vllm_omni.protocol.duplex.commands import CreateResponse, DeleteItem
 
     h = await open_qwen()
     try:
-        from vllm_omni.engine.duplex.realtime_commands import translate_realtime_command
+        from vllm_omni.engine.duplex.mailbox import command_from_realtime
 
-        await h.run(translate_realtime_command({"type": "conversation.item.create", "item": image_item()}))
+        await h.run(command_from_realtime({"type": "conversation.item.create", "item": image_item()}))
         assert not h.port.submissions
         await h.run(CreateResponse())
         assert len(h.port.submissions) == 1
@@ -399,7 +399,7 @@ async def test_image_item_is_context_until_response_create_and_delete_removes_it
 
 @pytest.mark.asyncio
 async def test_image_context_reaches_audio_turn_and_survives_commit():
-    from vllm_omni.engine.duplex.commands import CreateItem
+    from vllm_omni.protocol.duplex.commands import CreateItem
 
     h = await open_qwen()
     try:
@@ -424,7 +424,7 @@ async def test_image_only_item_reaches_the_prompt_the_way_the_camera_sends_it():
     or audio, so an image-only item was acknowledged to the client and then
     dropped. Nothing reported it and every prompt that followed was blind.
     """
-    from vllm_omni.engine.duplex.realtime_commands import translate_realtime_command
+    from vllm_omni.engine.duplex.mailbox import command_from_realtime
 
     h = await open_qwen()
     try:
@@ -434,7 +434,7 @@ async def test_image_only_item_reaches_the_prompt_the_way_the_camera_sends_it():
             "role": "user",
             "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64," + camera_frame()}],
         }
-        await h.run(translate_realtime_command({"type": "conversation.item.create", "item": item}))
+        await h.run(command_from_realtime({"type": "conversation.item.create", "item": item}))
         assert [
             part
             for message in h.session.history
@@ -459,8 +459,8 @@ async def test_one_item_carrying_both_speech_and_a_picture_keeps_both():
     id; registering the spoken message there would overwrite an image stored
     under the same id, so the picture has to become its own item.
     """
-    from vllm_omni.engine.duplex.commands import CreateResponse
-    from vllm_omni.engine.duplex.realtime_commands import translate_realtime_command
+    from vllm_omni.engine.duplex.mailbox import command_from_realtime
+    from vllm_omni.protocol.duplex.commands import CreateResponse
 
     h = await open_qwen()
     try:
@@ -473,7 +473,7 @@ async def test_one_item_carrying_both_speech_and_a_picture_keeps_both():
                 {"type": "input_audio", "audio": pcm16_base64(), "format": "pcm16", "sample_rate_hz": 16000},
             ],
         }
-        await h.run(translate_realtime_command({"type": "conversation.item.create", "item": item}))
+        await h.run(command_from_realtime({"type": "conversation.item.create", "item": item}))
         await h.run(CreateResponse())
         mm = h.port.submissions[-1].prompt["multi_modal_data"]
         assert len(mm["image"]) == 1, "the picture was dropped on its way out of a mixed item"
@@ -484,7 +484,7 @@ async def test_one_item_carrying_both_speech_and_a_picture_keeps_both():
 
 @pytest.mark.asyncio
 async def test_image_limit_rejects_atomically_and_delete_reclaims_capacity():
-    from vllm_omni.engine.duplex.commands import CreateItem, DeleteItem
+    from vllm_omni.protocol.duplex.commands import CreateItem, DeleteItem
 
     h = await open_qwen()
     try:
@@ -601,7 +601,7 @@ async def test_visual_capture_records_submitted_pixels_and_request(tmp_path, mon
 
     from PIL import Image
 
-    from vllm_omni.engine.duplex.commands import CreateItem
+    from vllm_omni.protocol.duplex.commands import CreateItem
 
     monkeypatch.setenv("VLLM_OMNI_QWEN_VISUAL_DEBUG_DIR", str(tmp_path))
     h = await open_qwen()

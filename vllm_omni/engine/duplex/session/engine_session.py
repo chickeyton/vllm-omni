@@ -37,16 +37,16 @@ from vllm_omni.engine.duplex.config import (
     ResponseCreateOptions,
 )
 from vllm_omni.engine.duplex.contracts import DuplexFence
-from vllm_omni.engine.duplex.events import TurnEvent
 from vllm_omni.engine.duplex.session.lease import (
     DuplexLeaseActivity,
     DuplexLeaseConfig,
     DuplexLeaseState,
 )
+from vllm_omni.protocol.duplex.events import TurnEvent
 
 if TYPE_CHECKING:
     from vllm_omni.engine.duplex.plugin import DuplexModelSessionState
-    from vllm_omni.engine.duplex.realtime_events import RealtimeProjectionState
+    from vllm_omni.engine.duplex.projection import RealtimeProjectionState
 
 
 def _default_lease() -> DuplexLeaseState:
