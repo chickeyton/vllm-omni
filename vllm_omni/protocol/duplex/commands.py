@@ -155,32 +155,6 @@ class CloseSession(DuplexCommand):
     reason: str = "client_close"
 
 
-#: Canonical client event types a duplex session accepts (one per command class).
-#: Aliases (``input.commit``, ``push_text``, ``signal_turn``, ...) decode to the
-#: same classes but are not listed; see :func:`decode_duplex_command`.
-DUPLEX_COMMAND_TYPES: frozenset[str] = frozenset(
-    {
-        "input_audio_buffer.append",
-        "input_audio_buffer.commit",
-        "input_audio_buffer.clear",
-        "output_audio_buffer.clear",
-        "response.create",
-        "response.cancel",
-        "conversation.item.create",
-        "conversation.item.delete",
-        "conversation.item.truncate",
-        "session.update",
-        "playback.ack",
-        "session.heartbeat",
-        "session.close",
-        "turn.signal",
-        "input.text.append",
-        "input.cancel",
-        "barge_in",
-    }
-)
-
-
 # ---- decoding ----
 
 
@@ -461,7 +435,6 @@ __all__ = [
     "Heartbeat",
     "SignalTurn",
     # Base, vocabulary and decoder.
-    "DUPLEX_COMMAND_TYPES",
     "DuplexCommand",
     "RealtimeProtocolError",
     "build_append_audio",

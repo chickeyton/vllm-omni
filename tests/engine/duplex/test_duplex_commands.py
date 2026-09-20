@@ -12,8 +12,8 @@ import pytest
 
 from vllm_omni.engine.duplex.mailbox import command_from_realtime, mailbox_channel, mailbox_payload
 from vllm_omni.protocol.duplex import RealtimeInputDefaults, RealtimeProtocolError
+from vllm_omni.protocol.duplex import commands as duplex_commands
 from vllm_omni.protocol.duplex.commands import (
-    DUPLEX_COMMAND_TYPES,
     AckPlayback,
     AppendAudio,
     AppendText,
@@ -61,11 +61,21 @@ _MINIMAL_PAYLOADS: dict[str, tuple[dict[str, object], type[DuplexCommand]]] = {
 }
 
 
-def test_every_realtime_command_type_has_a_mapping_case():
-    assert set(_MINIMAL_PAYLOADS) == set(DUPLEX_COMMAND_TYPES)
+#: The canonical client event type of every command class in the duplex vocabulary.
+_COMMAND_WIRE_TYPES = frozenset(
+    getattr(duplex_commands, name).wire_type
+    for name in duplex_commands.__all__
+    if isinstance(getattr(duplex_commands, name), type)
+    and issubclass(getattr(duplex_commands, name), DuplexCommand)
+    and getattr(duplex_commands, name) is not DuplexCommand
+)
 
 
-@pytest.mark.parametrize("event_type", sorted(DUPLEX_COMMAND_TYPES))
+def test_every_command_class_has_a_mapping_case():
+    assert set(_MINIMAL_PAYLOADS) == _COMMAND_WIRE_TYPES
+
+
+@pytest.mark.parametrize("event_type", sorted(_COMMAND_WIRE_TYPES))
 def test_command_from_realtime_maps_each_type_to_its_dataclass_and_propagates_event_id(event_type: str):
     body, expected_cls = _MINIMAL_PAYLOADS[event_type]
 

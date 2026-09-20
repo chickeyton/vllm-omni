@@ -52,7 +52,6 @@ duplex command or event carries nothing a Realtime one does not.
 """
 
 from vllm_omni.protocol.duplex.commands import (
-    DUPLEX_COMMAND_TYPES,
     DuplexCommand,
     build_append_audio,
     decode_duplex_command,
@@ -119,7 +118,6 @@ from vllm_omni.protocol.realtime.session import (
 )
 
 __all__ = [
-    "DUPLEX_COMMAND_TYPES",
     "MAX_INPUT_SAMPLE_RATE_HZ",
     "MIN_INPUT_SAMPLE_RATE_HZ",
     "REALTIME_ERROR_TYPES_BY_CODE",

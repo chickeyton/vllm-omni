@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import fields
+from typing import TypeVar
 
 import pybase64 as base64
 
@@ -120,17 +121,25 @@ _MAILBOX_CHANNELS: dict[type[DuplexCommand], str] = {
 }
 
 
-def _lookup(table: Mapping[type[DuplexCommand], object], command: DuplexCommand | type[DuplexCommand]) -> object:
+_T = TypeVar("_T")
+
+
+def _for_class(table: Mapping[type[DuplexCommand], _T], command: DuplexCommand | type[DuplexCommand]) -> _T | None:
+    """The table entry for a command's class or its nearest registered base; ``None`` when unregistered."""
     cls = command if isinstance(command, type) else type(command)
     for base in cls.__mro__:
         if base in table:
             return table[base]
-    raise TypeError(f"{cls.__name__} is not a duplex command the engine knows how to render")
+    return None
 
 
 def mailbox_channel(command: DuplexCommand | type[DuplexCommand]) -> str:
     """The session-internal ``type`` a command (or command class) travels on."""
-    return str(_lookup(_MAILBOX_CHANNELS, command))
+    channel = _for_class(_MAILBOX_CHANNELS, command)
+    if channel is None:
+        cls = command if isinstance(command, type) else type(command)
+        raise TypeError(f"{cls.__name__} is not a duplex command the engine knows how to render")
+    return channel
 
 
 def _base_payload(command: DuplexCommand) -> dict[str, object]:
@@ -244,9 +253,5 @@ def mailbox_payload(command: DuplexCommand) -> dict[str, object]:
     re-encodes its audio, ...).
     """
     data = _base_payload(command)
-    cls = type(command)
-    for base in cls.__mro__:
-        renderer = _MAILBOX_RENDERERS.get(base)
-        if renderer is not None:
-            return renderer(command, data)
-    return data
+    renderer = _for_class(_MAILBOX_RENDERERS, command)
+    return renderer(command, data) if renderer is not None else data
