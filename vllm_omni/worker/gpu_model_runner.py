@@ -55,6 +55,16 @@ else:
 
 logger = init_logger(__name__)
 
+# Payload sections of ``OmniPayload`` (see vllm_omni/data_entry_keys.py). A
+# runtime snapshot carrying one of these came from a producer stage; anything
+# else is request setup state.
+_OMNI_PAYLOAD_SECTIONS = frozenset({"meta", "codes", "ids", "embed", "hidden_states", "latent"})
+
+
+def _is_replacement_snapshot(buffer: dict) -> bool:
+    """Whether a runtime buffer is a producer payload rather than setup state."""
+    return any(key in buffer for key in _OMNI_PAYLOAD_SECTIONS)
+
 
 def _filter_mrope_kwargs_for_model(model: object, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return only M-RoPE kwargs accepted by the model implementation."""
@@ -1558,7 +1568,15 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
             model_buffer = getattr(new_req, "model_intermediate_buffer", None)
             if isinstance(model_buffer, dict) and model_buffer:
                 update_buffer(new_req.req_id, model_buffer)
-                if replace:
+                # Under replace semantics an intermediate buffer that is itself
+                # a producer snapshot is the whole runtime payload, and any
+                # ``additional_information`` still on the request is the stale
+                # chunk it supersedes. A buffer without a payload section is
+                # only the request's own setup state (the async-chunk pre-warm
+                # buffer, for instance), so it must not shadow the chunk that
+                # admitted this request -- dropping that chunk's producer
+                # metadata silently rewrites its stream position (#7978, #7979).
+                if replace and _is_replacement_snapshot(model_buffer):
                     continue
             payload_info = getattr(new_req, "additional_information", None)
             decoded_info = deserialize_additional_information(payload_info)

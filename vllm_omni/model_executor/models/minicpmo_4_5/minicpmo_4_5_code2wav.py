@@ -247,6 +247,10 @@ class MiniCPMO45Code2Wav(nn.Module):
         self._model_revision = getattr(vllm_config.model_config, "revision", None)
         self.backend: BatchedToken2Wav | None = None
         self._states: dict[str, _RequestState] = {}
+        # Non-final codec frames withheld because the window was shorter than
+        # the encoder's pre-lookahead convolution. They ride along to the next
+        # chunk instead of being decoded alone (#7978).
+        self._held_tokens: dict[str, torch.Tensor] = {}
         self._runtime_prompts: dict[str, _RuntimePrompt] = {}
         self._request_prompt_keys: dict[str, str] = {}
         self._runtime_prompt_dir = tempfile.TemporaryDirectory(
@@ -495,18 +499,13 @@ class MiniCPMO45Code2Wav(nn.Module):
         if not isinstance(meta, Mapping):
             meta = info
         request_id = str(_scalar(meta.get("request_id"), _scalar(info.get("request_id"), "")))
-        if not _carries_stage_payload(info, meta):
-            # The producer attached nothing to this step, only the bookkeeping
-            # the runner stamps on every request. The stage was scheduled on
-            # the placeholder prompt that async-chunk pre-warm submits before
-            # the first codec window arrives: those tokens are reserved slots,
-            # not codec data, and one bogus frame is shorter than the vocoder's
-            # lookahead window. Such a step carries no producer metadata at
-            # all, so it cannot be held to the payload contract below either.
+
+        def inert(reason_request_id: str) -> _WorkItem:
+            """A step this stage must not act on: no audio, no state change."""
             return _WorkItem(
                 output_index=index,
                 state_id=state_id,
-                request_id=request_id or state_id,
+                request_id=reason_request_id,
                 cache_epoch=0,
                 chunk_seq=0,
                 prompt_cache_id=self._default_prompt_id,
@@ -523,6 +522,16 @@ class MiniCPMO45Code2Wav(nn.Module):
                 turn_end=False,
                 has_payload=False,
             )
+
+        if not _carries_stage_payload(info, meta):
+            # The producer attached nothing to this step, only the bookkeeping
+            # the runner stamps on every request. The stage was scheduled on
+            # the placeholder prompt that async-chunk pre-warm submits before
+            # the first codec window arrives: those tokens are reserved slots,
+            # not codec data, and one bogus frame is shorter than the vocoder's
+            # lookahead window. Such a step carries no producer metadata at
+            # all, so it cannot be held to the payload contract below either.
+            return inert(request_id or state_id)
         if not request_id:
             raise _batch_error("missing_request_id", output_index=index)
         cache_epoch = int(_scalar(meta.get("cache_epoch"), 0))
@@ -546,37 +555,69 @@ class MiniCPMO45Code2Wav(nn.Module):
             # placeholder as codec data.
             tokens = segment.new_empty(0, dtype=torch.long)
         previous = self._states.get(state_id)
+        # A stream position is not a correctness assertion: the Talker-to-
+        # Code2Wav transport can drop a payload after its position was
+        # committed, so a forward gap is reachable and must not be fatal --
+        # raising here kills the stage engine and every session on it
+        # (#7978, #7979). Only a *backward* position is unsafe to act on,
+        # because replaying it would advance the codec cache twice.
         if previous is None:
             if chunk_seq != 0:
-                raise _batch_error(
-                    "missing_state_for_chunk",
-                    request_id=request_id,
-                    cache_epoch=cache_epoch,
-                    chunk_seq=chunk_seq,
+                logger.warning(
+                    "MiniCPM-o Code2Wav %s resumed at cache_epoch=%d chunk_seq=%d "
+                    "with no cached state; starting a fresh codec cache.",
+                    request_id,
+                    cache_epoch,
+                    chunk_seq,
                 )
         elif cache_epoch < previous.cache_epoch:
-            raise _batch_error(
-                "stale_cache_epoch",
-                request_id=request_id,
-                expected=previous.cache_epoch,
-                actual=cache_epoch,
+            logger.warning(
+                "MiniCPM-o Code2Wav %s dropped a chunk from retired cache_epoch=%d (current epoch %d).",
+                request_id,
+                cache_epoch,
+                previous.cache_epoch,
             )
+            return inert(request_id)
         elif cache_epoch > previous.cache_epoch:
+            # A new epoch is by construction a full reset, so the cached state
+            # cannot condition it whatever the chunk index says.
             if chunk_seq != 0:
-                raise _batch_error(
-                    "new_epoch_requires_first_chunk",
-                    request_id=request_id,
-                    cache_epoch=cache_epoch,
-                    chunk_seq=chunk_seq,
+                logger.warning(
+                    "MiniCPM-o Code2Wav %s opened cache_epoch=%d at chunk_seq=%d; "
+                    "%d earlier chunk(s) of that epoch were lost in transit.",
+                    request_id,
+                    cache_epoch,
+                    chunk_seq,
+                    chunk_seq,
                 )
             previous = None
-        elif chunk_seq != previous.chunk_seq + 1:
-            raise _batch_error(
-                "stale_or_reordered_chunk",
-                request_id=request_id,
-                expected=previous.chunk_seq + 1,
-                actual=chunk_seq,
+            # Frames withheld from the retired epoch belong to a codec window
+            # the new epoch does not continue.
+            self._held_tokens.pop(state_id, None)
+        elif chunk_seq <= previous.chunk_seq:
+            logger.warning(
+                "MiniCPM-o Code2Wav %s dropped a replayed chunk_seq=%d (cache is at %d) in cache_epoch=%d.",
+                request_id,
+                chunk_seq,
+                previous.chunk_seq,
+                cache_epoch,
             )
+            return inert(request_id)
+        elif chunk_seq != previous.chunk_seq + 1:
+            logger.warning(
+                "MiniCPM-o Code2Wav %s skipped chunk_seq %d..%d in cache_epoch=%d; "
+                "decoding continues from the cached state.",
+                request_id,
+                previous.chunk_seq + 1,
+                chunk_seq - 1,
+                cache_epoch,
+            )
+        # Only once the item is known to be one this stage will act on: an
+        # item dropped above must not consume the withheld frames.
+        held = self._held_tokens.get(state_id)
+        if held is not None and held.numel() and (tokens.numel() or last_chunk):
+            tokens = torch.cat((held.to(device=tokens.device, dtype=torch.long), tokens))
+            self._held_tokens.pop(state_id, None)
         prompt_cache_id, prompt_wav, runtime_prompt_key = self._resolve_prompt(
             state_id,
             info,
@@ -772,6 +813,31 @@ class MiniCPMO45Code2Wav(nn.Module):
             item for item in items if not item.last_chunk and item.tts_is_last_chunk and item.tokens.numel() == 0
         ]
         compute_items = [item for item in items if item.tokens.numel() > 0]
+        # The encoder's pre-lookahead convolution consumes its right context
+        # from the chunk itself and keeps no left cache, so a non-final window
+        # narrower than that kernel cannot be decoded on its own. Withhold it
+        # and let it ride on the next window rather than failing the stage:
+        # the frames are not lost, only re-chunked, and the final window is
+        # zero-padded by the encoder so nothing is stranded (#7978).
+        lookahead = self.backend.pre_lookahead_len()
+        held_items = (
+            [item for item in compute_items if not item.last_chunk and item.tokens.numel() <= lookahead]
+            if lookahead
+            else []
+        )
+        if held_items:
+            withheld = {id(item) for item in held_items}
+            compute_items = [item for item in compute_items if id(item) not in withheld]
+            for item in held_items:
+                logger.warning(
+                    "MiniCPM-o Code2Wav %s withheld a %d-frame non-final window (needs %d) "
+                    "for cache_epoch=%d chunk_seq=%d; it rides on the next window.",
+                    item.request_id,
+                    int(item.tokens.numel()),
+                    lookahead + 1,
+                    item.cache_epoch,
+                    item.chunk_seq,
+                )
         invalid_empty = [
             item.request_id
             for item in items
@@ -802,6 +868,21 @@ class MiniCPMO45Code2Wav(nn.Module):
             )
 
         pending: dict[str, _RequestState | None] = {item.state_id: None for item in sentinels}
+        # Withheld windows still advance the stream position, so the next
+        # window is not mistaken for a reordered one.
+        pending.update(
+            {
+                item.state_id: _RequestState(
+                    cache_epoch=item.cache_epoch,
+                    chunk_seq=item.chunk_seq,
+                    prompt_cache_id=item.prompt_cache_id,
+                    prompt_wav=item.prompt_wav,
+                    token2wav=item.previous.token2wav,
+                )
+                for item in held_items
+                if item.previous is not None
+            }
+        )
         pending.update(
             {
                 item.state_id: _RequestState(
@@ -918,9 +999,14 @@ class MiniCPMO45Code2Wav(nn.Module):
                 )
 
         self._commit_runtime_prompt_owners(items)
+        for item in held_items:
+            # Copy: these frames outlive the step, and the ids they were sliced
+            # from belong to the runner's input buffer, which it reuses.
+            self._held_tokens[item.state_id] = item.tokens.detach().clone()
         for request_id, state in pending.items():
             if state is None:
                 self._states.pop(request_id, None)
+                self._held_tokens.pop(request_id, None)
             else:
                 self._states[request_id] = state
         sample_rate_tensor = torch.as_tensor(sample_rate, dtype=torch.int32)
@@ -945,6 +1031,7 @@ class MiniCPMO45Code2Wav(nn.Module):
         for request_id in finished_req_ids:
             state_id = str(request_id)
             self._states.pop(state_id, None)
+            self._held_tokens.pop(state_id, None)
             self._release_request_prompt(state_id)
 
     def make_omni_output(self, model_outputs: Any, **_: Any) -> OmniOutput:

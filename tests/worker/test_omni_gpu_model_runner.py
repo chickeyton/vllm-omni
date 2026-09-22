@@ -614,6 +614,74 @@ def test_streaming_new_request_marker_replaces_terminal_chunk_snapshot():
     assert runner.model_intermediate_buffer["r2"] == peer
 
 
+def test_new_request_setup_buffer_does_not_shadow_its_admitting_chunk():
+    # Async-chunk pre-warm gives a Stage-2 request a setup buffer that carries
+    # no payload section. The codec chunk that admits the request travels in
+    # additional_information, and dropping it silently rewrites the chunk's
+    # stream position to cache_epoch 0 / chunk_seq 0 (#7979).
+    from vllm_omni.engine.serialization import serialize_additional_information
+
+    runner = _make_runner(req_ids=("r1",), hidden_size=4)
+    runner.model.replace_runtime_additional_information = True
+    setup_buffer = {"duplex": {"session_id": "s1"}, "global_request_id": "g1", "request_id": "r1"}
+    chunk = {
+        "meta": {
+            "request_id": "r1",
+            "cache_epoch": 1,
+            "chunk_seq": 0,
+            "code_flat_numel": 28,
+            "last_chunk": False,
+        }
+    }
+    new_req = SimpleNamespace(
+        req_id="r1",
+        model_intermediate_buffer=setup_buffer,
+        additional_information=serialize_additional_information(chunk),
+    )
+
+    OmniGPUModelRunner._update_additional_information(
+        runner,
+        SimpleNamespace(scheduled_new_reqs=[new_req], scheduled_cached_reqs=SimpleNamespace()),
+    )
+
+    meta = runner.model_intermediate_buffer["r1"]["meta"]
+    assert meta["cache_epoch"] == 1
+    assert meta["chunk_seq"] == 0
+    assert meta["code_flat_numel"] == 28
+
+
+def test_new_request_setup_buffer_does_not_shadow_a_boundary_placeholder():
+    # The control-only segment boundary travels as one placeholder token plus
+    # ``code_flat_numel == 0``. Losing that zero makes the consumer vocode the
+    # placeholder as a one-frame codec window (#7978).
+    from vllm_omni.engine.serialization import serialize_additional_information
+
+    runner = _make_runner(req_ids=("r1",), hidden_size=4)
+    runner.model.replace_runtime_additional_information = True
+    boundary = {
+        "meta": {
+            "request_id": "r1",
+            "cache_epoch": 0,
+            "chunk_seq": 3,
+            "code_flat_numel": 0,
+            "tts_is_last_chunk": True,
+            "last_chunk": False,
+        }
+    }
+    new_req = SimpleNamespace(
+        req_id="r1",
+        model_intermediate_buffer={"duplex": {"session_id": "s1"}, "global_request_id": "g1"},
+        additional_information=serialize_additional_information(boundary),
+    )
+
+    OmniGPUModelRunner._update_additional_information(
+        runner,
+        SimpleNamespace(scheduled_new_reqs=[new_req], scheduled_cached_reqs=SimpleNamespace()),
+    )
+
+    assert runner.model_intermediate_buffer["r1"]["meta"]["code_flat_numel"] == 0
+
+
 def test_cached_empty_marker_replaces_terminal_chunk_snapshot():
     runner = _make_runner(req_ids=("r1",), hidden_size=4)
     runner.model.replace_runtime_additional_information = True

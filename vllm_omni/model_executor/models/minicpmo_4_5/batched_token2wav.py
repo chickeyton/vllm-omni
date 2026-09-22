@@ -389,7 +389,7 @@ class BatchedToken2Wav(nn.Module):
             dtype=torch.float16,
         )
 
-    def _pre_lookahead_len(self) -> int | None:
+    def pre_lookahead_len(self) -> int | None:
         """Right-context width of the encoder's pre-lookahead convolution.
 
         ``None`` when the encoder does not expose one, so callers keep working
@@ -413,7 +413,7 @@ class BatchedToken2Wav(nn.Module):
     def _max_encode_token_frames(self, states: list[BatchedToken2WavState]) -> int:
         att = states[0].flow_cache.get("conformer_att_cache") if states else None
         offset1 = int(att.shape[3] // 2) if att is not None else 0
-        lookahead = self._pre_lookahead_len() or 0
+        lookahead = self.pre_lookahead_len() or 0
         return relpos_encode_token_budget(
             max_pos=self._relpos_max_pos(),
             stride=self._upsample_stride(),
@@ -428,7 +428,7 @@ class BatchedToken2Wav(nn.Module):
         if not callable(extend_pe):
             return
         offset1 = int(att_cache.shape[3] // 2) if att_cache is not None else 0
-        lookahead = self._pre_lookahead_len() or 0
+        lookahead = self.pre_lookahead_len() or 0
         needed = offset1 * self._upsample_stride() + self._upsample_stride() * (int(tokens.shape[1]) + lookahead + 1)
         extend_pe(tokens.new_zeros((1, max(needed, 1))))
 
@@ -877,7 +877,7 @@ class BatchedToken2Wav(nn.Module):
         batch_size: int,
     ) -> list[BatchedToken2WavState]:
         prompt_tokens, speakers, prompt_mels = self._repeat_prompt(features, batch_size)
-        lookahead_width = self._pre_lookahead_len()
+        lookahead_width = self.pre_lookahead_len()
         lookahead = prompt_tokens.new_full(
             (batch_size, 3 if lookahead_width is None else lookahead_width),
             _SILENCE_TOKEN,
@@ -951,7 +951,7 @@ class BatchedToken2Wav(nn.Module):
         # frames of right context and keeps no left cache, so a non-final chunk
         # must carry at least one full kernel. Only the final chunk is allowed
         # to be shorter: ``forward_chunk`` zero-pads it by the lookahead width.
-        lookahead = self._pre_lookahead_len()
+        lookahead = self.pre_lookahead_len()
         num_frames = int(tokens.shape[1])
         if lookahead is not None and not last_chunk:
             if num_frames <= lookahead:
@@ -1109,7 +1109,7 @@ class BatchedToken2Wav(nn.Module):
         if batch_size == 0:
             return [], []
 
-        lookahead = self._pre_lookahead_len()
+        lookahead = self.pre_lookahead_len()
         for row, (row_tokens, last_chunk) in enumerate(zip(tokens, last_chunks, strict=True)):
             num_frames = int(row_tokens.numel())
             if lookahead is not None and not last_chunk and num_frames <= lookahead:

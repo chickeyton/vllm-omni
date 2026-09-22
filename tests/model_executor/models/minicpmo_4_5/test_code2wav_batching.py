@@ -1144,20 +1144,30 @@ def test_forward_builds_backend_when_weight_loading_was_skipped(monkeypatch):
     assert output.multimodal_outputs["model_outputs"][0].numel() > 0
 
 
-@pytest.mark.parametrize(
-    ("info", "reason"),
-    [
-        (_info("a", 0, [1, 2], cache_epoch=-1), "negative_stream_position"),
-        (_info("a", 0, [1, 2]), "stale_or_reordered_chunk"),
-        (_info("a", 2, [1, 2]), "stale_or_reordered_chunk"),
-    ],
-)
-def test_stale_epoch_and_reordered_chunks_are_rejected(info, reason):
+def test_malformed_stream_position_is_rejected():
+    # A negative position cannot come from the producer, so it stays fatal:
+    # it means the payload itself is malformed, not that the transport lost a
+    # chunk.
     model, _ = _model()
     _forward(model, [_info("a", 0, [1, 2]), _info("b", 0, [3, 4])])
 
-    with pytest.raises(RuntimeError, match=reason):
-        _forward(model, [info, _info("b", 1, [3, 4])])
+    with pytest.raises(RuntimeError, match="negative_stream_position"):
+        _forward(model, [_info("a", 0, [1, 2], cache_epoch=-1), _info("b", 1, [3, 4])])
+
+
+def test_one_desynchronized_request_does_not_disturb_its_batch_mates():
+    # A replayed chunk for one request is dropped on its own; the other
+    # requests in the same step keep decoding, and the stage stays alive.
+    model, _ = _model()
+    _forward(model, [_info("a", 0, [1, 2]), _info("b", 0, [3, 4])])
+    stale_state = model._states["a"]
+
+    output = _forward(model, [_info("a", 0, [1, 2]), _info("b", 1, [3, 4])])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() == 0
+    assert output.multimodal_outputs["model_outputs"][1].numel() > 0
+    assert model._states["a"] is stale_state
+    assert model._states["b"].chunk_seq == 1
 
 
 def test_singleton_and_mixed_shape_buckets_use_same_batched_backend_without_fallback():
@@ -1413,3 +1423,155 @@ def test_padding_does_not_change_the_valid_frames():
 
     assert int(padded_x.shape[2]) == int(exact_x.shape[2]) == mel_frames
     assert torch.allclose(padded_x, exact_x, atol=1e-5)
+
+
+def _model_with_lookahead(width: int = 3):
+    token2wav = _FakeToken2Wav()
+    token2wav.flow.encoder.pre_lookahead_layer = SimpleNamespace(pre_lookahead_len=width)
+    backend = BatchedToken2Wav(token2wav)
+    _enable_fake_ragged_kernel(backend)
+    model = MiniCPMO45Code2Wav(vllm_config=_config())
+    model.backend = backend
+    return model, token2wav
+
+
+def test_new_cache_epoch_mid_stream_resets_the_cache_instead_of_failing():
+    # The Talker-to-Code2Wav transport can drop a payload after its stream
+    # position was committed, so a new epoch can open at a non-zero chunk_seq.
+    # A new epoch is a full cache reset either way, so it must be honoured
+    # rather than killing the stage engine and every session on it (#7979).
+    model, _ = _model()
+    _forward(model, [_info("a", 0, [1, 2])])
+    setups: list[int] = []
+    inner_setup_batch = model.backend.setup_batch
+
+    def spy_setup_batch(features, size):
+        setups.append(size)
+        return inner_setup_batch(features, size)
+
+    model.backend.setup_batch = spy_setup_batch
+
+    output = _forward(model, [_info("a", 1, [3, 4], cache_epoch=1)])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert model._states["a"].cache_epoch == 1
+    assert model._states["a"].chunk_seq == 1
+    # A fresh cache means the batch was set up again rather than continued.
+    assert setups == [1]
+
+
+def test_chunk_arriving_without_cached_state_starts_a_fresh_cache():
+    model, _ = _model()
+
+    output = _forward(model, [_info("a", 4, [1, 2])])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert model._states["a"].chunk_seq == 4
+
+
+def test_skipped_chunk_seq_keeps_decoding_from_the_cached_state():
+    model, _ = _model()
+    _forward(model, [_info("a", 0, [1, 2])])
+    cached = model._states["a"].token2wav
+
+    output = _forward(model, [_info("a", 3, [3, 4])])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert model._states["a"].chunk_seq == 3
+    assert model._states["a"].token2wav is not cached
+
+
+def test_replayed_chunk_is_dropped_without_advancing_the_cache():
+    model, token2wav = _model()
+    _forward(model, [_info("a", 0, [1, 2])])
+    state_after_first = model._states["a"]
+    hift_calls = list(token2wav.hift.calls)
+
+    output = _forward(model, [_info("a", 0, [1, 2])])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() == 0
+    assert model._states["a"] is state_after_first
+    assert token2wav.hift.calls == hift_calls
+
+
+def test_chunk_from_a_retired_cache_epoch_is_dropped():
+    model, _ = _model()
+    _forward(model, [_info("a", 0, [1, 2], cache_epoch=2)])
+    state_after_first = model._states["a"]
+
+    output = _forward(model, [_info("a", 1, [3, 4], cache_epoch=1)])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() == 0
+    assert model._states["a"] is state_after_first
+
+
+def test_short_non_final_window_is_withheld_and_rides_on_the_next_window():
+    # The encoder's pre-lookahead convolution takes its right context from the
+    # window itself, so a non-final window narrower than that kernel cannot be
+    # decoded alone. Re-chunk it instead of failing the stage (#7978).
+    model, token2wav = _model_with_lookahead(3)
+    _forward(model, [_info("a", 0, [1, 2, 3, 4, 5])])
+    hift_calls = len(token2wav.hift.calls)
+
+    withheld = _forward(model, [_info("a", 1, [9])])
+
+    assert withheld.multimodal_outputs["model_outputs"][0].numel() == 0
+    assert len(token2wav.hift.calls) == hift_calls
+    assert model._held_tokens["a"].tolist() == [9]
+    # The withheld window still advances the stream position.
+    assert model._states["a"].chunk_seq == 1
+
+    output = _forward(model, [_info("a", 2, [10, 11, 12, 13])])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert "a" not in model._held_tokens
+    assert model._states["a"].chunk_seq == 2
+
+
+def test_withheld_window_is_flushed_by_the_final_chunk():
+    model, _ = _model_with_lookahead(3)
+    _forward(model, [_info("a", 0, [1, 2, 3, 4, 5])])
+    _forward(model, [_info("a", 1, [9])])
+    assert model._held_tokens["a"].tolist() == [9]
+
+    output = _forward(model, [_info("a", 2, [], last_chunk=True)])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert model._states == {}
+    assert model._held_tokens == {}
+
+
+def test_withheld_window_is_discarded_when_a_new_cache_epoch_opens():
+    model, _ = _model_with_lookahead(3)
+    _forward(model, [_info("a", 0, [1, 2, 3, 4, 5])])
+    _forward(model, [_info("a", 1, [9])])
+    assert model._held_tokens["a"].tolist() == [9]
+
+    output = _forward(model, [_info("a", 0, [10, 11, 12, 13], cache_epoch=1)])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() > 0
+    assert "a" not in model._held_tokens
+
+
+def test_withheld_window_survives_a_replayed_chunk():
+    model, _ = _model_with_lookahead(3)
+    _forward(model, [_info("a", 0, [1, 2, 3, 4, 5])])
+    _forward(model, [_info("a", 1, [9])])
+
+    _forward(model, [_info("a", 1, [9])])
+
+    assert model._held_tokens["a"].tolist() == [9]
+
+
+def test_boundary_placeholder_without_producer_metadata_is_not_vocoded():
+    # If the control-only segment boundary reaches this stage with its producer
+    # metadata stripped, all the model sees is the scheduler's one placeholder
+    # token. Vocoding it as a one-frame non-final window used to kill the stage
+    # engine with chunk_below_lookahead_window (#7978).
+    model, token2wav = _model_with_lookahead(3)
+    stripped = {"request_id": "a", "duplex": {"session_id": "s"}, "global_request_id": "g"}
+
+    output = _forward(model, [stripped], placeholder_counts=[1], request_ids=["a"])
+
+    assert output.multimodal_outputs["model_outputs"][0].numel() == 0
+    assert token2wav.hift.calls == []
