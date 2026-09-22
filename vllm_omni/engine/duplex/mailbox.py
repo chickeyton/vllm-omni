@@ -178,7 +178,11 @@ def _render_append_audio(command: AppendAudio, data: dict[str, object]) -> dict[
         merged: dict[str, object] = dict(hints)
         merged.update(data)
         data = merged
-    data["audio"] = base64.b64encode(command.audio).decode("ascii")
+    if command.audio:
+        data["audio"] = base64.b64encode(command.audio).decode("ascii")
+    else:
+        # Empty audio with video frames is a legal frames-only append (#7633).
+        data.pop("audio", None)
     if not data.get("video_frames"):
         data.pop("video_frames", None)
     return data
