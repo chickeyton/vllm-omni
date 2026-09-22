@@ -1467,7 +1467,8 @@ async def _commit_with_pending_response(h: Harness) -> str:
     h.port.submit_gate = asyncio.Event()
     h.submit(commands.Commit(create_response=True))
     await asyncio.wait_for(h.port.submit_started.wait(), timeout=2.0)
-    events = await h.settle()
+    # The parked append keeps the runner "busy": settle only until the mailbox is quiet.
+    events = await h.settle(timeout_s=0.3)
     assert "response.created" in types(events)
     response_id = h.session.active_response_id
     assert response_id is not None
@@ -1546,5 +1547,40 @@ async def test_closing_the_session_with_a_pending_append_emits_no_failed_respons
         assert [event.type for event in events if event.type == "response.done"] == []
         assert "session.closed" in types(events)
         assert h.session.active_response_id is None
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_input_clear_racing_a_queued_append_drops_it_as_the_clients_doing() -> None:
+    """An ``input_audio_buffer.clear`` that lands while an append waits its turn is not a runtime failure.
+
+    The clear deactivates the queued append's reservation; when its turn
+    comes it gives everything back and stops, without an error and without
+    failing the session, and its reason is the client's clear rather than
+    ``runtime_append_failed``.
+    """
+    h = await open_harness()
+    try:
+        h.port.submit_gate = asyncio.Event()
+        h.submit(append_audio())
+        await asyncio.wait_for(h.port.submit_started.wait(), timeout=2.0)
+        h.submit(append_audio())
+        await h.settle(timeout_s=0.3)
+        assert len(h.runner.tasks.append_tasks) == 2, "the second append is queued behind the parked one"
+        queued = h.runner.tasks.append_tail
+        assert queued is not None and not queued.done()
+
+        h.submit(commands.ClearInput())
+        events = await h.settle(timeout_s=0.3)
+        assert types(events) == ["input_audio_buffer.cleared"]
+
+        h.port.submit_gate.set()
+        events = await h.settle()
+        assert queued.done() and queued.result() is False, "the cleared append never ran"
+        assert len(h.port.submissions) == 1, "only the append that was already in flight reached the stage"
+        assert [event.type for event in events if event.type in {"error", "response.done", "session.closed"}] == []
+        assert h.session.pending_input_bytes == 0
+        assert h.session.state == DuplexSessionState.OPEN
     finally:
         await close_harness(h)

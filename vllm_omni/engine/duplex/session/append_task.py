@@ -173,9 +173,11 @@ class AppendAttempt:
             # Called off, not failed: the chain behind it still runs.
             return True
         if self.pcm_reservation is not None and not self.pcm_reservation.active:
-            # The audio was dropped (``clear_input``) while this append waited
-            # its turn; the reservation rollback is already a no-op.
-            self.abandon()
+            # The client cleared the input buffer while this append waited its
+            # turn: the audio is gone, so is the response it was going to
+            # answer, and that is the client's doing, not a runtime failure.
+            # The reservation rollback itself is already a no-op.
+            self.abandon(reason="input_cleared")
             return False
         return await self._submit()
 

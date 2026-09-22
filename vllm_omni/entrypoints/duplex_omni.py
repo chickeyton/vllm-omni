@@ -286,8 +286,10 @@ class DuplexOmni(AsyncOmni):
         return DuplexOmniEngine(duplex_audio_encoder=encode_audio, **engine_kwargs)
 
     def __init__(self, model: str = "", *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, model=model, **kwargs)
+        super().__init__(model, *args, **kwargs)
         self._handles: dict[str, DuplexSessionHandle] = {}
+        #: Rollbacks of resumes whose caller was cancelled mid-RPC (see ``resume_session``).
+        self._resume_compensations: set[asyncio.Task[None]] = set()
 
     # ---- deployment facts ----
 
@@ -378,31 +380,100 @@ class DuplexOmni(AsyncOmni):
         expected_lease_generation: int,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexSessionHandle:
-        """Engine lease resume (CAS on the lease generation); returns the existing handle."""
+        """Engine lease resume (CAS on the lease generation); returns the existing handle.
+
+        The RPC runs to completion in an executor thread whatever happens to
+        this waiter, so a caller cancelled while it is in flight does not stop
+        the engine from applying the resume (lease generation bumped,
+        disconnect grace cleared) for a connection that will never serve it.
+        The outcome is then observed off the cancelled task: a resume that
+        landed is adopted and detached again, fenced on the generation it
+        produced, so a resume that came after it is never touched.
+        """
         handle = self._require_handle(session_id)
-        result = await self.engine.resume_session_async(
-            session_id,
-            expected_lease_generation=expected_lease_generation,
-            timeout=timeout,
+        rpc = asyncio.ensure_future(
+            self.engine.resume_session_async(
+                session_id,
+                expected_lease_generation=expected_lease_generation,
+                timeout=timeout,
+            )
         )
+        try:
+            result = await asyncio.shield(rpc)
+        except asyncio.CancelledError:
+            self._compensate_abandoned_resume(handle, rpc, timeout=timeout)
+            raise
         # The result carries the engine's current public session (state,
         # epoch, turn ...), which a resumed client must see, not the open-time snapshot.
         handle._adopt(result)
         return handle
+
+    def _compensate_abandoned_resume(
+        self,
+        handle: DuplexSessionHandle,
+        rpc: asyncio.Future[DuplexControlResultMessage],
+        *,
+        timeout: float | None,
+    ) -> None:
+        async def compensate() -> None:
+            try:
+                result = await rpc
+            except Exception as exc:
+                # The resume did not land (conflict, engine gone, timeout):
+                # nothing to give back.
+                logger.debug("abandoned duplex resume of %s did not land: %s", handle.session_id, exc)
+                return
+            handle._adopt(result)
+            if result.lease_generation is None:
+                return
+            with suppress(Exception):
+                await self.engine.touch_session_async(
+                    handle.session_id,
+                    activity="detach",
+                    expected_lease_generation=result.lease_generation,
+                    timeout=timeout,
+                )
+
+        task = asyncio.create_task(compensate(), name=f"duplex-resume-compensation-{handle.session_id}")
+        self._resume_compensations.add(task)
+        task.add_done_callback(self._resume_compensations.discard)
 
     async def touch_session(
         self,
         session_id: str,
         *,
         activity: str = "heartbeat",
+        expected_lease_generation: int | None = None,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> None:
         self._require_handle(session_id)
-        await self.engine.touch_session_async(session_id, activity=activity, timeout=timeout)
+        await self.engine.touch_session_async(
+            session_id,
+            activity=activity,
+            expected_lease_generation=expected_lease_generation,
+            timeout=timeout,
+        )
 
-    async def detach_session(self, session_id: str, *, timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S) -> None:
-        """Start the engine-owned disconnect grace; expiry arrives as ``session.expired``."""
-        await self.touch_session(session_id, activity="detach", timeout=timeout)
+    async def detach_session(
+        self,
+        session_id: str,
+        *,
+        expected_lease_generation: int | None = None,
+        timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
+    ) -> None:
+        """Start the engine-owned disconnect grace; expiry arrives as ``session.expired``.
+
+        ``expected_lease_generation`` names the lease the caller opened or
+        resumed against; the engine refuses to detach a newer one, so a
+        connection giving up its lease cannot start the grace for the lease a
+        later resume owns.
+        """
+        await self.touch_session(
+            session_id,
+            activity="detach",
+            expected_lease_generation=expected_lease_generation,
+            timeout=timeout,
+        )
 
     async def close_session(
         self,

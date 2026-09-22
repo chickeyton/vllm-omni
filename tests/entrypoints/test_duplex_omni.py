@@ -44,6 +44,12 @@ class FakeDuplexEngine(FakeAsyncOmniEngine):
         self.closed: list[tuple[str, str]] = []
         self.resumed: list[tuple[str, int]] = []
         self.touched: list[tuple[str, str]] = []
+        #: The lease-generation fence of every detach, in order (``None`` = unfenced).
+        self.detach_generations: list[int | None] = []
+        #: When set, ``resume_session_async`` parks on it after signalling ``resume_started``:
+        #: the engine has applied the resume, its result has not reached the caller.
+        self.resume_gate: asyncio.Event | None = None
+        self.resume_started = asyncio.Event()
         self.commands: list[tuple[str, commands.DuplexCommand]] = []
         self.open_error: DuplexSessionError | None = None
         self.close_error: DuplexSessionError | None = None
@@ -73,10 +79,15 @@ class FakeDuplexEngine(FakeAsyncOmniEngine):
 
     async def resume_session_async(self, session_id, *, expected_lease_generation, timeout=None):
         self.resumed.append((session_id, expected_lease_generation))
+        if self.resume_gate is not None:
+            self.resume_started.set()
+            await self.resume_gate.wait()
         return self._result("resume", session_id, lease_generation=expected_lease_generation + 1)
 
-    async def touch_session_async(self, session_id, *, activity, timeout=None):
+    async def touch_session_async(self, session_id, *, activity, expected_lease_generation=None, timeout=None):
         self.touched.append((session_id, activity))
+        if activity == "detach":
+            self.detach_generations.append(expected_lease_generation)
         return self._result("touch", session_id)
 
     async def submit_command_async(self, session_id, command):
@@ -324,3 +335,48 @@ async def test_shutdown_closes_every_handle(monkeypatch) -> None:
     assert first.close_reason == "shutdown"
     assert omni.sessions == {}
     assert engine.shutdown_called
+
+
+@pytest.mark.asyncio
+async def test_detach_session_forwards_the_lease_generation_fence(monkeypatch) -> None:
+    omni, engine = _make_omni(monkeypatch)
+    try:
+        handle = await omni.open_session()
+        await omni.detach_session(handle.session_id, expected_lease_generation=3)
+        await omni.detach_session(handle.session_id)
+        assert engine.detach_generations == [3, None]
+    finally:
+        omni.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_cancelled_mid_rpc_is_adopted_and_detached_once_it_lands(monkeypatch) -> None:
+    """The resume RPC runs in an executor: cancelling its waiter does not stop the engine.
+
+    Without compensation the engine ends up with the lease resumed (no
+    disconnect grace) for a connection that is gone, and the handle keeps the
+    old generation, so a later reconnect resumes against a stale lease. The
+    outcome has to be observed off the cancelled task: adopt the generation
+    the resume produced and detach exactly that lease.
+    """
+    omni, engine = _make_omni(monkeypatch)
+    try:
+        handle = await omni.open_session()
+        engine.resume_gate = asyncio.Event()
+        resume = asyncio.create_task(omni.resume_session(handle.session_id, expected_lease_generation=0))
+        await asyncio.wait_for(engine.resume_started.wait(), timeout=2.0)
+
+        resume.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resume
+        # Nothing to give back yet: the engine has not answered.
+        assert handle.lease_generation == 0
+        assert engine.detach_generations == []
+
+        engine.resume_gate.set()
+        await asyncio.gather(*list(omni._resume_compensations))
+        assert handle.lease_generation == 1, "the generation the resume produced is adopted"
+        assert engine.touched == [(handle.session_id, "detach")]
+        assert engine.detach_generations == [1], "the detach is fenced on that generation"
+    finally:
+        omni.shutdown()

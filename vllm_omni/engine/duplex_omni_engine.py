@@ -251,6 +251,7 @@ class DuplexOmniEngine(AsyncOmniEngine):
         session_id: str,
         *,
         activity: str,
+        expected_lease_generation: int | None = None,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
         control_id = uuid.uuid4().hex
@@ -259,6 +260,7 @@ class DuplexOmniEngine(AsyncOmniEngine):
                 control_id=control_id,
                 session_id=session_id,
                 activity=activity,
+                expected_lease_generation=expected_lease_generation,
             ),
             control_id=control_id,
             operation="touch",
@@ -271,12 +273,18 @@ class DuplexOmniEngine(AsyncOmniEngine):
         session_id: str,
         *,
         activity: str,
+        expected_lease_generation: int | None = None,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self._touch_session(session_id, activity=activity, timeout=timeout),
+            lambda: self._touch_session(
+                session_id,
+                activity=activity,
+                expected_lease_generation=expected_lease_generation,
+                timeout=timeout,
+            ),
         )
 
     def _submit_command(self, session_id: str, command: DuplexCommand) -> None:

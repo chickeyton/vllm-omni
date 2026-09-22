@@ -68,12 +68,22 @@ _PUMP_DRAIN_TIMEOUT_S = 5.0
 _UNJOURNALED_EVENTS = (SessionCreated,)
 
 
+def _log_rollback_failure(done: asyncio.Task[None]) -> None:
+    """A shielded resume rollback outlives its caller; its failure must still be seen."""
+    if not done.cancelled() and done.exception() is not None:
+        logger.error("duplex resume rollback %s failed: %r", done.get_name(), done.exception())
+
+
 @dataclass
 class _Attachment:
     """What one websocket connection knows about the session it is attached to."""
 
     handle: DuplexSessionHandle
     generation: int
+    #: The engine lease generation this connection opened or resumed against.
+    #: Its disconnect detaches that lease only: a later resume bumps the
+    #: generation, and the engine refuses to detach the newer lease.
+    lease_generation: int
 
 
 @dataclass(frozen=True)
@@ -206,7 +216,11 @@ class OmniDuplexSessionHandler:
             close=attachment_close,
         )
         resume_supported = bool(handle.capabilities.supports_session_resume)
-        attachment = _Attachment(handle=handle, generation=created.attachment_generation)
+        attachment = _Attachment(
+            handle=handle,
+            generation=created.attachment_generation,
+            lease_generation=handle.lease_generation,
+        )
         credentials: _ResumeCredentials | None = None
         if resume_supported:
             credentials = _ResumeCredentials(
@@ -267,6 +281,10 @@ class OmniDuplexSessionHandler:
         except DuplexSessionError as exc:
             await send_json(envelope.error_payload("runtime_resume_failed", str(exc)))
             return None
+        # The generation this resume produced, read before anything else can
+        # run: the handle is shared by every connection of the session, and a
+        # concurrent resume adopts its own, newer generation into it.
+        lease_generation = handle.lease_generation
 
         attachment_send, attachment_close = attachment_callbacks(websocket)
 
@@ -305,10 +323,11 @@ class OmniDuplexSessionHandler:
             await self._abandon_resume(
                 session_id,
                 attachment_generation=resumed.attachment_generation if resumed is not None else None,
+                lease_generation=lease_generation,
             )
             raise
         except Exception as exc:
-            await self._abandon_resume(session_id, attachment_generation=None)
+            await self._abandon_resume(session_id, attachment_generation=None, lease_generation=lease_generation)
             await send_json(envelope.error_payload("session_resume_conflict", str(exc)))
             return None
         # A reconnect brings a fresh envelope carrying pcm16/16 kHz wire
@@ -319,9 +338,15 @@ class OmniDuplexSessionHandler:
         if remembered is not None:
             envelope.defaults = remembered
         self._start_pump(handle, None)
-        return _Attachment(handle=handle, generation=resumed.attachment_generation)
+        return _Attachment(handle=handle, generation=resumed.attachment_generation, lease_generation=lease_generation)
 
-    async def _abandon_resume(self, session_id: str, *, attachment_generation: int | None) -> None:
+    async def _abandon_resume(
+        self,
+        session_id: str,
+        *,
+        attachment_generation: int | None,
+        lease_generation: int,
+    ) -> None:
         """Roll the engine lease of a resume this connection will never serve back into disconnect grace.
 
         Only what this attempt owns is rolled back. ``attachment_generation``
@@ -329,15 +354,39 @@ class OmniDuplexSessionHandler:
         happen: then the lease is detached only if nobody is attached, because
         another connection may have won the race and be attached right now.
         Detaching then would start the disconnect grace for the *winner*,
-        which ordinary heartbeats do not clear.
+        which ordinary heartbeats do not clear. ``lease_generation`` is the
+        generation this attempt's engine resume produced; the engine refuses
+        to detach a newer one, which closes the window in which another
+        connection has completed its engine resume but not yet activated.
+
+        The rollback runs shielded: a second cancellation landing between the
+        registry detach and the engine detach would otherwise strand the
+        session exactly the way this method compensates for.
         """
+        rollback = asyncio.ensure_future(
+            self._roll_back_resume(
+                session_id,
+                attachment_generation=attachment_generation,
+                lease_generation=lease_generation,
+            )
+        )
+        rollback.add_done_callback(_log_rollback_failure)
+        await asyncio.shield(rollback)
+
+    async def _roll_back_resume(
+        self,
+        session_id: str,
+        *,
+        attachment_generation: int | None,
+        lease_generation: int,
+    ) -> None:
         if attachment_generation is not None:
             owns_lease = await self._attachment_registry.detach(session_id, attachment_generation=attachment_generation)
         else:
             owns_lease = not await self._attachment_registry.has_attachment(session_id)
         if owns_lease:
             with suppress(DuplexSessionError):
-                await self._omni.detach_session(session_id)
+                await self._omni.detach_session(session_id, expected_lease_generation=lease_generation)
 
     # ------------------------------------------------------------------ #
     # Outbound pump (session-scoped, survives reconnects)                #
@@ -446,7 +495,7 @@ class OmniDuplexSessionHandler:
         if handle.capabilities.supports_session_resume:
             if await self._attachment_registry.detach(session_id, attachment_generation=None):
                 with suppress(DuplexSessionError):
-                    await self._omni.detach_session(session_id)
+                    await self._omni.detach_session(session_id, expected_lease_generation=handle.lease_generation)
             return
         with suppress(DuplexSessionError):
             await handle.close(reason="disconnect")
@@ -559,7 +608,9 @@ class OmniDuplexSessionHandler:
             if await self._attachment_registry.detach(handle.session_id, attachment_generation=attachment.generation):
                 # Engine-owned disconnect grace: expiry arrives as session.expired.
                 with suppress(DuplexSessionError):
-                    await self._omni.detach_session(handle.session_id)
+                    await self._omni.detach_session(
+                        handle.session_id, expected_lease_generation=attachment.lease_generation
+                    )
             # Otherwise a newer connection already took the session over; the
             # replaced socket's disconnect must not touch it.
             return

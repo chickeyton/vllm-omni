@@ -555,24 +555,38 @@ class DuplexSessionManager:
         The bookkeeping that decides admission (``runners`` and the session's
         request reservations) is undone synchronously first, so a second
         cancellation landing in the awaits below cannot leave the slot burned.
+        The Stage0 request ids are recorded as a pending request cleanup
+        before anything is awaited: if the runner shutdown or the cleanup
+        itself is cancelled or fails, the reaper retries the cleanup instead
+        of the orchestrator keeping the request state forever.
         """
         owned_runner = runner is not None and self.runners.get(session_id) is runner
         if owned_runner:
             self.runners.pop(session_id, None)
-        reserved: list[str] = []
+        pending: _PendingRequestCleanup | None = None
+        key: tuple[str, int] | None = None
         if session is not None:
-            reserved = list(session.release_all_requests())
+            reserved = tuple(session.release_all_requests())
             self._unregister_session_requests(session_id)
+            if reserved:
+                key = (session_id, session.lease_generation)
+                pending = _PendingRequestCleanup(
+                    session_id=session_id,
+                    lease_generation=session.lease_generation,
+                    request_ids=reserved,
+                    abort=False,
+                )
+                self._pending_request_cleanups[key] = pending
         if owned_runner and runner is not None:
             try:
                 await runner.shutdown()
             except Exception:
                 logger.exception("duplex open rollback: runner shutdown failed for %s", session_id)
-        if reserved:
+        if pending is not None and key is not None:
             try:
-                await self.stage_port.cleanup(reserved)
+                await self._complete_request_cleanup(key, pending)
             except Exception:
-                logger.warning("duplex open rollback: request cleanup pending for %s", session_id)
+                logger.warning("duplex open rollback: request cleanup pending for %s; the reaper retries", session_id)
 
     def _require_runner(self, session_id: str) -> DuplexSessionRunner:
         runner = self.runners.get(session_id)
@@ -705,6 +719,14 @@ class DuplexSessionManager:
             session = runner.session
             activity = DuplexLeaseActivity(message.activity)
             if activity is DuplexLeaseActivity.DETACH:
+                expected = message.expected_lease_generation
+                if expected is not None and expected != session.lease_generation:
+                    # The caller is giving up a lease it no longer holds: a
+                    # later resume owns the current one and must keep it.
+                    raise DuplexSessionError(
+                        f"duplex lease generation mismatch: expected {session.lease_generation}, got {expected}",
+                        code="session_resume_conflict",
+                    )
                 session.detach_lease()
             else:
                 session.touch_lease(activity)

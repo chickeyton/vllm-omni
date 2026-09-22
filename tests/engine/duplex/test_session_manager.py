@@ -353,10 +353,15 @@ class Harness:
         )
         return await self.result()
 
-    async def touch(self, session_id: str, activity: str) -> DuplexControlResultMessage:
+    async def touch(
+        self, session_id: str, activity: str, *, expected_lease_generation: int | None = None
+    ) -> DuplexControlResultMessage:
         await self.manager.handle(
             TouchDuplexSessionMessage(
-                control_id=f"touch-{session_id}-{activity}", session_id=session_id, activity=activity
+                control_id=f"touch-{session_id}-{activity}-{expected_lease_generation}",
+                session_id=session_id,
+                activity=activity,
+                expected_lease_generation=expected_lease_generation,
             )
         )
         return await self.result()
@@ -1691,3 +1696,86 @@ async def test_an_open_cancelled_after_admission_releases_the_runner_and_its_sta
         assert harness.stage_port.cleanup_calls == [([stage0_request_id("sid-cancelled")], False)]
         assert stage0_request_id("sid-cancelled") not in harness.manager._request_index
         assert (await harness.open("sid-replacement")).ok is True
+
+
+async def test_an_open_cancelled_again_during_its_rollback_leaves_the_stage_cleanup_to_the_reaper() -> None:
+    """A second cancellation landing in the rollback's awaits must not orphan the Stage0 request.
+
+    The runner, the reservations and the request index are already gone by
+    then, so nothing would ever clean the orchestrator's request state up.
+    The rollback records the ids as a pending request cleanup before it
+    awaits anything, and the reaper's retry finishes the job.
+    """
+    async with Harness.create(max_sessions=1) as harness:
+        sink = _BlockingResultSink()
+        original_sink = harness.manager._result_sink
+        harness.manager._result_sink = sink
+        open_task = asyncio.create_task(
+            harness.manager.handle(
+                OpenDuplexSessionMessage(
+                    control_id="open-cancelled-twice",
+                    session_id="sid-cancelled",
+                    session_config=DuplexSessionConfig(model="fake-model"),
+                )
+            )
+        )
+        await asyncio.wait_for(sink.entered.wait(), timeout=1.0)
+        runner = harness.manager.runners["sid-cancelled"]
+        shutdown_started = asyncio.Event()
+
+        async def parked_shutdown() -> None:
+            shutdown_started.set()
+            await asyncio.Event().wait()
+
+        runner.shutdown = parked_shutdown  # type: ignore[method-assign]
+
+        open_task.cancel()
+        await asyncio.wait_for(shutdown_started.wait(), timeout=1.0)
+        open_task.cancel()  # lands inside the rollback, before the stage cleanup
+        with pytest.raises(asyncio.CancelledError):
+            await open_task
+        harness.manager._result_sink = original_sink
+
+        assert "sid-cancelled" not in harness.manager.runners
+        assert harness.manager.active_count() == 0
+        assert harness.stage_port.cleanup_calls == [], "the cleanup await was never reached"
+        key = ("sid-cancelled", 0)
+        assert key in harness.manager._pending_request_cleanups
+
+        await harness.manager.reap_expired()
+        assert harness.stage_port.cleanup_calls == [([stage0_request_id("sid-cancelled")], False)]
+        assert key not in harness.manager._pending_request_cleanups
+        assert (await harness.open("sid-replacement")).ok is True
+
+
+# --------------------------------------------------------------------------- #
+# Detach fenced on the lease generation                                       #
+# --------------------------------------------------------------------------- #
+
+
+async def test_detach_is_refused_for_a_lease_the_caller_no_longer_holds() -> None:
+    """A connection giving up its lease must not start the grace for the lease a later resume owns.
+
+    Resume is a CAS on the lease generation; detach is now fenced the same
+    way, so a stale caller (its resume was superseded by another connection's)
+    is refused instead of detaching the winner.
+    """
+    async with Harness.create() as harness:
+        await harness.open("sid-fence")
+        session = harness.session("sid-fence")
+        assert (await harness.resume("sid-fence", expected_lease_generation=0)).ok is True
+        assert session.lease_generation == 1
+
+        stale = await harness.touch("sid-fence", "detach", expected_lease_generation=0)
+        assert stale.ok is False
+        assert stale.error_code == "session_resume_conflict"
+        assert session.lease.detached_at is None, "the current lease is untouched"
+
+        current = await harness.touch("sid-fence", "detach", expected_lease_generation=1)
+        assert current.ok is True
+        assert session.lease.detached_at is not None
+
+        # An unfenced detach keeps its meaning: whatever generation is current.
+        assert (await harness.resume("sid-fence", expected_lease_generation=1)).ok is True
+        assert (await harness.touch("sid-fence", "detach")).ok is True
+        assert session.lease.detached_at is not None
