@@ -210,10 +210,20 @@ class _DuplexSessionAttachmentState:
     attachment: DuplexTransportAttachment | None
     attachment_generation: int
     #: The engine lease generation the attached connection is serving: the one
-    #: its open or resume produced, or one an abandoned takeover handed to it.
+    #: its open or resume produced, or one an abandoned resume handed to it.
     #: Read together with the attachment under the lock, so a detach always
     #: gives back the lease of the connection it drops, never a newer one.
     lease_generation: int = 0
+    #: Resumes between ``begin_resume`` and ``end_resume``: their engine lease
+    #: resume is in flight or landed, and they have not activated yet. While
+    #: one is pending, the next activation is the connection that will serve,
+    #: so an orphaned generation waits for it instead of going to the socket
+    #: that is about to be replaced.
+    pending_resumes: int = 0
+    #: An engine lease generation nobody serves yet (its resume was abandoned,
+    #: or its provisional attachment was rolled back), waiting for the next
+    #: activation to absorb it. Generations only move forward.
+    orphaned_lease_generation: int | None = None
     outbound_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     recovery_token_digest: bytes | None = field(default=None, repr=False)
 
@@ -351,24 +361,66 @@ class DuplexSessionAttachmentRegistry:
                 lease_generation=state.lease_generation,
             )
 
-    async def adopt_lease_generation(self, session_id: str, lease_generation: int) -> bool:
-        """Hand the lease generation of an abandoned resume to whoever is attached.
+    async def begin_resume(self, session_id: str) -> None:
+        """Claim that a resume of ``session_id`` is about to land and activate.
 
-        A takeover whose connection was cancelled before it activated still
-        bumped the engine lease. If another connection is attached, that one
-        keeps serving and must own the new generation, or its own disconnect
-        would be fenced out and the session would sit outside disconnect
-        grace until idle expiry. Returns whether a connection is attached;
-        when nobody is, the caller detaches the lease itself. Generations only
-        move forward, so an older abandoned generation never displaces a
-        newer one the attachment already owns.
+        Held from before the engine lease resume until ``end_resume``. While
+        any claim is open, a lease generation that loses its owner is parked
+        for the next activation (see ``settle_lease_generation``) instead of
+        being handed to the currently attached connection, which that
+        activation is about to replace.
+        """
+        async with self._lock:
+            self._require(session_id).pending_resumes += 1
+
+    async def end_resume(self, session_id: str) -> int | None:
+        """Release a ``begin_resume`` claim, whether or not the resume activated.
+
+        Returns a lease generation the caller must detach itself: one that
+        was parked for an activation that never came, with nobody attached
+        to take it over. ``None`` when nothing is owed.
         """
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
-                return False
-            state.lease_generation = max(state.lease_generation, lease_generation)
-            return state.attachment is not None
+                return None
+            state.pending_resumes = max(0, state.pending_resumes - 1)
+            return self._settle_orphan_locked(state)
+
+    async def settle_lease_generation(self, session_id: str, lease_generation: int) -> int | None:
+        """Find an owner for the engine lease generation of a resume its connection never served.
+
+        The engine already bumped its lease to ``lease_generation``. The owner
+        is, in order: the resume waiting to activate (it will serve the session
+        and absorbs the generation when it activates); else the connection
+        attached right now (it keeps serving, and its own disconnect must be
+        able to detach this lease); else nobody, in which case the generation
+        is returned and the caller puts it back into disconnect grace.
+        Generations only move forward, so an older orphan never displaces a
+        newer one an owner already holds.
+        """
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                # The session is gone from the registry: the engine session
+                # closed with it, nothing is left to own.
+                return None
+            state.orphaned_lease_generation = max(state.orphaned_lease_generation or 0, lease_generation)
+            return self._settle_orphan_locked(state)
+
+    @staticmethod
+    def _settle_orphan_locked(state: _DuplexSessionAttachmentState) -> int | None:
+        orphan = state.orphaned_lease_generation
+        if orphan is None:
+            return None
+        if state.pending_resumes > 0:
+            # The next activation absorbs it (see ``resume``).
+            return None
+        state.orphaned_lease_generation = None
+        if state.attachment is not None:
+            state.lease_generation = max(state.lease_generation, orphan)
+            return None
+        return orphan
 
     async def has_attachment(self, session_id: str) -> bool:
         """Whether some connection is attached right now, whoever it is.
@@ -436,8 +488,15 @@ class DuplexSessionAttachmentRegistry:
                     send=send,
                     close=close,
                 )
-                if lease_generation is not None:
-                    state.lease_generation = max(state.lease_generation, lease_generation)
+                # The activating connection serves the newest lease the engine
+                # holds: its own resume's generation, or a newer one whose
+                # resume was abandoned while this one was pending.
+                state.lease_generation = max(
+                    state.lease_generation,
+                    lease_generation if lease_generation is not None else 0,
+                    state.orphaned_lease_generation or 0,
+                )
+                state.orphaned_lease_generation = None
             if activation_payload_factory is not None:
                 try:
                     await send(dict(activation_payload_factory(rotated_token, attachment_generation)))
@@ -479,11 +538,19 @@ class DuplexSessionAttachmentRegistry:
         Generation-checked: a later resume that already took over must keep its
         attachment. Restoring ``recovery_token_digest`` is what lets the caller
         retry with the token it presented, which ``resume`` had rotated past.
+
+        The lease the provisional attachment was serving loses its owner here.
+        That is not only its own resume's generation: a resume abandoned while
+        this one was activating may have handed it a newer one. It is parked as
+        the orphan, so the caller's settlement (which only knows its own
+        generation) and ``end_resume`` give back the newest lease, never a
+        stale one the engine would refuse.
         """
         async with self._lock:
             if self._sessions.get(session_id) is state and state.attachment_generation == attachment_generation:
                 state.attachment = None
                 state.recovery_token_digest = accepted_token_digest
+                state.orphaned_lease_generation = max(state.orphaned_lease_generation or 0, state.lease_generation)
 
     async def close(self, session_id: str) -> DuplexTransportAttachment | None:
         async with self._lock:

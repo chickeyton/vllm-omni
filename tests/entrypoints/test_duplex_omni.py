@@ -47,9 +47,9 @@ class FakeDuplexEngine(FakeAsyncOmniEngine):
         self.resume_control_ids: list[str | None] = []
         #: Per session: the control id that produced the current lease generation, and that generation.
         self.lease: dict[str, tuple[str | None, int]] = {}
-        #: When True, the next resume RPC applies the resume, then answers with a
+        #: How many resume RPCs, after applying the resume, answer with a
         #: timeout: the engine landed it but the waiter never saw the result.
-        self.resume_times_out_once = False
+        self.resume_timeouts_remaining = 0
         self.touched: list[tuple[str, str]] = []
         #: The lease-generation fence of every detach, in order (``None`` = unfenced).
         self.detach_generations: list[int | None] = []
@@ -90,6 +90,10 @@ class FakeDuplexEngine(FakeAsyncOmniEngine):
         resumed_by, generation = self.lease.get(session_id, (None, 0))
         if control_id is not None and control_id == resumed_by:
             # The engine's replay answer: the generation this resume produced.
+            # Its answer can be lost to a timeout exactly like the first one.
+            if self.resume_timeouts_remaining > 0:
+                self.resume_timeouts_remaining -= 1
+                raise DuplexSessionError("duplex resume timed out", code="timeout", retryable=True)
             return self._result("resume", session_id, lease_generation=generation)
         if expected_lease_generation != generation:
             raise DuplexSessionError("duplex lease generation mismatch", code="session_resume_conflict")
@@ -98,8 +102,8 @@ class FakeDuplexEngine(FakeAsyncOmniEngine):
         if self.resume_gate is not None:
             self.resume_started.set()
             await self.resume_gate.wait()
-        if self.resume_times_out_once:
-            self.resume_times_out_once = False
+        if self.resume_timeouts_remaining > 0:
+            self.resume_timeouts_remaining -= 1
             raise DuplexSessionError("duplex resume timed out", code="timeout", retryable=True)
         return self._result("resume", session_id, lease_generation=generation)
 
@@ -414,7 +418,7 @@ async def test_a_resume_cancelled_then_timed_out_is_settled_by_replaying_it(monk
     try:
         handle = await omni.open_session()
         engine.resume_gate = asyncio.Event()
-        engine.resume_times_out_once = True
+        engine.resume_timeouts_remaining = 1
         resume = asyncio.create_task(omni.resume_session(handle.session_id, expected_lease_generation=0))
         await asyncio.wait_for(engine.resume_started.wait(), timeout=2.0)
 
@@ -458,5 +462,37 @@ async def test_an_abandoned_resume_is_settled_through_the_callers_callback(monke
         assert settled == [1]
         assert handle.lease_generation == 1
         assert engine.detach_generations == [], "the callback owns the decision"
+    finally:
+        omni.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_resume_keeps_replaying_across_repeated_timeouts(monkeypatch) -> None:
+    """A replay can time out too; giving up then would reopen the lost-answer window.
+
+    The engine applied the resume, the abandoned RPC and the first replay both
+    lose their answers to timeouts, the second replay is answered: the handle
+    adopts the generation and the lease is settled, with the lease bumped once.
+    """
+    omni, engine = _make_omni(monkeypatch)
+    try:
+        omni._resume_replay_backoff_s = (0.01, 0.02)
+        handle = await omni.open_session()
+        engine.resume_gate = asyncio.Event()
+        engine.resume_timeouts_remaining = 2
+        resume = asyncio.create_task(omni.resume_session(handle.session_id, expected_lease_generation=0))
+        await asyncio.wait_for(engine.resume_started.wait(), timeout=2.0)
+
+        resume.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resume
+        engine.resume_gate.set()
+        await asyncio.wait_for(asyncio.gather(*list(omni._resume_compensations)), timeout=5.0)
+
+        assert len(engine.resume_control_ids) == 3, "the abandoned RPC, a replay that timed out, the replay answered"
+        assert len(set(engine.resume_control_ids)) == 1
+        assert engine.lease[handle.session_id][1] == 1, "the lease was bumped once"
+        assert handle.lease_generation == 1
+        assert engine.detach_generations == [1]
     finally:
         omni.shutdown()

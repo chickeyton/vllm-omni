@@ -290,6 +290,9 @@ class DuplexOmni(AsyncOmni):
         self._handles: dict[str, DuplexSessionHandle] = {}
         #: Rollbacks of resumes whose caller was cancelled mid-RPC (see ``resume_session``).
         self._resume_compensations: set[asyncio.Task[None]] = set()
+        #: Initial and maximum delay between replays of an abandoned resume
+        #: whose answers keep timing out.
+        self._resume_replay_backoff_s: tuple[float, float] = (0.5, 5.0)
 
     # ---- deployment facts ----
 
@@ -441,32 +444,42 @@ class DuplexOmni(AsyncOmni):
         session_id = handle.session_id
 
         async def observe() -> DuplexControlResultMessage | None:
-            try:
-                return await rpc
-            except DuplexSessionError as exc:
-                if exc.code != "timeout":
-                    # Refused (conflict, unknown session, engine gone): the
-                    # resume did not land, nothing to give back.
+            # The first attempt is the RPC the caller abandoned. A timeout
+            # means its answer was dropped and the outcome is unknown: the
+            # engine may have applied the resume after the waiter gave up.
+            # Replaying under the same control id makes the engine answer with
+            # the generation that resume produced, whether it lands now or
+            # already did, and refuse if a newer resume won. A replay can time
+            # out too, so this keeps replaying, with backoff, until the engine
+            # answers one way or the other or the session is gone: giving up
+            # on a timeout would be exactly the lost-answer window again.
+            attempt: Awaitable[DuplexControlResultMessage] = rpc
+            delay, ceiling = self._resume_replay_backoff_s
+            while True:
+                try:
+                    return await attempt
+                except DuplexSessionError as exc:
+                    if exc.code != "timeout":
+                        # Refused (conflict, unknown session, engine gone):
+                        # the resume did not land, nothing to give back.
+                        logger.debug("abandoned duplex resume of %s did not land: %s", session_id, exc)
+                        return None
+                except Exception as exc:
                     logger.debug("abandoned duplex resume of %s did not land: %s", session_id, exc)
                     return None
-            except Exception as exc:
-                logger.debug("abandoned duplex resume of %s did not land: %s", session_id, exc)
-                return None
-            # The waiter timed out, so the answer was dropped and the outcome
-            # is unknown: the engine may have applied the resume after the
-            # waiter gave up. Replay it under the same control id; the engine
-            # answers with the generation that resume produced, whether it
-            # lands now or already did, and refuses if a newer resume won.
-            try:
-                return await self.engine.resume_session_async(
+                if handle.closed:
+                    return None
+                logger.warning(
+                    "abandoned duplex resume of %s lost its answer to a timeout; replaying in %.1fs", session_id, delay
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, ceiling)
+                attempt = self.engine.resume_session_async(
                     session_id,
                     expected_lease_generation=expected_lease_generation,
                     control_id=control_id,
                     timeout=timeout,
                 )
-            except Exception as exc:
-                logger.warning("abandoned duplex resume of %s could not be settled: %s", session_id, exc)
-                return None
 
         async def compensate() -> None:
             result = await observe()
@@ -596,6 +609,8 @@ class DuplexOmni(AsyncOmni):
         for handle in list(self._handles.values()):
             handle._mark_closed("shutdown")
         self._handles.clear()
+        for compensation in list(self._resume_compensations):
+            compensation.cancel()
         super().shutdown(timeout)
 
 

@@ -893,3 +893,136 @@ async def test_a_send_failure_detaches_the_failed_sockets_own_lease_not_a_pendin
     ws.disconnect()
     with suppress(asyncio.CancelledError, Exception):
         await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_resume_goes_to_the_resume_waiting_to_activate_not_the_socket_it_replaces() -> None:
+    """Three connections: A sending, B resumed and waiting for the outbound lock, C abandoned mid-RPC.
+
+    C's generation 2 must be parked for B's activation. If it were handed to
+    A instead, A's send failure would detach generation 2 (accepted by the
+    engine), and B would then activate on a lease already in disconnect grace
+    and expire despite heartbeating.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws, handle, task = await _open(handler, omni)
+    token = ws.sent[0]["resume_token"]
+    registry = handler._attachment_registry
+
+    sending = asyncio.Event()
+    fail_send = asyncio.Event()
+
+    async def parked_failing_send(payload: dict[str, Any]) -> None:
+        sending.set()
+        await fail_send.wait()
+        raise RuntimeError("socket closed")
+
+    ws.send_json = parked_failing_send  # type: ignore[method-assign]
+    handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="aGk="))
+    await asyncio.wait_for(sending.wait(), timeout=2.0)
+
+    # B: engine resume lands generation 1; activation waits for the lock the pump holds.
+    ws_b, task_b = await _resume(handler, handle.session_id, token)
+    await asyncio.sleep(0.05)
+    assert handle.lease_generation == 1
+
+    # C: same unrotated token, engine resume lands generation 2, cancelled mid-RPC.
+    omni.resume_gate = asyncio.Event()
+    ws_c, task_c = await _resume(handler, handle.session_id, token)
+    await asyncio.wait_for(omni.resume_started.wait(), timeout=2.0)
+    assert handle.lease_generation == 2
+    task_c.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_c
+    omni.resume_gate.set()
+    await asyncio.gather(*omni.compensations)
+    assert omni.detached == [] and omni.detach_refused == [], "generation 2 is parked for B"
+
+    # A's send fails: the pump drops A and detaches A's own generation 0, refused.
+    fail_send.set()
+    resumed_b = await ws_b.wait_for("session.resumed")
+    assert resumed_b["attachment_generation"] == 2
+    assert omni.detach_refused == [(handle.session_id, 0)]
+    assert omni.detached == [], "the lease B serves is untouched"
+    assert await registry.is_current_attachment(handle.session_id, 2)
+
+    # B serves generation 2 (inherited from C): its disconnect detaches that lease.
+    ws_b.disconnect()
+    await asyncio.wait_for(task_b, timeout=2.0)
+    assert omni.detached == [handle.session_id]
+    assert omni.detach_refused == [(handle.session_id, 0)]
+    ws.disconnect()
+    with suppress(asyncio.CancelledError, Exception):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_cancelled_during_replay_settles_the_newer_lease_it_was_handed() -> None:
+    """Activation rollback must give back the lease the provisional attachment actually owned.
+
+    A resumed generation 1, delivered ``session.resumed`` and is blocked
+    replaying events. B, with A's rotated token, resumed generation 2 and was
+    cancelled mid-RPC; its settlement handed 2 to A. When A is then cancelled
+    during replay, the registry rolls A back; detaching A's own generation 1
+    would be refused and generation 2 would never enter disconnect grace.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws, handle, task = await _open(handler, omni)
+    token = ws.sent[0]["resume_token"]
+    registry = handler._attachment_registry
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert omni.detached == [handle.session_id]
+    # Journaled while detached: A's activation has something to replay.
+    handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="one"))
+    await asyncio.sleep(0.05)
+
+    # A: session.resumed goes out, the replay entry parks.
+    ws_a = FakeWebSocket({"duplex": "1", "resume": "1"})
+    replaying = asyncio.Event()
+    sends = 0
+    original_send = ws_a.send_json
+
+    async def send_parking_on_replay(payload: dict[str, Any]) -> None:
+        nonlocal sends
+        sends += 1
+        if sends == 2:
+            replaying.set()
+            await asyncio.Event().wait()
+        await original_send(payload)
+
+    ws_a.send_json = send_parking_on_replay  # type: ignore[method-assign]
+    task_a = asyncio.create_task(handler.handle_realtime_session(ws_a))
+    ws_a.feed(
+        {
+            "type": "session.resume",
+            "session_id": handle.session_id,
+            "resume_token": token,
+            "last_received_server_event_seq": 0,
+        }
+    )
+    await asyncio.wait_for(replaying.wait(), timeout=2.0)
+    resumed_a = await ws_a.wait_for("session.resumed")
+    assert handle.lease_generation == 1
+
+    # B: A's rotated token, engine resume lands generation 2, cancelled mid-RPC.
+    omni.resume_gate = asyncio.Event()
+    ws_b, task_b = await _resume(handler, handle.session_id, resumed_a["resume_token"])
+    await asyncio.wait_for(omni.resume_started.wait(), timeout=2.0)
+    assert handle.lease_generation == 2
+    task_b.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_b
+    omni.resume_gate.set()
+    await asyncio.gather(*omni.compensations)
+    assert omni.detached == [handle.session_id], "generation 2 went to A's pending activation"
+
+    # A is cancelled during replay: its rollback settles generation 2, the lease A owned.
+    task_a.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_a
+    assert not await registry.has_attachment(handle.session_id)
+    assert omni.detached == [handle.session_id, handle.session_id]
+    assert omni.detach_refused == [], "generation 1 was never detached: the engine would refuse it"

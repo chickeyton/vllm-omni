@@ -36,7 +36,7 @@ from vllm_omni.engine.duplex.events import (
     SessionResyncRequired,
 )
 from vllm_omni.engine.duplex.messages import DuplexSessionError
-from vllm_omni.entrypoints.duplex.realtime_input import RealtimeEnvelope, parse_resume_request
+from vllm_omni.entrypoints.duplex.realtime_input import RealtimeEnvelope, ResumeRequest, parse_resume_request
 from vllm_omni.entrypoints.duplex.session_attachment import (
     DuplexDetachedAttachment,
     DuplexJournalGapError,
@@ -270,11 +270,32 @@ class OmniDuplexSessionHandler:
         except (KeyError, ValueError) as exc:
             await send_json(envelope.error_payload("session_resume_conflict", str(exc)))
             return None
+        # The claim tells the registry a resume is about to activate: a lease
+        # generation orphaned meanwhile (another resume abandoned mid-RPC) is
+        # parked for this activation instead of being handed to the socket it
+        # is about to replace. The claim ends whatever happens below, and an
+        # orphan nobody else will serve is then ours to put into grace.
+        await self._attachment_registry.begin_resume(session_id)
+        try:
+            return await self._resume_claimed(websocket, envelope, request, handle, send_json)
+        finally:
+            await self._end_resume_claim(session_id)
+
+    async def _resume_claimed(
+        self,
+        websocket: WebSocket,
+        envelope: RealtimeEnvelope,
+        request: ResumeRequest,
+        handle: DuplexSessionHandle,
+        send_json: SendJson,
+    ) -> _Attachment | None:
+        session_id = request.session_id
         try:
             # If this task is cancelled while the RPC is in flight, DuplexOmni
             # observes the outcome and settles a resume that landed through
-            # ``_settle_abandoned_resume``: the generation goes to whoever is
-            # still attached, or the lease goes back into disconnect grace.
+            # ``_settle_abandoned_resume``: the generation goes to the resume
+            # waiting to activate, else to whoever is attached, else the lease
+            # goes back into disconnect grace.
             await self._omni.resume_session(
                 session_id,
                 expected_lease_generation=handle.lease_generation,
@@ -354,13 +375,14 @@ class OmniDuplexSessionHandler:
 
         Only what this attempt owns is rolled back. ``attachment_generation``
         is the attachment it activated, or ``None`` when activation did not
-        happen: then the generation this attempt's engine resume produced is
-        settled like an abandoned resume (``_settle_abandoned_resume``): it is
-        handed to the connection still attached, if any, since that one keeps
-        serving and its later disconnect must be able to detach the lease;
-        otherwise the lease goes back into disconnect grace. Every engine
-        detach is fenced on the generation being given up, so a newer lease a
-        concurrent resume produced is never touched.
+        happen (or was rolled back by the registry): then the generation this
+        attempt's engine resume produced is settled like an abandoned resume
+        (``_settle_abandoned_resume``). The registry knows more than this
+        method does: a rolled-back activation may have been handed a newer
+        generation meanwhile, which the registry parks as the orphan, and the
+        claim ending in ``_resume`` gives it back if nobody else will serve
+        it. Every engine detach is fenced on the generation being given up, so
+        a newer lease a concurrent resume produced is never touched.
 
         The rollback runs shielded: a second cancellation landing between the
         registry detach and the engine detach would otherwise strand the
@@ -396,17 +418,36 @@ class OmniDuplexSessionHandler:
         """Settle the engine lease generation of a resume its connection never got to serve.
 
         The engine already bumped the lease to ``lease_generation`` and
-        cleared its disconnect grace. If a connection is attached (a takeover
-        that never activated leaves the previous socket serving), that
-        connection now owns the generation: it keeps serving, and its own
-        disconnect detaches this lease. If nobody is attached, the lease goes
-        back into disconnect grace, fenced on the generation so a later resume
-        is never detached.
+        cleared its disconnect grace. The registry picks the owner: a resume
+        waiting to activate (it will serve the session), else the connection
+        attached right now (a takeover that never activated leaves the
+        previous socket serving, and its own disconnect must be able to
+        detach this lease), else nobody, and then the lease goes back into
+        disconnect grace here, fenced on the generation so a later resume is
+        never detached.
         """
-        if await self._attachment_registry.adopt_lease_generation(session_id, lease_generation):
+        orphan = await self._attachment_registry.settle_lease_generation(session_id, lease_generation)
+        if orphan is not None:
+            with suppress(DuplexSessionError):
+                await self._omni.detach_session(session_id, expected_lease_generation=orphan)
+
+    async def _end_resume_claim(self, session_id: str) -> None:
+        """End this connection's resume claim; detach an orphaned lease nobody else will serve.
+
+        Runs from a ``finally``, so possibly during cancellation: the detach
+        is shielded like the other rollbacks.
+        """
+        orphan = await self._attachment_registry.end_resume(session_id)
+        if orphan is None:
             return
-        with suppress(DuplexSessionError):
-            await self._omni.detach_session(session_id, expected_lease_generation=lease_generation)
+
+        async def detach_orphan() -> None:
+            with suppress(DuplexSessionError):
+                await self._omni.detach_session(session_id, expected_lease_generation=orphan)
+
+        rollback = asyncio.ensure_future(detach_orphan())
+        rollback.add_done_callback(_log_rollback_failure)
+        await asyncio.shield(rollback)
 
     async def _detach_lease(self, released: DuplexDetachedAttachment) -> None:
         """Engine-owned disconnect grace for the lease a dropped connection was serving."""
