@@ -26,7 +26,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 from uuid import uuid4
@@ -379,6 +379,7 @@ class DuplexOmni(AsyncOmni):
         *,
         expected_lease_generation: int,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
+        on_abandoned: Callable[[int], Awaitable[None]] | None = None,
     ) -> DuplexSessionHandle:
         """Engine lease resume (CAS on the lease generation); returns the existing handle.
 
@@ -386,22 +387,41 @@ class DuplexOmni(AsyncOmni):
         this waiter, so a caller cancelled while it is in flight does not stop
         the engine from applying the resume (lease generation bumped,
         disconnect grace cleared) for a connection that will never serve it.
-        The outcome is then observed off the cancelled task: a resume that
-        landed is adopted and detached again, fenced on the generation it
-        produced, so a resume that came after it is never touched.
+        The outcome is then observed off the cancelled task. If the RPC times
+        out before answering, the outcome is unknown, so the same resume is
+        replayed under its control id: the engine answers a replay with the
+        generation the resume produced instead of resuming again. A resume
+        that landed is adopted into the handle (a later reconnect resumes
+        against the real generation) and settled through ``on_abandoned`` with
+        that generation; without a callback it is detached again, fenced on
+        the generation, so a resume that came after it is never touched.
+
+        ``on_abandoned`` is for callers that own an attachment concept: they
+        decide whether the generation now belongs to a connection that is
+        still serving (a takeover that never activated leaves the previous
+        socket attached) or whether the lease goes back into disconnect grace.
         """
         handle = self._require_handle(session_id)
+        control_id = uuid4().hex
         rpc = asyncio.ensure_future(
             self.engine.resume_session_async(
                 session_id,
                 expected_lease_generation=expected_lease_generation,
+                control_id=control_id,
                 timeout=timeout,
             )
         )
         try:
             result = await asyncio.shield(rpc)
         except asyncio.CancelledError:
-            self._compensate_abandoned_resume(handle, rpc, timeout=timeout)
+            self._compensate_abandoned_resume(
+                handle,
+                rpc,
+                control_id=control_id,
+                expected_lease_generation=expected_lease_generation,
+                timeout=timeout,
+                on_abandoned=on_abandoned,
+            )
             raise
         # The result carries the engine's current public session (state,
         # epoch, turn ...), which a resumed client must see, not the open-time snapshot.
@@ -413,28 +433,63 @@ class DuplexOmni(AsyncOmni):
         handle: DuplexSessionHandle,
         rpc: asyncio.Future[DuplexControlResultMessage],
         *,
+        control_id: str,
+        expected_lease_generation: int,
         timeout: float | None,
+        on_abandoned: Callable[[int], Awaitable[None]] | None,
     ) -> None:
-        async def compensate() -> None:
+        session_id = handle.session_id
+
+        async def observe() -> DuplexControlResultMessage | None:
             try:
-                result = await rpc
+                return await rpc
+            except DuplexSessionError as exc:
+                if exc.code != "timeout":
+                    # Refused (conflict, unknown session, engine gone): the
+                    # resume did not land, nothing to give back.
+                    logger.debug("abandoned duplex resume of %s did not land: %s", session_id, exc)
+                    return None
             except Exception as exc:
-                # The resume did not land (conflict, engine gone, timeout):
-                # nothing to give back.
-                logger.debug("abandoned duplex resume of %s did not land: %s", handle.session_id, exc)
-                return
-            handle._adopt(result)
-            if result.lease_generation is None:
-                return
-            with suppress(Exception):
-                await self.engine.touch_session_async(
-                    handle.session_id,
-                    activity="detach",
-                    expected_lease_generation=result.lease_generation,
+                logger.debug("abandoned duplex resume of %s did not land: %s", session_id, exc)
+                return None
+            # The waiter timed out, so the answer was dropped and the outcome
+            # is unknown: the engine may have applied the resume after the
+            # waiter gave up. Replay it under the same control id; the engine
+            # answers with the generation that resume produced, whether it
+            # lands now or already did, and refuses if a newer resume won.
+            try:
+                return await self.engine.resume_session_async(
+                    session_id,
+                    expected_lease_generation=expected_lease_generation,
+                    control_id=control_id,
                     timeout=timeout,
                 )
+            except Exception as exc:
+                logger.warning("abandoned duplex resume of %s could not be settled: %s", session_id, exc)
+                return None
 
-        task = asyncio.create_task(compensate(), name=f"duplex-resume-compensation-{handle.session_id}")
+        async def compensate() -> None:
+            result = await observe()
+            if result is None:
+                return
+            handle._adopt(result)
+            lease_generation = result.lease_generation
+            if lease_generation is None:
+                return
+            try:
+                if on_abandoned is not None:
+                    await on_abandoned(lease_generation)
+                else:
+                    await self.engine.touch_session_async(
+                        session_id,
+                        activity="detach",
+                        expected_lease_generation=lease_generation,
+                        timeout=timeout,
+                    )
+            except Exception as exc:
+                logger.warning("abandoned duplex resume of %s could not be settled: %s", session_id, exc)
+
+        task = asyncio.create_task(compensate(), name=f"duplex-resume-compensation-{session_id}")
         self._resume_compensations.add(task)
         task.add_done_callback(self._resume_compensations.discard)
 

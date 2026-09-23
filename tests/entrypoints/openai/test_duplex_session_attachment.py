@@ -552,3 +552,32 @@ async def test_registry_resume_cancelled_mid_delivery_rolls_back_like_a_failure(
         close=close,
     )
     assert recovered.attachment_generation == 3
+
+
+@pytest.mark.asyncio
+async def test_release_hands_back_the_lease_generation_the_dropped_connection_was_serving(mocker) -> None:
+    """The lease generation travels with the attachment, so a detach is fenced on the right lease."""
+    registry = DuplexSessionAttachmentRegistry(replay_ttl_s=60.0, replay_max_bytes_per_session=4096)
+    send = mocker.AsyncMock()
+    created = await registry.create("sid-lease", send=send, close=mocker.AsyncMock(), lease_generation=0)
+
+    # An abandoned takeover hands its generation to the connection still attached.
+    assert await registry.adopt_lease_generation("sid-lease", 1) is True
+    assert await registry.adopt_lease_generation("sid-lease", 0) is True, "generations only move forward"
+
+    released = await registry.release_attachment("sid-lease", attachment_generation=created.attachment_generation)
+    assert released is not None
+    assert (released.attachment_generation, released.lease_generation) == (1, 1)
+    assert await registry.release_attachment("sid-lease", attachment_generation=None) is None
+    assert await registry.adopt_lease_generation("sid-lease", 2) is False, "nobody is attached to own it"
+
+    resumed = await registry.resume(
+        "sid-lease",
+        resume_token=created.resume_token.plaintext,
+        last_received_server_event_seq=0,
+        send=send,
+        close=mocker.AsyncMock(),
+        lease_generation=3,
+    )
+    released = await registry.release_attachment("sid-lease", attachment_generation=resumed.attachment_generation)
+    assert released is not None and released.lease_generation == 3

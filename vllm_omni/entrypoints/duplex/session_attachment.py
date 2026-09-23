@@ -185,6 +185,15 @@ class DuplexSessionAttachmentCreated:
 
 
 @dataclass(frozen=True)
+class DuplexDetachedAttachment:
+    """The transport a detach dropped, with the engine lease generation it was serving."""
+
+    session_id: str
+    attachment_generation: int
+    lease_generation: int
+
+
+@dataclass(frozen=True)
 class DuplexSessionResumeResult:
     session_id: str
     attachment_generation: int
@@ -200,6 +209,11 @@ class _DuplexSessionAttachmentState:
     journal: DuplexEventJournal
     attachment: DuplexTransportAttachment | None
     attachment_generation: int
+    #: The engine lease generation the attached connection is serving: the one
+    #: its open or resume produced, or one an abandoned takeover handed to it.
+    #: Read together with the attachment under the lock, so a detach always
+    #: gives back the lease of the connection it drops, never a newer one.
+    lease_generation: int = 0
     outbound_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     recovery_token_digest: bytes | None = field(default=None, repr=False)
 
@@ -231,6 +245,7 @@ class DuplexSessionAttachmentRegistry:
         *,
         send: Callable[[dict[str, object]], Awaitable[None]],
         close: Callable[[str], Awaitable[None]],
+        lease_generation: int = 0,
     ) -> DuplexSessionAttachmentCreated:
         async with self._lock:
             if session_id in self._sessions:
@@ -251,6 +266,7 @@ class DuplexSessionAttachmentRegistry:
                     close=close,
                 ),
                 attachment_generation=generation,
+                lease_generation=lease_generation,
             )
             return DuplexSessionAttachmentCreated(
                 session_id=session_id,
@@ -310,14 +326,49 @@ class DuplexSessionAttachmentRegistry:
         session answers ``False`` so a second disconnect signal for the same
         socket cannot restart the engine's disconnect grace window.
         """
+        return await self.release_attachment(session_id, attachment_generation=attachment_generation) is not None
+
+    async def release_attachment(
+        self, session_id: str, *, attachment_generation: int | None = None
+    ) -> DuplexDetachedAttachment | None:
+        """``detach`` that also hands back the lease generation the dropped connection was serving.
+
+        Captured under the same lock as the attachment: the shared session
+        handle may already carry a newer generation from a resume that has
+        not activated yet, and the engine detach that follows must be fenced
+        on the dropped connection's own lease, not on that one.
+        """
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None or state.attachment is None:
-                return False
+                return None
             if attachment_generation is not None and state.attachment_generation != attachment_generation:
-                return False
+                return None
             state.attachment = None
-            return True
+            return DuplexDetachedAttachment(
+                session_id=session_id,
+                attachment_generation=state.attachment_generation,
+                lease_generation=state.lease_generation,
+            )
+
+    async def adopt_lease_generation(self, session_id: str, lease_generation: int) -> bool:
+        """Hand the lease generation of an abandoned resume to whoever is attached.
+
+        A takeover whose connection was cancelled before it activated still
+        bumped the engine lease. If another connection is attached, that one
+        keeps serving and must own the new generation, or its own disconnect
+        would be fenced out and the session would sit outside disconnect
+        grace until idle expiry. Returns whether a connection is attached;
+        when nobody is, the caller detaches the lease itself. Generations only
+        move forward, so an older abandoned generation never displaces a
+        newer one the attachment already owns.
+        """
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return False
+            state.lease_generation = max(state.lease_generation, lease_generation)
+            return state.attachment is not None
 
     async def has_attachment(self, session_id: str) -> bool:
         """Whether some connection is attached right now, whoever it is.
@@ -362,6 +413,7 @@ class DuplexSessionAttachmentRegistry:
         send: Callable[[dict[str, object]], Awaitable[None]],
         close: Callable[[str], Awaitable[None]],
         activation_payload_factory: Callable[[ResumeToken, int], Mapping[str, object]] | None = None,
+        lease_generation: int | None = None,
     ) -> DuplexSessionResumeResult:
         async with self._lock:
             state = self._require(session_id)
@@ -384,6 +436,8 @@ class DuplexSessionAttachmentRegistry:
                     send=send,
                     close=close,
                 )
+                if lease_generation is not None:
+                    state.lease_generation = max(state.lease_generation, lease_generation)
             if activation_payload_factory is not None:
                 try:
                     await send(dict(activation_payload_factory(rotated_token, attachment_generation)))
@@ -418,7 +472,7 @@ class DuplexSessionAttachmentRegistry:
         *,
         state: _DuplexSessionAttachmentState,
         attachment_generation: int,
-        accepted_token_digest: bytes,
+        accepted_token_digest: bytes | None,
     ) -> None:
         """Undo a resume whose activation never reached the client.
 

@@ -285,7 +285,10 @@ output   DuplexOrchestrator._intercept_stage_output -> runner.on_stage_output ->
          -> output_sink (DuplexSessionEventMessage) -> DuplexOmni._route_engine_message -> handle.events()
 detach   DuplexOmni.detach_session(expected_lease_generation) -> touch(DETACH): engine-owned disconnect
          grace, refused for a lease newer than the one the caller held; expiry -> SessionExpired
-resume   DuplexOmni.resume_session(expected_lease_generation) -> lease CAS; the existing handle is re-entered
+resume   DuplexOmni.resume_session(expected_lease_generation) -> lease CAS keyed by the control id (a replay
+         answers with the generation it produced); the existing handle is re-entered. A caller cancelled
+         mid-RPC observes the outcome afterwards and settles a landed resume: the generation goes to the
+         connection still attached, or the lease is detached again
 close    DuplexOmni.close_session -> close RPC; the manager tears the runner down, then the stage cleanup
          (abort submitted requests, release reserved ids), then SessionClosed, then the RPC result.
          SessionClosed is emitted after the cleanup attempt (in a finally), so it is also sent when the

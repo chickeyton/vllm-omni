@@ -296,6 +296,7 @@ class Harness:
     clock: FakeClock
     output_sink: asyncio.Queue = field(default_factory=asyncio.Queue)
     result_sink: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _control_seq: int = 0
 
     @classmethod
     def create(
@@ -344,10 +345,15 @@ class Harness:
         )
         return await self.result()
 
-    async def resume(self, session_id: str, *, expected_lease_generation: int) -> DuplexControlResultMessage:
+    async def resume(
+        self, session_id: str, *, expected_lease_generation: int, control_id: str | None = None
+    ) -> DuplexControlResultMessage:
+        # Distinct by default: the engine answers a repeated control id as a
+        # replay of the same resume, which only the replay test wants.
+        self._control_seq += 1
         await self.manager.handle(
             ResumeDuplexSessionMessage(
-                control_id=f"resume-{session_id}-{expected_lease_generation}",
+                control_id=control_id or f"resume-{session_id}-{expected_lease_generation}-{self._control_seq}",
                 session_id=session_id,
                 expected_lease_generation=expected_lease_generation,
             )
@@ -1811,3 +1817,20 @@ async def test_cancel_append_tasks_absorbs_a_task_that_outlives_the_wait() -> No
     assert await tasks.cancel_append_tasks(timeout_s=0.05) is True
     assert tasks.append_tail is None
     await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5.0)
+
+
+async def test_a_resume_replayed_under_its_control_id_reports_the_generation_it_produced() -> None:
+    """The client side of an abandoned resume: it lost the answer and asks again with the same id."""
+    async with Harness.create() as harness:
+        await harness.open("sid-replay")
+        session = harness.session("sid-replay")
+        first = await harness.resume("sid-replay", expected_lease_generation=0, control_id="rpc-a")
+        assert first.ok is True and first.lease_generation == 1
+
+        replay = await harness.resume("sid-replay", expected_lease_generation=0, control_id="rpc-a")
+        assert replay.ok is True
+        assert replay.lease_generation == 1
+        assert session.lease_generation == 1, "a replay does not resume again"
+
+        other = await harness.resume("sid-replay", expected_lease_generation=0, control_id="rpc-b")
+        assert other.ok is False and other.error_code == "session_resume_conflict"

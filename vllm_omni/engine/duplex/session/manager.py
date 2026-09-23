@@ -711,7 +711,13 @@ class DuplexSessionManager:
             runner = self._require_runner(message.session_id)
             session = runner.session
             try:
-                session.resume_lease(expected_lease_generation=message.expected_lease_generation)
+                # Keyed by the control id, so a caller that lost the answer
+                # (waiter cancelled or timed out) can replay the same resume
+                # to learn whether it landed instead of resuming twice.
+                session.resume_lease(
+                    expected_lease_generation=message.expected_lease_generation,
+                    control_id=message.control_id,
+                )
             except ValueError as exc:
                 raise DuplexSessionError(str(exc), code="session_resume_conflict") from exc
             await self._put_result(message, operation="resume", ok=True, session=session)

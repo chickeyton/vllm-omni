@@ -214,9 +214,12 @@ class DuplexOmniEngine(AsyncOmniEngine):
         session_id: str,
         *,
         expected_lease_generation: int,
+        control_id: str | None = None,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
-        control_id = uuid.uuid4().hex
+        # A caller-supplied id makes the resume replayable: the engine answers
+        # a repeated id with the generation that resume produced.
+        control_id = control_id or uuid.uuid4().hex
         return self._execute_control(
             ResumeDuplexSessionMessage(
                 control_id=control_id,
@@ -234,6 +237,7 @@ class DuplexOmniEngine(AsyncOmniEngine):
         session_id: str,
         *,
         expected_lease_generation: int,
+        control_id: str | None = None,
         timeout: float | None = _DEFAULT_CONTROL_TIMEOUT_S,
     ) -> DuplexControlResultMessage:
         loop = asyncio.get_running_loop()
@@ -242,6 +246,7 @@ class DuplexOmniEngine(AsyncOmniEngine):
             lambda: self._resume_session(
                 session_id,
                 expected_lease_generation=expected_lease_generation,
+                control_id=control_id,
                 timeout=timeout,
             ),
         )

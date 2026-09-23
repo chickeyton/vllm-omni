@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
@@ -138,6 +139,8 @@ class FakeOmni:
         #: resume: the lease generation is bumped, the result is still in flight.
         self.resume_gate: asyncio.Event | None = None
         self.resume_started = asyncio.Event()
+        #: Settlements of resumes whose caller was cancelled mid-RPC (DuplexOmni's contract).
+        self.compensations: list[asyncio.Task[None]] = []
 
     async def open_session(self, config: Any) -> FakeHandle:
         self.opened.append(dict(config))
@@ -152,13 +155,36 @@ class FakeOmni:
     def get_session(self, session_id: str) -> FakeHandle | None:
         return self.handles.get(session_id)
 
-    async def resume_session(self, session_id: str, *, expected_lease_generation: int) -> FakeHandle:
+    async def resume_session(
+        self,
+        session_id: str,
+        *,
+        expected_lease_generation: int,
+        on_abandoned: Callable[[int], Awaitable[None]] | None = None,
+    ) -> FakeHandle:
         self.resumed.append((session_id, expected_lease_generation))
         handle = self.handles[session_id]
-        handle.lease_generation = expected_lease_generation + 1
+        lease_generation = expected_lease_generation + 1
+        handle.lease_generation = lease_generation
         if self.resume_gate is not None:
             self.resume_started.set()
-            await self.resume_gate.wait()
+            gate = self.resume_gate
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                # DuplexOmni's contract: the engine applied the resume; once
+                # its answer arrives the landed generation is settled off the
+                # cancelled task, through the caller's callback if it gave one.
+                async def settle() -> None:
+                    await gate.wait()
+                    if on_abandoned is not None:
+                        await on_abandoned(lease_generation)
+                    else:
+                        with suppress(DuplexSessionError):
+                            await self.detach_session(session_id, expected_lease_generation=lease_generation)
+
+                self.compensations.append(asyncio.create_task(settle()))
+                raise
         return handle
 
     async def detach_session(self, session_id: str, *, expected_lease_generation: int | None = None) -> None:
@@ -776,3 +802,94 @@ async def test_an_abandoned_resume_never_detaches_the_lease_a_later_resume_owns(
     task.cancel()
     with suppress(asyncio.CancelledError, Exception):
         await task
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_takeover_leaves_the_live_connection_serving_and_owning_the_lease() -> None:
+    """A takeover cancelled mid-RPC must not put the connection it never replaced into disconnect grace.
+
+    A is attached at generation 0. B's engine resume lands generation 1 and B
+    is cancelled before it reaches the registry, so A stays the current
+    attachment. Settling B's generation must hand it to A rather than detach
+    it: A keeps serving, and A's own disconnect later detaches generation 1,
+    which is the lease the engine actually holds.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws, handle, task = await _open(handler, omni)
+    token = ws.sent[0]["resume_token"]
+    registry = handler._attachment_registry
+
+    omni.resume_gate = asyncio.Event()
+    ws_b, task_b = await _resume(handler, handle.session_id, token)
+    await asyncio.wait_for(omni.resume_started.wait(), timeout=2.0)
+    assert handle.lease_generation == 1
+
+    task_b.cancel()
+    with suppress(asyncio.CancelledError):
+        await task_b
+    omni.resume_gate.set()
+    await asyncio.gather(*omni.compensations)
+
+    assert omni.detached == [], "A is still serving: its lease must not enter disconnect grace"
+    assert omni.detach_refused == []
+    assert await registry.is_current_attachment(handle.session_id, 1), "A is still the attachment"
+    handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="aGk="))
+    await ws.wait_for("response.output_audio.delta")
+
+    # A now owns generation 1: its disconnect detaches the lease the engine holds.
+    ws.disconnect()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert omni.detached == [handle.session_id]
+    assert omni.detach_refused == []
+
+
+@pytest.mark.asyncio
+async def test_a_send_failure_detaches_the_failed_sockets_own_lease_not_a_pending_resumes() -> None:
+    """The pump's detach is fenced on the lease of the socket whose send failed, captured with it.
+
+    The pump holds the registry's outbound lock while sending to A. B's
+    engine resume lands generation 1 meanwhile and B waits for that lock to
+    activate. When A's send fails, the pump drops A and must detach A's
+    generation 0, which the engine refuses, not B's generation 1, which would
+    put B into disconnect grace the moment it activates.
+    """
+    omni = FakeOmni()
+    handler = _handler(omni)
+    ws, handle, task = await _open(handler, omni)
+    token = ws.sent[0]["resume_token"]
+    registry = handler._attachment_registry
+
+    sending = asyncio.Event()
+    fail_send = asyncio.Event()
+
+    async def parked_failing_send(payload: dict[str, Any]) -> None:
+        sending.set()
+        await fail_send.wait()
+        raise RuntimeError("socket closed")
+
+    ws.send_json = parked_failing_send  # type: ignore[method-assign]
+    handle.deliver(AudioDelta(session_id=handle.session_id, response_id="r1", delta="aGk="))
+    await asyncio.wait_for(sending.wait(), timeout=2.0)
+
+    # B: the engine resume lands; activation waits for the outbound lock the pump holds.
+    ws_b, task_b = await _resume(handler, handle.session_id, token)
+    await asyncio.sleep(0.05)
+    assert omni.resumed == [(handle.session_id, 0)]
+    assert handle.lease_generation == 1
+    assert await registry.is_current_attachment(handle.session_id, 1), "B has not activated yet"
+
+    fail_send.set()
+    resumed_b = await ws_b.wait_for("session.resumed")
+    assert resumed_b["attachment_generation"] == 2
+    assert omni.detached == [], "A's lease (generation 0) is refused, B's lease is untouched"
+    assert omni.detach_refused == [(handle.session_id, 0)]
+    assert await registry.is_current_attachment(handle.session_id, 2)
+
+    # B serves; its own disconnect detaches the lease it resumed.
+    ws_b.disconnect()
+    await asyncio.wait_for(task_b, timeout=2.0)
+    assert omni.detached == [handle.session_id]
+    ws.disconnect()
+    with suppress(asyncio.CancelledError, Exception):
+        await asyncio.wait_for(task, timeout=2.0)
