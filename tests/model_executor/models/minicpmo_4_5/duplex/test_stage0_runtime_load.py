@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""The MiniCPM-o 4.5 Stage-0 duplex runtime is built at load time, not in the first session."""
+"""The MiniCPM-o 4.5 Stage-0 duplex runtime is built with the model, not in the first session."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm_omni.model_executor.models.minicpmo_4_5 import minicpmo_4_5_omni
+from vllm_omni.model_executor.models.minicpmo_4_5.duplex import compat
 from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni import (
     MiniCPMO45OmniForConditionalGeneration,
 )
@@ -16,14 +18,9 @@ from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni import (
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
-def _model(model_stage: str, session_mode: str) -> MiniCPMO45OmniForConditionalGeneration:
-    model = MiniCPMO45OmniForConditionalGeneration.__new__(MiniCPMO45OmniForConditionalGeneration)
-    torch.nn.Module.__init__(model)
-    model.model_stage = model_stage
-    model.thinker = None
-    model.talker = None
-    model.vllm_config = SimpleNamespace(model_config=SimpleNamespace(session_mode=session_mode))
-    return model
+class _StageModel(torch.nn.Module):
+    def make_empty_intermediate_tensors(self):
+        return None
 
 
 @pytest.mark.parametrize(
@@ -34,16 +31,31 @@ def _model(model_stage: str, session_mode: str) -> MiniCPMO45OmniForConditionalG
         ("tts", "duplex", 0),
     ],
 )
-def test_load_weights_builds_duplex_runtime_only_for_duplex_thinker(
+def test_init_builds_duplex_runtime_only_for_duplex_thinker(
     monkeypatch: pytest.MonkeyPatch,
     model_stage: str,
     session_mode: str,
     expected_builds: int,
 ) -> None:
-    model = _model(model_stage, session_mode)
-    builds: list[bool] = []
-    monkeypatch.setattr(model, "_duplex_data_plane_helper", lambda: builds.append(True))
+    monkeypatch.setattr(minicpmo_4_5_omni, "init_vllm_registered_model", lambda **kwargs: _StageModel())
+    monkeypatch.setattr(compat, "patch_minicpmo_remote_config", lambda config: None)
+    build_devices: list[torch.device] = []
+    monkeypatch.setattr(
+        MiniCPMO45OmniForConditionalGeneration,
+        "_duplex_data_plane_helper",
+        lambda self: build_devices.append(torch.get_default_device()),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            multimodal_config=None,
+            model_stage=model_stage,
+            session_mode=session_mode,
+        )
+    )
 
-    model.load_weights([])
+    # The loader constructs the model under the target-device context.
+    with torch.device("meta"):
+        MiniCPMO45OmniForConditionalGeneration(vllm_config=vllm_config)
 
-    assert len(builds) == expected_builds
+    assert build_devices == [torch.device("cpu")] * expected_builds
