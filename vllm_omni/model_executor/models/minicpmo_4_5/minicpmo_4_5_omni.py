@@ -1150,4 +1150,11 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             talker_loaded = add_prefix_to_loaded_weights(talker_loaded, "talker")
             loaded_weights.update(talker_loaded)
 
+        if self.model_stage == "llm" and getattr(self.vllm_config.model_config, "session_mode", "turn") == "duplex":
+            # Build the Stage-0 duplex runtime (remote-code processor and
+            # tokenizer) at load time. Built lazily, it costs several seconds
+            # inside the first session's first audio unit, and the session then
+            # runs that far behind the real-time input stream.
+            self._duplex_data_plane_helper()
+
         return loaded_weights
