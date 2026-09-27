@@ -236,7 +236,7 @@ conversational turn boundary.
   first append only, half frames buffered, wrong rate refused, cumulative
   Code2Wav output projected as 24 kHz deltas, cancel restarting the epoch,
   close aborting the request.
-- `tests/model_executor/common/`: the shared toolbox (PCM helpers, payload
+- `tests/model_executor/executor_common/`: the shared toolbox (PCM helpers, payload
   validation, fixed-frame buffer, cumulative data plane, request-output
   readers).
 
