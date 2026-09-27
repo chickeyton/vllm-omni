@@ -11,12 +11,12 @@ from vllm_omni.model_executor.models.minicpmo_4_5.duplex.input import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MiniCPMO45ServingSessionState(DefaultDuplexModelSessionState):
     """Mutable model-owned state of one MiniCPM duplex session (owned by the session runner).
 
-    Only the audio buffer is MiniCPM's; the flags and their transitions are the
-    framework default.
+    The runner-facing flag contract lives on ``DefaultDuplexModelSessionState``;
+    MiniCPM-o only binds its ~1 s PCM unit buffer.
     """
 
     audio_buffer: MiniCPMO45PcmAppendBuffer = field(default_factory=MiniCPMO45PcmAppendBuffer)

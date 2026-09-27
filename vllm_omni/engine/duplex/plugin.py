@@ -41,6 +41,21 @@ class DuplexRuntimeConfigError(ValueError):
         self.code = code
 
 
+def reject_private_runtime_keys(
+    extra_body: object,
+    private_runtime_config_keys: frozenset[str],
+    *,
+    message: str,
+    error_cls: type[DuplexRuntimeConfigError] = DuplexRuntimeConfigError,
+) -> None:
+    """Reject client overrides while preserving each plugin's error contract."""
+    if not isinstance(extra_body, dict):
+        return
+    private_keys = sorted(private_runtime_config_keys.intersection(extra_body))
+    if private_keys:
+        raise error_cls(message + ", ".join(private_keys))
+
+
 def reject_changed_runtime_value(
     new_value: object,
     current_value: object,
@@ -149,12 +164,14 @@ class DuplexModelSessionState(ABC):
     def clear_continuation(self) -> None: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class DefaultDuplexModelSessionState(DuplexModelSessionState):
-    """The one sane implementation of the per-session flags every model shares.
+    """Framework-owned flag anatomy, implemented once.
 
-    A model plugin subclasses it to supply its ``audio_buffer`` (the only
-    model-specific member) and keeps the bookkeeping the runner drives.
+    The flag set above is the session runner's contract with the model (commit
+    retention, deferred response/creates, silence-continuation bookkeeping); it
+    is identical for every lockstep or frame-locked model, so a plugin only
+    supplies its input packetizer as ``audio_buffer``.
     """
 
     audio_buffer: PcmAppendBuffer
@@ -502,6 +519,20 @@ class DuplexModelPlugin(ABC):
         item: Mapping[str, object],
     ) -> dict[str, object] | None:
         del config, current, item
+        return None
+
+    def runtime_config_after_model_output(
+        self,
+        current: Mapping[str, object],
+        output_metadata: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """Return a runtime-config patch after a model output is observed.
+
+        Plugins may use model-owned output metadata to retire server-side
+        runtime state that has been consumed by the worker. The default keeps
+        the framework unaware of model-specific metadata.
+        """
+        del current, output_metadata
         return None
 
 
