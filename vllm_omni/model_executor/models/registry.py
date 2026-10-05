@@ -425,6 +425,11 @@ _OMNI_MODELS = {
         "ming_flash_omni_thinker",
         "MingFlashOmniThinkerForConditionalGeneration",
     ),
+    "MingImageForConditionalGeneration": (
+        "ming_image",
+        "model",
+        "MingImageForConditionalGeneration",
+    ),
     "MingFlashOmniTalkerForConditionalGeneration": (
         "ming_flash_omni",
         "ming_flash_omni_talker",
@@ -477,6 +482,12 @@ _OMNI_MODELS = {
         "minimax_music3",
         "acoustic",
         "MiniMaxMusic3AcousticForConditionalGeneration",
+    ),
+    ## YuE2-3B (text-to-music; single-stage native-AR with terminal NAR/VAE)
+    "Yue2ForCausalLM": (
+        "yue2",
+        "yue2",
+        "Yue2ForCausalLM",
     ),
 }
 

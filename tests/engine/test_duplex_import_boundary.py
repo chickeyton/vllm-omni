@@ -65,6 +65,7 @@ forbidden_prefixes = (
     "vllm_omni.entrypoints.duplex",
     "vllm_omni.entrypoints.duplex_omni",
     "vllm_omni.clients",
+    "vllm_omni.model_executor.common.duplex",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
     "vllm_omni.model_executor.models.nemotron_voicechat.duplex",
     "vllm_omni.model_executor.models.personaplex.duplex",
@@ -106,6 +107,7 @@ if missing:
 
 forbidden_prefixes = (
     "vllm_omni.clients",
+    "vllm_omni.model_executor.common.duplex",
     "vllm_omni.model_executor.models.minicpmo_4_5.duplex",
     "vllm_omni.model_executor.models.nemotron_voicechat.duplex",
     "vllm_omni.model_executor.models.personaplex.duplex",

@@ -460,3 +460,16 @@ def test_a_hint_survives_when_its_typed_field_is_unset():
     command = AppendAudio(audio=b"\x00\x00" * 8, hints={"is_speech": True})
 
     assert mailbox_payload(command)["is_speech"] is True
+
+
+def test_duplex_commands_stay_slotted():
+    """The concrete commands are ``__dict__``-free on every supported Python.
+
+    Upstream #7475 hit a Python 3.10 ``dataclass(slots=True)`` quirk when a
+    slotted engine mixin was combined with a slotted wire command. Here
+    ``DuplexCommand`` *is* the wire base, so every concrete command has a single
+    slotted base; this pins that layout.
+    """
+    assert DuplexCommand.__module__ == "vllm_omni.protocol.realtime.commands"
+    assert not hasattr(AppendAudio(audio=b"\x00\x00" * 8), "__dict__")
+    assert not hasattr(Commit(), "__dict__")
