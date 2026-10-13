@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-"""Control of one duplex session: server VAD, and the events that reconfigure it.
+"""Control of one duplex session: server/semantic VAD, and the events that reconfigure it.
 
 Server turn detection and ``session.update`` are the same concern seen from two
 sides. The detector is per-session mutable state, and ``session.update`` is the
@@ -27,16 +27,18 @@ from vllm_omni.engine.duplex.config import DuplexConfigError, realtime_item_to_h
 from vllm_omni.engine.duplex.plugin import DuplexRuntimeConfigError
 from vllm_omni.engine.duplex.session import helpers
 from vllm_omni.engine.duplex.session.context import DuplexSessionContext
-from vllm_omni.engine.duplex.session.emitter import SessionEmitter
+from vllm_omni.engine.duplex.session.emitter import SessionEmitter, session_auto_responds
 from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.session.model_channel import ModelChannel
 from vllm_omni.engine.duplex.turn_detection import (
     PendingTurnDetectionUpdate,
-    ServerTurnDetector,
+    SemanticVADUnavailableError,
     ServerVADUnavailableError,
     SileroVADBackendProvider,
+    SmartTurnBackendProvider,
     TurnDetectionConfig,
     TurnDetectionResult,
+    TurnDetector,
     apply_turn_detection_result,
 )
 
@@ -59,18 +61,21 @@ class SessionControl:
         self._model = model
         self._wait_for_append_tail = wait_for_append_tail
         self._config: TurnDetectionConfig | None = None
-        self._detector: ServerTurnDetector | None = None
+        self._detector: TurnDetector | None = None
 
     def init_turn_detection(self) -> None:
         turn_detection = self._ctx.session.config.extra_body.get("realtime_turn_detection")
-        if not isinstance(turn_detection, dict) or turn_detection.get("type") != "server_vad":
+        if not isinstance(turn_detection, dict) or turn_detection.get("type") not in ("server_vad", "semantic_vad"):
             self._config = None
             self._detector = None
             return
         try:
             config = TurnDetectionConfig.from_realtime(turn_detection)
+            unsupported = self._semantic_vad_unsupported(config, self._ctx.session.config.extra_body)
+            if unsupported is not None:
+                raise ValueError(unsupported)
             self._config = config
-            self._detector = config.build_detector(self._vad_backend_provider())
+            self._detector = config.build_detector(self._vad_backend_provider(), self._semantic_vad_backend_provider())
         except Exception as exc:
             logger.warning("Duplex session %s: turn detection disabled: %s", self._ctx.session.session_id, exc)
             self._config = None
@@ -83,6 +88,23 @@ class SessionControl:
         and ``duplex_session.server_vad_model_path`` is a deploy-level setting.
         """
         return getattr(self._ctx.manager, "vad_backend_provider", None)
+
+    def _semantic_vad_backend_provider(self) -> SmartTurnBackendProvider | None:
+        """The engine-wide Smart Turn backend (``duplex_session.semantic_vad_model_path``)."""
+        return getattr(self._ctx.manager, "semantic_vad_backend_provider", None)
+
+    def _semantic_vad_unsupported(self, config: TurnDetectionConfig | None, extra_body: object) -> str | None:
+        """``semantic_vad`` only decides turn ends, so it needs a session that commits turns.
+
+        An auto-responding (native duplex) session never commits on the
+        detector; there semantic pauses would only hold ``force_listen`` on the
+        model for seconds at a time.
+        """
+        if config is None or config.type != "semantic_vad":
+            return None
+        if session_auto_responds(self._ctx.session.capabilities, extra_body):
+            return "turn_detection.type='semantic_vad' requires a turn-based (committing) session"
+        return None
 
     def reset_vad(self) -> None:
         """Drop the detector's speech state (a barge-in or a clear starts a new turn)."""
@@ -106,6 +128,10 @@ class SessionControl:
                 sample_rate_hz=sample_rate_hz if isinstance(sample_rate_hz, int) else None,
                 audio_end_ms=event.get("audio_end_ms") if isinstance(event.get("audio_end_ms"), int) else None,
             )
+        except SemanticVADUnavailableError as exc:
+            self._out.emit_error("semantic_vad_unavailable", str(exc))
+            self._detector = None
+            return None
         except ServerVADUnavailableError as exc:
             self._out.emit_error("server_vad_unavailable", str(exc))
             self._detector = None
@@ -113,15 +139,17 @@ class SessionControl:
         except ValueError as exc:
             self._out.emit_error("bad_audio", str(exc))
             return None
-        if result.speech_started or result.speech_stopped:
+        if result.speech_started or result.speech_stopped or result.turn_complete_probability is not None:
             logger.info(
-                "Duplex VAD session=%s started=%s stopped=%s active=%s probability=%.3f "
-                "start_ms=%s end_ms=%s commit=%s",
+                "Duplex VAD session=%s backend=%s started=%s stopped=%s active=%s probability=%.3f "
+                "turn_complete=%s start_ms=%s end_ms=%s commit=%s",
                 self._ctx.session.session_id,
+                result.backend,
                 result.speech_started,
                 result.speech_stopped,
                 result.speech_active,
                 result.speech_probability,
+                result.turn_complete_probability,
                 result.audio_start_ms,
                 result.audio_end_ms,
                 result.should_commit,
@@ -208,7 +236,9 @@ class SessionControl:
 
         try:
             pending_turn_detection = PendingTurnDetectionUpdate.prepare(
-                payload, backend_provider=self._vad_backend_provider()
+                payload,
+                backend_provider=self._vad_backend_provider(),
+                semantic_backend_provider=self._semantic_vad_backend_provider(),
             )
         except Exception as exc:
             self._out.emit_error("unsupported_turn_detection", str(exc), event_id=realtime_event_id)
@@ -237,6 +267,15 @@ class SessionControl:
             )
         except DuplexConfigError as exc:
             self._out.emit_error(exc.code, str(exc) or "session.update was rejected", event_id=realtime_event_id)
+            reject_update()
+            return
+        # Also when the update only turns auto_response on under a live semantic_vad.
+        unsupported = self._semantic_vad_unsupported(
+            pending_turn_detection.config if pending_turn_detection is not None else self._config,
+            candidate_config.extra_body,
+        )
+        if unsupported is not None:
+            self._out.emit_error("unsupported_turn_detection", unsupported, event_id=realtime_event_id)
             reject_update()
             return
         if candidate_config.instructions != session.config.instructions and model_state.context_locked:

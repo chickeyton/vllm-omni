@@ -668,6 +668,9 @@ class DuplexSessionRunner:
         model_state.speech_since_commit = False
         model_state.clear_committed_audio()
         session.cancel_pending_input()
+        # A clear starts a new turn: drop the detector's speech (and semantic
+        # pause) state too, or a later stop would commit the cleared turn.
+        self.control.reset_vad()
         projector = self.out.projector
         if projector is not None:
             from vllm_omni.engine.duplex.realtime_events import clear_input_buffer
