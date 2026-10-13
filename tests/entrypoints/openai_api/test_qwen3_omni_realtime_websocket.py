@@ -1114,7 +1114,8 @@ class TestQwen3OmniDuplexPlayback:
 
         assert len(turns) == 2
         updated_session = next(event["session"] for event in turns[0] if event["type"] == "session.updated")
-        effective_turn_detection = updated_session["audio"]["input"]["turn_detection"]
+        # The normalized (defaults filled) setting is the top-level ``turn_detection``.
+        effective_turn_detection = updated_session["turn_detection"]
         assert effective_turn_detection["type"] == "semantic_vad"
         assert effective_turn_detection["eagerness"] == "auto"
         assert effective_turn_detection["create_response"] is True
