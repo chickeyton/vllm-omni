@@ -264,6 +264,24 @@ class SessionControl:
             )
             reject_update()
             return
+        if (
+            pending_turn_detection is not None
+            and pending_turn_detection.config != self._config
+            and (
+                model_state.input_since_commit
+                or model_state.audio_buffer.has_pending()
+                or model_state.audio_buffer.has_reserved()
+            )
+        ):
+            # A fresh detector cannot reconstruct the turn/pause represented by
+            # buffered audio. Refuse the whole update before adopting any config.
+            self._out.emit_error(
+                "unsupported_turn_detection",
+                "session.update cannot change turn_detection while input is pending; commit or clear input first",
+                event_id=realtime_event_id,
+            )
+            reject_update()
+            return
         try:
             self._ctx.plugin.validate_client_extra_body(payload.get("extra_body"))
         except DuplexRuntimeConfigError as exc:
