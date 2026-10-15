@@ -10,8 +10,8 @@ Sections:
   1. Per-call model latency: one Silero frame, and Smart Turn split into
      Whisper feature extraction and the ONNX run.
   2. Smart Turn under concurrency (sessions hitting the shared backend at once).
-  3. Per-chunk detector cost, ``ServerTurnDetector.process`` vs
-     ``SemanticTurnDetector.process``, for ordinary chunks and for the chunk
+  3. Per-chunk detector cost, ``ServerTurnDetector.process_segments`` vs
+     ``SemanticTurnDetector.process_segments``, for ordinary chunks and for the chunk
      that triggers a Smart Turn evaluation.
   4. Smart Turn classification of labeled clips (complete vs incomplete).
   5. Streaming endpoint decisions in audio time, per language:
@@ -82,13 +82,13 @@ def trim(audio: np.ndarray) -> np.ndarray:
     return audio[frames[0] * 160 : (frames[-1] + 1) * 160]
 
 
-def speech_end_ms(audio: np.ndarray) -> int:
+def speech_end_ms(audio: np.ndarray, silero_provider: SileroVADBackendProvider) -> int:
     """End of the last 32 ms frame Silero scores as speech (P >= 0.5), from a fresh state.
 
     The same reference for both detectors, so trailing breaths or noise that an
     energy threshold would count as speech do not skew either one.
     """
-    backend = SileroVADBackendProvider().get()
+    backend = silero_provider.get()
     state = backend.new_state()
     last = 0
     for index in range(audio.size // 512):
@@ -180,16 +180,18 @@ def _detector(kind: str, silero_provider, smart_turn_provider):
     return config.build_detector(silero_provider, smart_turn_provider)
 
 
-def stream(detector, audio: np.ndarray, chunk_ms: int) -> list[tuple[int, object, float]]:
-    """Feed ``audio`` then 9 s of silence; returns (chunk end ms, result, wall seconds) per chunk."""
+def stream(detector, audio: np.ndarray, chunk_ms: int) -> list[tuple[int, list, float]]:
+    """Feed audio then 9 s of silence; return (chunk end ms, decisions, wall seconds)."""
     audio = np.concatenate([np.zeros(RATE // 2, dtype=np.float32), audio, np.zeros(9 * RATE, dtype=np.float32)])
     step = chunk_ms * RATE // 1000
     out = []
     for offset in range(0, audio.size, step):
         payload = b64(audio[offset : offset + step])
         start = time.perf_counter()
-        result = detector.process(payload, fmt="pcm_f32le", sample_rate_hz=RATE)
-        out.append(((offset + step) * 1000 // RATE, result, time.perf_counter() - start))
+        segments = detector.process_segments(payload, fmt="pcm_f32le", sample_rate_hz=RATE)
+        out.append(
+            ((offset + step) * 1000 // RATE, [segment.result for segment in segments], time.perf_counter() - start)
+        )
     return out
 
 
@@ -201,8 +203,9 @@ def bench_chunk_cost(silero_provider, smart_turn_provider, clips: dict[str, np.n
         for audio in clips.values():
             for _ in range(3):
                 detector = _detector(kind, silero_provider, smart_turn_provider)
-                for _, result, seconds in stream(detector, audio, chunk_ms):
-                    (evaluating if result.turn_complete_probability is not None else ordinary).append(seconds)
+                for _, decisions, seconds in stream(detector, audio, chunk_ms):
+                    target = evaluating if any(r.turn_complete_probability is not None for r in decisions) else ordinary
+                    target.append(seconds)
         results[kind] = {"ordinary_chunk": stats_ms(ordinary)}
         if evaluating:
             results[kind]["smart_turn_chunk"] = stats_ms(evaluating)
@@ -216,15 +219,17 @@ def bench_classification(smart_turn, clips: list[dict]) -> list[dict]:
     ]
 
 
-def _endpoint_row(detector, audio: np.ndarray, chunk_ms: int) -> dict:
-    end_ms = 500 + speech_end_ms(audio)
+def _endpoint_row(detector, audio: np.ndarray, chunk_ms: int, silero_provider: SileroVADBackendProvider) -> dict:
+    end_ms = 500 + speech_end_ms(audio, silero_provider)
     chunks = stream(detector, audio, chunk_ms)
-    commits = [t for t, result, _ in chunks if result.should_commit]
+    commits = [t for t, decisions, _ in chunks for result in decisions if result.should_commit]
     final = [t for t in commits if t >= end_ms]
     return {
         "false_cutoffs": sum(1 for t in commits if t < end_ms),
         "endpoint_delay_ms": (final[0] - end_ms) if final else None,
-        "smart_turn_calls": sum(1 for _, result, _ in chunks if result.turn_complete_probability is not None),
+        "smart_turn_calls": sum(
+            1 for _, decisions, _ in chunks for result in decisions if result.turn_complete_probability is not None
+        ),
     }
 
 
@@ -245,7 +250,12 @@ def bench_endpoints(
         for kind in ("server_vad", "semantic_vad"):
             detector = _detector(kind, silero_provider, smart_turn_provider)
             rows.append(
-                {"scenario": scenario, "language": language, "mode": kind, **_endpoint_row(detector, audio, chunk_ms)}
+                {
+                    "scenario": scenario,
+                    "language": language,
+                    "mode": kind,
+                    **_endpoint_row(detector, audio, chunk_ms, silero_provider),
+                }
             )
     return rows
 

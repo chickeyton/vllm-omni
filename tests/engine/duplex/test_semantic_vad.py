@@ -85,8 +85,9 @@ def _feed(
     audio = np.concatenate([np.full(ms * RATE // 1000, amp, dtype=np.float32) for amp, ms in plan])
     step = chunk_ms * RATE // 1000
     return [
-        detector.process(_b64(audio[i : i + step]), fmt="pcm_f32le", sample_rate_hz=RATE)
+        segment.result
         for i in range(0, audio.size, step)
+        for segment in detector.process_segments(_b64(audio[i : i + step]), fmt="pcm_f32le", sample_rate_hz=RATE)
     ]
 
 
@@ -96,8 +97,9 @@ def _count(results: list[TurnDetectionResult], name: str) -> int:
 
 def _commit_ms(results: list[TurnDetectionResult], chunk_ms: int = 100) -> int:
     """End (ms of input) of the chunk that committed."""
-    index = next(i for i, result in enumerate(results) if result.should_commit)
-    return (index + 1) * chunk_ms
+    result = next(result for result in results if result.should_commit)
+    assert result.audio_end_ms is not None
+    return -(-result.audio_end_ms // chunk_ms) * chunk_ms
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +178,40 @@ def test_the_semantic_vad_model_path_is_validated() -> None:
 # --------------------------------------------------------------------------- #
 # Endpoint policy                                                             #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("chunk_ms", [20, 32, 100, 200])
+def test_speech_resuming_before_the_silence_limit_keeps_the_turn_open(chunk_ms: int) -> None:
+    # Speech resumes 64 ms before the deadline, inside Silero's 96 ms
+    # confirmation interval. A pending onset must not be timed out as silence.
+    results = _feed(_detector(_ScriptedTurn(0.1)), [(SPEECH, 288), (0.0, 3936), (SPEECH, 320)], chunk_ms=chunk_ms)
+    assert _count(results, "speech_started") == 1
+    assert _count(results, "should_commit") == 0
+
+
+def test_a_short_noise_burst_does_not_extend_the_silence_limit() -> None:
+    results = _feed(
+        _detector(_ScriptedTurn(0.1)),
+        [(SPEECH, 288), (0.0, 3936), (SPEECH, 64), (0.0, 128)],
+        chunk_ms=32,
+    )
+    # The candidate fails on the next silent frame; commit immediately then.
+    assert _count(results, "speech_started") == 1
+    assert _count(results, "should_commit") == 1
+    assert _commit_ms(results, chunk_ms=32) == 4320
+
+
+@pytest.mark.parametrize("chunk_ms", [20, 100, 200, 12000])
+def test_multiple_turns_and_scoring_windows_are_independent_of_wire_chunk_size(chunk_ms: int) -> None:
+    turn = _ScriptedTurn(0.1, 0.1)
+    detector = _detector(turn)
+    results = _feed(detector, [(SPEECH, 1000), (0.0, 5000), (0.4, 1000), (0.0, 5000)], chunk_ms=chunk_ms)
+    assert _count(results, "speech_started") == 2
+    assert [result.audio_end_ms for result in results if result.should_commit] == [5024, 11008]
+    assert len(turn.windows) == 2
+    assert np.max(turn.windows[0]) == pytest.approx(SPEECH), "the first score must not see the next turn"
+    assert np.max(turn.windows[1]) == pytest.approx(0.4)
+    assert not np.any(turn.windows[1] == SPEECH), "the second score must not include the previous turn"
 
 
 def test_a_complete_turn_commits_at_the_first_pause() -> None:
@@ -399,7 +435,7 @@ def test_a_missing_backend_fails_the_first_chunk_explicitly(tmp_path) -> None:
         frame_scorer=_loud_frames_are_speech,
     )
     with pytest.raises(SemanticVADUnavailableError):
-        detector.process(_b64(np.zeros(1600, dtype=np.float32)), fmt="pcm_f32le", sample_rate_hz=RATE)
+        detector.process_segments(_b64(np.zeros(1600, dtype=np.float32)), fmt="pcm_f32le", sample_rate_hz=RATE)
 
 
 # --------------------------------------------------------------------------- #

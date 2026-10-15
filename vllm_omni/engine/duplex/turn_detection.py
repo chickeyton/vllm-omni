@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
+import pybase64 as base64
 from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex.smart_turn import (
@@ -48,6 +49,7 @@ __all__ = [
     "SmartTurnBackendProvider",
     "TurnDetectionConfig",
     "TurnDetectionResult",
+    "TurnDetectionSegment",
     "TurnDetector",
     "apply_turn_detection_result",
     "configured_realtime_turn_detection",
@@ -274,6 +276,62 @@ class TurnDetectionResult:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class TurnDetectionSegment:
+    """Normalized PCM and its decision, ending no later than one turn boundary."""
+
+    audio: str
+    result: TurnDetectionResult
+
+
+def _process_segments(
+    detector: TurnDetector,
+    base64_audio: str,
+    *,
+    fmt: str,
+    sample_rate_hz: int | None,
+) -> list[TurnDetectionSegment]:
+    """Score on Silero's frame grid, retaining every boundary in a wire append.
+
+    Only audio through the current frame may reach Smart Turn. Flush a segment
+    at each commit so the runner can commit it before buffering the next turn.
+    The final partial frame stays in the detector for the next append.
+    """
+    samples = detector.vad.decode_base64(base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
+    segments: list[TurnDetectionSegment] = []
+    start = offset = 0
+    accumulated: TurnDetectionResult | None = None
+    while offset < samples.size:
+        end = min(samples.size, offset + detector.vad.samples_until_frame)
+        result = detector._process_frame(samples[offset:end])
+        offset = end
+        if accumulated is not None:
+            result = TurnDetectionResult(
+                is_speech=accumulated.is_speech or result.is_speech,
+                speech_active=result.speech_active,
+                speech_started=accumulated.speech_started or result.speech_started,
+                speech_stopped=result.speech_stopped,
+                speech_probability=max(accumulated.speech_probability, result.speech_probability),
+                audio_start_ms=accumulated.audio_start_ms if accumulated.speech_started else result.audio_start_ms,
+                audio_end_ms=result.audio_end_ms,
+                should_commit=result.should_commit,
+                create_response=result.create_response,
+                backend=result.backend,
+                turn_complete_probability=(
+                    result.turn_complete_probability
+                    if result.turn_complete_probability is not None
+                    else accumulated.turn_complete_probability
+                ),
+            )
+        accumulated = result
+        if result.should_commit or offset == samples.size:
+            audio = base64.b64encode(samples[start:offset].astype("<f4", copy=False).tobytes()).decode("ascii")
+            segments.append(TurnDetectionSegment(audio, result))
+            start = offset
+            accumulated = None
+    return segments
+
+
 class ServerTurnDetector:
     """One Silero-backed streaming detector per session."""
 
@@ -301,28 +359,27 @@ class ServerTurnDetector:
     def reset(self) -> None:
         self._vad.reset()
 
-    def process(
-        self,
-        base64_audio: str,
-        *,
-        fmt: str,
-        sample_rate_hz: int | None,
-        audio_end_ms: int | None = None,
-    ) -> TurnDetectionResult:
-        """Score one appended chunk. Raises ``ServerVADUnavailableError`` / ``ValueError`` like the VAD."""
-        result: StreamingVADResult = self._vad.process_base64(base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
-        stop_ms = result.speech_end_ms if result.speech_end_ms is not None else audio_end_ms
-        return TurnDetectionResult(
+    def process_segments(
+        self, base64_audio: str, *, fmt: str, sample_rate_hz: int | None
+    ) -> list[TurnDetectionSegment]:
+        return _process_segments(self, base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
+
+    def _process_frame(self, samples: np.ndarray) -> TurnDetectionResult:
+        result: StreamingVADResult = self._vad.process(samples)
+        detected = TurnDetectionResult(
             is_speech=result.is_speech,
             speech_active=result.speech_active,
             speech_started=result.speech_started,
             speech_stopped=result.speech_stopped,
             speech_probability=result.speech_probability,
             audio_start_ms=result.speech_start_ms,
-            audio_end_ms=stop_ms,
+            audio_end_ms=result.speech_end_ms,
             should_commit=bool(result.speech_stopped and not result.speech_active),
             create_response=self.config.create_response,
         )
+        if detected.should_commit:
+            self.reset()
+        return detected
 
 
 class _TurnAudio:
@@ -417,15 +474,13 @@ class SemanticTurnDetector:
         self._vad.reset()
         self._clear_turn()
 
-    def process(
-        self,
-        base64_audio: str,
-        *,
-        fmt: str,
-        sample_rate_hz: int | None,
-        audio_end_ms: int | None = None,
-    ) -> TurnDetectionResult:
-        """Score one appended chunk.
+    def process_segments(
+        self, base64_audio: str, *, fmt: str, sample_rate_hz: int | None
+    ) -> list[TurnDetectionSegment]:
+        return _process_segments(self, base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
+
+    def _process_frame(self, samples: np.ndarray) -> TurnDetectionResult:
+        """Score through the next frame boundary.
 
         Raises ``SemanticVADUnavailableError`` / ``ServerVADUnavailableError`` /
         ``ValueError`` like the server VAD. A Smart Turn *inference* failure does
@@ -433,7 +488,6 @@ class SemanticTurnDetector:
         eagerness limit still ends the turn.
         """
         scorer = self._require_turn_scorer()
-        samples = self._vad.decode_base64(base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
         self._audio.append(samples)
         inner = self._vad.process(samples)
         was_active = self._turn_active
@@ -468,6 +522,10 @@ class SemanticTurnDetector:
             if (
                 not commit
                 and self._pause_start_ms is not None
+                # Let an onset finish confirmation before timing out. If it
+                # was only a short noise burst, Silero clears the candidate
+                # and the original silence deadline applies immediately.
+                and not self._vad.speech_pending
                 and self._vad.processed_ms - self._pause_start_ms >= self._max_silence_ms
             ):
                 commit = True
@@ -481,7 +539,7 @@ class SemanticTurnDetector:
             speech_stopped=commit,
             speech_probability=inner.speech_probability,
             audio_start_ms=start_ms,
-            audio_end_ms=end_ms if end_ms is not None else audio_end_ms,
+            audio_end_ms=end_ms,
             should_commit=commit,
             create_response=self.config.create_response,
             backend=self.backend_name,

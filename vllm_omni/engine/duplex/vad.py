@@ -314,8 +314,18 @@ class SileroStreamingVAD:
         return int(self._pending.nbytes)
 
     @property
+    def samples_until_frame(self) -> int:
+        """Samples needed to finish the next scoring frame."""
+        return self._WINDOW_SAMPLES - self._pending.size
+
+    @property
     def speech_active(self) -> bool:
         return self._speech_active
+
+    @property
+    def speech_pending(self) -> bool:
+        """An onset is being confirmed against ``min_speech_duration_ms``."""
+        return self._candidate_samples > 0
 
     def reset(self) -> None:
         """Drop stream state while preserving the session-relative audio clock.

@@ -111,34 +111,49 @@ class SessionControl:
         if self._detector is not None:
             self._detector.reset()
 
-    async def run_turn_detection(self, event: dict[str, object]) -> TurnDetectionResult | None:
+    async def run_turn_detection(
+        self, event: dict[str, object]
+    ) -> list[tuple[dict[str, object], TurnDetectionResult | None]]:
         detector = self._detector
         if detector is None:
-            return None
+            return [(event, None)]
         audio = event.get("audio")
         if not isinstance(audio, str) or not audio:
-            return None
+            return [(event, None)]
         fmt = event.get("format") if isinstance(event.get("format"), str) else "pcm_f32le"
         sample_rate_hz = event.get("sample_rate_hz")
         try:
-            result = await self._ctx.services.offload(
-                detector.process,
+            segments = await self._ctx.services.offload(
+                detector.process_segments,
                 audio,
                 fmt=fmt,
                 sample_rate_hz=sample_rate_hz if isinstance(sample_rate_hz, int) else None,
-                audio_end_ms=event.get("audio_end_ms") if isinstance(event.get("audio_end_ms"), int) else None,
             )
         except SemanticVADUnavailableError as exc:
             self._out.emit_error("semantic_vad_unavailable", str(exc))
             self._detector = None
-            return None
+            return [(event, None)]
         except ServerVADUnavailableError as exc:
             self._out.emit_error("server_vad_unavailable", str(exc))
             self._detector = None
-            return None
+            return [(event, None)]
         except ValueError as exc:
             self._out.emit_error("bad_audio", str(exc))
-            return None
+            return []
+        detected: list[tuple[dict[str, object], TurnDetectionResult | None]] = []
+        for index, segment in enumerate(segments):
+            payload = dict(event, audio=segment.audio, format="pcm_f32le", sample_rate_hz=16000)
+            if index:
+                # Video frames and transcript hints belong to the original
+                # append; splitting its audio must not duplicate them.
+                payload.pop("video_frames", None)
+                payload.pop("transcript", None)
+            self._log_turn_detection(segment.result)
+            apply_turn_detection_result(payload, segment.result)
+            detected.append((payload, segment.result))
+        return detected
+
+    def _log_turn_detection(self, result: TurnDetectionResult) -> None:
         if result.speech_started or result.speech_stopped or result.turn_complete_probability is not None:
             logger.info(
                 "Duplex VAD session=%s backend=%s started=%s stopped=%s active=%s probability=%.3f "
@@ -154,8 +169,6 @@ class SessionControl:
                 result.audio_end_ms,
                 result.should_commit,
             )
-        apply_turn_detection_result(event, result)
-        return result
 
     # ------------------------------------------------------------------ #
     # Control events                                                     #
