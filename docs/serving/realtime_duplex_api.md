@@ -494,6 +494,10 @@ Semantic divergences hidden behind shared names:
   is accepted for turn-based sessions only; auto-responding (native duplex)
   sessions refuse it with `unsupported_turn_detection`. On turn-based sessions
   the detector's commit honours `create_response`.
+- Re-sending the same normalized `turn_detection` settings preserves the active
+  speech and pause state. Changing settings (including switching modes or
+  disabling VAD) while input is pending rejects the entire `session.update`
+  with `unsupported_turn_detection`; commit or clear input before retrying.
 - `rate_limits.updated` is always an empty list (compatibility only).
 - Cancellation never reuses a `response_id`; truncation is driven by
   `playback.ack` as well as `conversation.item.truncate`.
