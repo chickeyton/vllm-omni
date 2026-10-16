@@ -369,6 +369,32 @@ class ServerTurnDetector:
     def reset(self) -> None:
         self._vad.reset()
 
+    def process(
+        self,
+        base64_audio: str,
+        *,
+        fmt: str,
+        sample_rate_hz: int | None,
+        audio_end_ms: int | None = None,
+    ) -> TurnDetectionResult:
+        """Return one aggregate result for the turn-based Realtime caller.
+
+        That caller owns commit/reset and coalesces stop/restart within an
+        append. Duplex uses ``process_segments`` to retain every turn boundary.
+        """
+        result: StreamingVADResult = self._vad.process_base64(base64_audio, fmt=fmt, sample_rate_hz=sample_rate_hz)
+        return TurnDetectionResult(
+            is_speech=result.is_speech,
+            speech_active=result.speech_active,
+            speech_started=result.speech_started,
+            speech_stopped=result.speech_stopped,
+            speech_probability=result.speech_probability,
+            audio_start_ms=result.speech_start_ms,
+            audio_end_ms=result.speech_end_ms if result.speech_end_ms is not None else audio_end_ms,
+            should_commit=bool(result.speech_stopped and not result.speech_active),
+            create_response=self.config.create_response,
+        )
+
     def process_segments(
         self, base64_audio: str, *, fmt: str, sample_rate_hz: int | None
     ) -> list[TurnDetectionSegment]:
