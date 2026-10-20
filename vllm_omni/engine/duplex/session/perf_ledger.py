@@ -322,7 +322,7 @@ def with_perf_chunk(prompt: dict[str, object], chunk: tuple[int, int]) -> dict[s
     """
     buffer = prompt.get("model_intermediate_buffer")
     duplex = buffer.get("duplex") if isinstance(buffer, Mapping) else None
-    if not isinstance(duplex, Mapping):
+    if not isinstance(buffer, Mapping) or not isinstance(duplex, Mapping):
         return prompt
     return {
         **prompt,

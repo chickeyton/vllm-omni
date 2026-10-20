@@ -301,7 +301,7 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
         for next_input in next_inputs:
             buffer = next_input.get("model_intermediate_buffer") if isinstance(next_input, dict) else None
             duplex = buffer.get("duplex") if isinstance(buffer, dict) else None
-            if isinstance(duplex, dict):
+            if isinstance(buffer, dict) and isinstance(duplex, dict):
                 # Copy both levels: the stage-input processor may share them with bridge state.
                 next_input["model_intermediate_buffer"] = {
                     **buffer,

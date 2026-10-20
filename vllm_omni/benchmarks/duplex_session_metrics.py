@@ -121,12 +121,13 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
     that is not final yet returns ``{"final": False}`` and no numbers: a queued
     chunk has no spans, and counting it anyway would hide its wait.
     """
-    if not turn_is_final(turn):
+    chunks = turn.get("chunks")
+    if not turn_is_final(turn) or not isinstance(chunks, list):
         return {"final": False, "epoch": turn.get("epoch"), "turn_id": turn.get("turn_id")}
     all_spans: list[Sequence[int]] = []
     in_engine: list[tuple[int, int]] = []
     audio_ms = 0.0
-    for chunk in turn["chunks"]:  # type: ignore[union-attr]
+    for chunk in chunks:
         for work in chunk.get("stage_work") or ():
             all_spans.extend(work.get("spans") or ())
         submitted_ns = int(chunk["submitted_ns"])

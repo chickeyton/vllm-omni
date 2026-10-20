@@ -14,8 +14,13 @@ are never touched, so collection costs nothing when it is off.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.request import Request
 
 PERF_CHUNK_KEY = "perf_chunk"
 # Set on a stage Request when an update or a connector payload names its chunk.
@@ -44,13 +49,13 @@ def perf_chunk_from_buffer(buffer: object) -> tuple[int, int] | None:
     return parse_perf_chunk(duplex.get(PERF_CHUNK_KEY)) if isinstance(duplex, Mapping) else None
 
 
-def set_request_perf_chunk(request: Any, chunk: tuple[int, int] | None) -> None:
+def set_request_perf_chunk(request: Request, chunk: tuple[int, int] | None) -> None:
     """Record the chunk an update or payload hands to ``request``; None keeps the previous one."""
     if chunk is not None:
         setattr(request, _REQUEST_CHUNK_ATTR, chunk)
 
 
-def request_perf_chunk(request: Any) -> tuple[int, int] | None:
+def request_perf_chunk(request: Request) -> tuple[int, int] | None:
     """The chunk ``request`` currently works on, or None when it is not measured."""
     chunk = getattr(request, _REQUEST_CHUNK_ATTR, None)
     if isinstance(chunk, tuple):
@@ -61,12 +66,12 @@ def request_perf_chunk(request: Any) -> tuple[int, int] | None:
 class DuplexStageWorkRecorder:
     """Times scheduler steps for measured duplex requests and attaches the spans to outputs."""
 
-    def __init__(self, clock=time.monotonic_ns) -> None:
+    def __init__(self, clock: Callable[[], int] = time.monotonic_ns) -> None:
         self._clock = clock
         # id(scheduler_output) -> (begin_ns, [(request, chunk)])
-        self._in_flight: dict[int, tuple[int, list[tuple[Any, tuple[int, int]]]]] = {}
+        self._in_flight: dict[int, tuple[int, list[tuple[Request, tuple[int, int]]]]] = {}
 
-    def step_begin(self, scheduler_output: Any, requests: Mapping[str, Any]) -> None:
+    def step_begin(self, scheduler_output: SchedulerOutput, requests: Mapping[str, Request]) -> None:
         scheduled = getattr(scheduler_output, "num_scheduled_tokens", None) or {}
         entries = []
         for req_id in scheduled:
@@ -80,7 +85,7 @@ class DuplexStageWorkRecorder:
             self._in_flight.pop(next(iter(self._in_flight)))
         self._in_flight[id(scheduler_output)] = (self._clock(), entries)
 
-    def step_end(self, scheduler_output: Any, engine_core_outputs: Mapping[int, Any]) -> None:
+    def step_end(self, scheduler_output: SchedulerOutput, engine_core_outputs: Mapping[int, EngineCoreOutputs]) -> None:
         record = self._in_flight.pop(id(scheduler_output), None)
         if record is None:
             return
@@ -100,7 +105,7 @@ class DuplexStageWorkRecorder:
                         setattr(request, _REQUEST_SPANS_ATTR, [])
 
 
-def _add_span(request: Any, chunk: tuple[int, int], begin_ns: int, end_ns: int) -> None:
+def _add_span(request: Request, chunk: tuple[int, int], begin_ns: int, end_ns: int) -> None:
     """Append one step span; touching or overlapping spans of the same chunk coalesce."""
     spans: list[list[int]] | None = getattr(request, _REQUEST_SPANS_ATTR, None)
     if spans is None:
@@ -116,11 +121,12 @@ def _add_span(request: Any, chunk: tuple[int, int], begin_ns: int, end_ns: int) 
 
 def stage_work_rows(rows: Iterable[object] | None) -> list[tuple[int, int, int, int]]:
     """Validate ``OmniEngineCoreOutput.stage_work`` rows on the receiving side."""
-    result = []
+    result: list[tuple[int, int, int, int]] = []
     for row in rows or ():
         if isinstance(row, list | tuple) and len(row) == 4:
             try:
-                result.append(tuple(int(value) for value in row))
+                epoch, seq, start_ns, duration_ns = (int(value) for value in row)
             except (TypeError, ValueError):
                 continue
+            result.append((epoch, seq, start_ns, duration_ns))
     return result

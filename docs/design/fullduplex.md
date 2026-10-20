@@ -459,6 +459,19 @@ for queue updates and the final validity check before delivery.
   accumulates the snapshot into the active response, so
   `ResponseDone.stage_metrics` and `metadata.vllm_omni.stage_metrics` on the
   wire keep their meaning.
+- **Session stats (busy RTF, RFC #8325).** Opt-in with
+  `duplex_session.collect_stats`. `ModelChannel` stamps each Stage-0 append's
+  envelope with `duplex.perf_chunk = [epoch, seq]`; the orchestrator copies the
+  producing step's chunk into forwarded updates and the chunk transfer adapter
+  into connector payloads. Stage schedulers (`DuplexStageWorkRecorder`) time
+  every step of a request that carries a chunk and return the spans on
+  `OmniEngineCoreOutput.stage_work`. `DuplexEngineSession.perf`
+  (`SessionPerfLedger`) groups chunks by turn with their acceptance and done
+  times, spans and emitted audio; turns close on model-turn completion,
+  barge-in or close. The runner answers `session.stats.get` from the ledger on
+  the ordered mailbox; clients derive busy RTF and stall ratio
+  (`vllm_omni.benchmarks.duplex_session_metrics`). With the flag off nothing
+  is stamped, recorded or attached.
 
 ### Semantic turn decisions
 
