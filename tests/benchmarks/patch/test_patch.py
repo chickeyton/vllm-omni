@@ -181,6 +181,11 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
                 return
             self._emit_response()
 
+        async def turn_session_stats(self, response_id):
+            # A server without duplex_session.collect_stats adds no server-side fields.
+            del response_id
+            return {}
+
         def _emit_response(self):
             self.response_count += 1
             response_id = f"resp-{self.response_count}"
