@@ -44,6 +44,7 @@ from vllm_omni.engine.duplex.commands import (
     DeleteItem,
     DuplexCommand,
     DuplexCommandError,
+    GetSessionStats,
     Heartbeat,
     SignalTurn,
     TruncateItem,
@@ -139,6 +140,33 @@ def build_append_audio(
 
 
 # ---- translation ----
+
+
+def _get_session_stats(payload: Mapping[str, object], *, event_id: str | None) -> GetSessionStats:
+    turn_ids = payload.get("turn_ids")
+    if turn_ids is not None and (
+        not isinstance(turn_ids, list)
+        or any(isinstance(turn_id, bool) or not isinstance(turn_id, int) or turn_id < 0 for turn_id in turn_ids)
+    ):
+        raise DuplexCommandError(
+            "session.stats.get turn_ids must be a list of non-negative integers", code="bad_event", event_id=event_id
+        )
+    epoch = payload.get("epoch")
+    if epoch is not None and (isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0):
+        raise DuplexCommandError(
+            "session.stats.get epoch must be a non-negative integer", code="bad_event", event_id=event_id
+        )
+    clear_finished = payload.get("clear_finished", False)
+    if not isinstance(clear_finished, bool):
+        raise DuplexCommandError(
+            "session.stats.get clear_finished must be a boolean", code="bad_event", event_id=event_id
+        )
+    return GetSessionStats(
+        event_id=event_id,
+        turn_ids=tuple(turn_ids) if turn_ids is not None else None,
+        epoch=epoch,
+        clear_finished=clear_finished,
+    )
 
 
 def translate_realtime_command(
@@ -271,6 +299,9 @@ def translate_realtime_command(
 
     if event_type == "session.heartbeat":
         return Heartbeat(event_id=event_id)
+
+    if event_type == "session.stats.get":
+        return _get_session_stats(payload, event_id=event_id)
 
     if event_type == "conversation.item.retrieve":
         # The projected conversation items live engine-side; the runner answers.

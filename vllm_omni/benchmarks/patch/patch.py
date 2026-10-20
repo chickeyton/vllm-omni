@@ -3199,6 +3199,45 @@ class _RealtimeTTSProbe:
         assert self._client is not None
         await self._client.close(timeout_s=timeout_s)
 
+    async def turn_session_stats(self, response_id: str, *, timeout_s: float = 5.0) -> dict[str, object]:
+        """Server-side busy RTF and stall ratio of the turn that produced ``response_id`` (RFC #8325).
+
+        Empty when the server does not collect session stats. Polls briefly
+        until the turn's metrics are final; a turn that is still not final at
+        the deadline is reported as such, never as a number.
+        """
+        from vllm_omni.benchmarks.duplex_session_metrics import session_stats_turn_metrics
+
+        assert self._client is not None
+        capabilities = (self._client.session_info or {}).get("capabilities")
+        if not isinstance(capabilities, Mapping) or capabilities.get("supports_session_stats") is not True:
+            return {}
+        deadline = time.monotonic() + timeout_s
+        while True:
+            stats = await self._client.get_session_stats(timeout_s=timeout_s)
+            turns = stats.get("turns")
+            turn = next(
+                (
+                    candidate
+                    for candidate in (turns if isinstance(turns, list) else ())
+                    if isinstance(candidate, Mapping) and response_id in (candidate.get("response_ids") or ())
+                ),
+                None,
+            )
+            metrics = session_stats_turn_metrics(turn) if turn is not None else {"final": False}
+            if metrics.get("final") or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.1)
+        return {
+            "busy_rtf": metrics.get("busy_rtf"),
+            "stall_ratio": metrics.get("stall_ratio"),
+            "server_generation_ms": metrics.get("generation_ms"),
+            "server_turn_span_ms": metrics.get("turn_span_ms"),
+            "server_stall_ms": metrics.get("stall_ms"),
+            "server_audio_ms": metrics.get("audio_ms"),
+            "server_stats_final": bool(metrics.get("final")),
+        }
+
 
 async def async_request_openai_realtime_duplex(
     request_func_input: RequestFuncInput,
@@ -3317,6 +3356,7 @@ async def async_request_openai_realtime_duplex(
                         # The client reports raw data only; the RTF is derived
                         # here with the canonical server-side definition.
                         "rtf": _audio_rtf_from_raw_metric(request_metrics),
+                        **(await client.turn_session_stats(response_id)),
                     }
                 )
                 response_audio = client.events.audio_bytes(response_id)

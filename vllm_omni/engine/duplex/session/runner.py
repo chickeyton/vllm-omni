@@ -45,6 +45,7 @@ from vllm_omni.engine.duplex.commands import (
     CreateResponse,
     DeleteItem,
     DuplexCommand,
+    GetSessionStats,
     Heartbeat,
     SignalTurn,
     TruncateItem,
@@ -70,6 +71,7 @@ from vllm_omni.engine.duplex.events import (
     ResponseDone,
     SessionExpired,
     SessionHeartbeatAck,
+    SessionStats,
 )
 from vllm_omni.engine.duplex.plugin import (
     DuplexModelPlugin,
@@ -323,6 +325,11 @@ class DuplexSessionRunner:
         input_item_id: str | None = None,
     ) -> bool:
         """Accept one stage output (orchestrator loop); return True when it must not be forwarded."""
+        perf = self.session.perf
+        if perf is not None and (context.stage_work or context.output_chunk is not None):
+            # Recorded here, not on the mailbox: forwarded outputs never reach it.
+            perf.record_stage_work(context.stage_work)
+            perf.mark_handled({(row[1], row[2]) for row in context.stage_work})
         if self.model.is_input_transcription(request_id):
             self._mailbox.put_nowait(
                 StageOutput(
@@ -808,6 +815,8 @@ class DuplexSessionRunner:
                 self._promote_deferred_overlap_later(pending_observation, precreate_response)
         elif isinstance(command, Heartbeat):
             self._on_heartbeat(command)
+        elif isinstance(command, GetSessionStats):
+            self._on_get_session_stats(command)
         elif isinstance(command, CreateItem):
             control = resolve_create_item(projector, command)
             self._emit_events(control.events)
@@ -851,6 +860,28 @@ class DuplexSessionRunner:
         self._begin_close(reason)
         await self.close(reason, emit_closed=False)
         self.manager.close_from_runner(self, reason)
+
+    def _on_get_session_stats(self, command: GetSessionStats) -> None:
+        """Answer ``session.stats.get`` with a snapshot of the perf ledger (RFC #8325).
+
+        It rides the same mailbox as appends, so the snapshot reflects every
+        command the client sent before it.
+        """
+        perf = self.session.perf
+        if perf is None:
+            self._emit_error(
+                "session_stats_disabled",
+                "This deployment does not collect session stats (duplex_session.collect_stats)",
+                event_id=command.event_id,
+            )
+            return
+        epoch = command.epoch
+        if epoch is None and command.turn_ids is not None:
+            epoch = self.session.epoch
+        stats = perf.snapshot(turn_ids=command.turn_ids, epoch=epoch)
+        if command.clear_finished:
+            perf.clear_finished(turn_ids=command.turn_ids, epoch=epoch)
+        self._emit_events([SessionStats(request_event_id=command.event_id, stats=stats)])
 
     def _on_heartbeat(self, command: Heartbeat) -> None:
         try:
@@ -1537,6 +1568,7 @@ class DuplexSessionRunner:
             input_audio_parts=input_audio_parts,
             on_append_accepted=on_append_accepted,
             before_append=before_append,
+            silence_continuation=silence_continuation,
         )
 
         self._reset_failed_append_tail()

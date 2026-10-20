@@ -15,6 +15,7 @@ from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import ConstantList
 
+from vllm_omni.core.sched.duplex_stage_work import parse_perf_chunk, request_perf_chunk, set_request_perf_chunk
 from vllm_omni.data_entry_keys import MetaStruct, OmniPayloadStruct, unflatten_payload
 
 from ..adapter import construct_next_stage_streaming_input_prompt
@@ -504,6 +505,8 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             "is_segment_finished": is_segment_finished,
             "new_token_ids": tuple(int(token_id) for token_id in (new_token_ids or ())),
             "segment_generation": generation,
+            # Captured on the scheduler thread: the save loop may run after the next chunk's update.
+            "duplex_perf_chunk": request_perf_chunk(request),
         }
 
         reject_reason = None
@@ -627,6 +630,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 payload_data["meta"] = meta
             payload_finished = self._is_truthy_scalar(meta.get("finished"))
             payload_segment_finished = self._is_truthy_scalar(meta.get("is_segment_finished"))
+            set_request_perf_chunk(request, parse_perf_chunk(meta.get("duplex_perf_chunk")))
             if self.model_mode == "ar":
                 was_resumable = bool(getattr(request, "resumable", False))
                 meta["streaming_prompt_recompute"] = False
@@ -961,6 +965,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             payload_data.meta.finished = torch.tensor(is_finished, dtype=torch.bool)
         if payload_data.meta.is_segment_finished is None:
             payload_data.meta.is_segment_finished = torch.tensor(is_segment_finished, dtype=torch.bool)
+        perf_chunk = task.get("duplex_perf_chunk")
+        if perf_chunk is not None:
+            payload_data.meta.duplex_perf_chunk = list(perf_chunk)
 
         if sender_token is not None and not self._sender_generation_is_active(
             external_req_id, sender_token, is_terminal=is_finished
