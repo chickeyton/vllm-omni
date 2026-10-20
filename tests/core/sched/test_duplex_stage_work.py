@@ -28,7 +28,7 @@ class _Clock:
 
 
 def _request(request_id: str, chunk: list[int] | None) -> SimpleNamespace:
-    duplex = {"epoch": 0, "seq": 9} if chunk is None else {"perf_chunk": chunk}
+    duplex: dict[str, object] = {"epoch": 0, "seq": 9} if chunk is None else {"perf_chunk": chunk}
     return SimpleNamespace(request_id=request_id, model_intermediate_buffer={"duplex": duplex})
 
 
