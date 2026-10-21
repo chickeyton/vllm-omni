@@ -3203,19 +3203,28 @@ class _RealtimeTTSProbe:
     async def turn_session_stats(self, response_id: str, *, timeout_s: float = 5.0) -> dict[str, object]:
         """Server-side busy RTF and stall ratio of the turn that produced ``response_id`` (RFC #8325).
 
-        Empty when the server does not collect session stats. Polls briefly
-        until the turn's metrics are final; a turn that is still not final at
-        the deadline is reported as such, never as a number.
+        Empty when the server does not collect session stats. Polls until the
+        turn's metrics are final, within one overall ``timeout_s``. The stats are
+        auxiliary: a query that times out, a closed session or a server error
+        leaves the turn's client metrics intact and reports ``server_stats_final:
+        False``, never a number.
         """
         from vllm_omni.benchmarks.duplex_session_metrics import session_stats_turn_metrics
+        from vllm_omni.clients.duplex import DuplexClientError
 
         assert self._client is not None
         capabilities = (self._client.session_info or {}).get("capabilities")
         if not isinstance(capabilities, Mapping) or capabilities.get("supports_session_stats") is not True:
             return {}
         deadline = time.monotonic() + timeout_s
-        while True:
-            stats = await self._client.get_session_stats(timeout_s=timeout_s)
+        metrics: dict[str, object] = {"final": False}
+        turn: Mapping[str, object] | None = None
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                stats = await self._client.get_session_stats(timeout_s=remaining)
+            except (asyncio.TimeoutError, DuplexClientError) as exc:
+                logger.warning("Seed-TTS session stats unavailable for %s: %s", response_id, exc)
+                break
             turns = stats.get("turns")
             turn = next(
                 (
@@ -3226,9 +3235,18 @@ class _RealtimeTTSProbe:
                 None,
             )
             metrics = session_stats_turn_metrics(turn) if turn is not None else {"final": False}
-            if metrics.get("final") or time.monotonic() >= deadline:
+            if metrics.get("final"):
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        chunks = turn.get("chunks") if turn is not None else None
+        stage_ids = sorted(
+            {
+                work["stage_id"]
+                for chunk in (chunks if isinstance(chunks, list) else ())
+                for work in chunk.get("stage_work") or ()
+                if work.get("spans")
+            }
+        )
         return {
             "busy_rtf": metrics.get("busy_rtf"),
             "stall_ratio": metrics.get("stall_ratio"),
@@ -3237,6 +3255,8 @@ class _RealtimeTTSProbe:
             "server_stall_ms": metrics.get("stall_ms"),
             "server_audio_ms": metrics.get("audio_ms"),
             "server_stats_final": bool(metrics.get("final")),
+            # Stages that reported work for the turn: shows the chunk id reached each stage.
+            "server_stage_ids": stage_ids,
         }
 
 

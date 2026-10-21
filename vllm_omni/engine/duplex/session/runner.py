@@ -327,10 +327,10 @@ class DuplexSessionRunner:
     ) -> bool:
         """Accept one stage output (orchestrator loop); return True when it must not be forwarded."""
         perf = self.session.perf
-        if perf is not None and context.stage_work:
+        if perf is not None and (context.stage_work or context.output_chunk is not None):
             # Recorded here, not on the mailbox: forwarded outputs never reach it.
             perf.record_stage_work(context.stage_work)
-            perf.mark_handled({(row[1], row[2]) for row in context.stage_work})
+            perf.mark_handled(context.perf_chunks())
         if self.model.is_input_transcription(request_id):
             self._mailbox.put_nowait(
                 StageOutput(

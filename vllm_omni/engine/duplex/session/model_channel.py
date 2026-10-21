@@ -718,7 +718,7 @@ class ModelChannel:
         finally:
             if perf is not None:
                 # Handling (projection, audio encoding, emission) is part of the chunk's in-engine time.
-                perf.mark_handled({(row[1], row[2]) for row in item.context.stage_work})
+                perf.mark_handled(item.context.perf_chunks())
 
     async def _on_stage_output_item(self, item: StageOutput) -> CommittedInputContinuation | None:
         session = self._ctx.session
@@ -1436,6 +1436,8 @@ class ModelChannel:
                             "playback": playback,
                         }
                     )
+                    if session.perf is not None:
+                        session.perf.end_response(drained_response_id)
                 return close_reason, emitted_response
             if isinstance(data_plane_request_id, str) and not auto_response:
                 data_plane.close_stream(data_plane_request_id)

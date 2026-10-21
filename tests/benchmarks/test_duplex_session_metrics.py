@@ -179,6 +179,7 @@ def test_turn_metrics_union_pipelined_chunks_and_skip_input_waits() -> None:
         "epoch": 0,
         "turn_id": 3,
         "status": "done",
+        "final": True,
         "chunks": [
             _stats_chunk(1, 0, 100, {0: [(10, 40)], 1: [(40, 50)]}),
             _stats_chunk(2, 1000, 1070, {0: [(1010, 50)]}),
@@ -200,10 +201,11 @@ def test_turn_metrics_union_pipelined_chunks_and_skip_input_waits() -> None:
 @pytest.mark.parametrize(
     "turn",
     [
-        {"status": "open", "chunks": [_stats_chunk(1, 0, 10, {})]},
-        # A queued chunk without spans keeps the turn from being final.
-        {"status": "done", "chunks": [_stats_chunk(1, 0, None, {}, complete=False)]},
-        {"status": "done", "chunks": [_stats_chunk(1, 0, 10, {0: [(0, 5)]}, truncated=True)], "audio": [_audio(100.0)]},
+        # The server's verdict decides: not final means no numbers, even if every chunk looks done.
+        {"status": "done", "final": False, "chunks": [_stats_chunk(1, 0, 10, {0: [(0, 5)]})], "audio": [_audio(1.0)]},
+        {"status": "cancelled", "final": False, "chunks": [_stats_chunk(1, 0, None, {}, complete=False)]},
+        # A final flag without chunk end times is not trusted either.
+        {"status": "done", "final": True, "chunks": [_stats_chunk(1, 0, None, {})]},
     ],
 )
 def test_turn_metrics_are_withheld_until_final(turn: dict[str, object]) -> None:
@@ -216,6 +218,7 @@ def test_listen_turn_has_stall_time_but_no_ratios() -> None:
         "epoch": 0,
         "turn_id": 0,
         "status": "listen",
+        "final": True,
         "chunks": [_stats_chunk(1, 0, 30, {0: [(10, 10)]})],
         "audio": [],
     }

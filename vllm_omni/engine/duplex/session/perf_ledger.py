@@ -7,9 +7,18 @@ the stage processes' step spans, and each turn's emitted audio. Clients derive
 busy RTF and the stall ratio from a ``session.stats`` snapshot
 (``vllm_omni.benchmarks.duplex_session_metrics``).
 
+A turn is **final** once its numbers can no longer change: the model turn
+completed, every response bound to it ended (a draining TTS response included),
+and every chunk was handled at least once. Closing a turn alone does not make it
+final. A cancelled turn (barge-in, session close) never becomes final: the engine
+reports no abort completion, so its in-flight work has no end time. Spans that
+arrive for a final turn are counted in ``late_spans`` instead of changing it.
+
 It lives on ``DuplexEngineSession`` and is mutated only on the orchestrator loop,
-so it needs no locking. Times are ``time.monotonic_ns()``, which every process on
-the host shares; snapshots report them relative to the session's open time.
+so it needs no locking. Times are ``time.monotonic_ns()`` from the API process
+and the stage processes, so they are comparable only when every stage runs on
+the same host; ``duplex_session.collect_stats`` is single-host only. Snapshots
+report times relative to the session's open time.
 """
 
 from __future__ import annotations
@@ -45,39 +54,51 @@ class ChunkPerfRecord:
     # stage_id -> [[start_ns, duration_ns], ...], absolute monotonic time
     stage_work: dict[int, list[list[int]]] = field(default_factory=dict)
     # Latest time the API process finished handling a stage output of this chunk,
-    # including emitting its audio.
+    # including emitting its audio. None while the chunk is still queued.
     handled_ns: int | None = None
-    complete: bool = False
     truncated: bool = False
     num_spans: int = 0
 
     def done_ns(self) -> int | None:
-        """End of the in-engine interval: the last handling or span end."""
-        if not self.complete:
+        """End of the in-engine interval: the last handling or span end; None until handled."""
+        if self.handled_ns is None:
             return None
-        ends = [self.submitted_ns]
-        if self.handled_ns is not None:
-            ends.append(self.handled_ns)
-        ends.extend(start + duration for spans in self.stage_work.values() for start, duration in spans)
-        return max(ends)
+        span_ends = (start + duration for spans in self.stage_work.values() for start, duration in spans)
+        return max(self.handled_ns, self.submitted_ns, *span_ends)
 
 
 @dataclass
 class TurnPerfRecord:
     epoch: int
     turn_id: int
-    status: str = TURN_OPEN
+    closed: bool = False
+    cancelled: bool = False
     response_ids: list[str] = field(default_factory=list)
+    open_responses: set[str] = field(default_factory=set)
     chunks: dict[int, ChunkPerfRecord] = field(default_factory=dict)
     audio: list[AudioPiece] = field(default_factory=list)
+    late_spans: int = 0
 
     @property
     def key(self) -> tuple[int, int]:
         return self.epoch, self.turn_id
 
     @property
-    def finished(self) -> bool:
-        return self.status != TURN_OPEN
+    def status(self) -> str:
+        if self.cancelled:
+            return TURN_CANCELLED
+        if not self.closed:
+            return TURN_OPEN
+        return TURN_DONE if self.audio else TURN_LISTEN
+
+    @property
+    def final(self) -> bool:
+        return (
+            self.closed
+            and not self.cancelled
+            and not self.open_responses
+            and all(chunk.handled_ns is not None and not chunk.truncated for chunk in self.chunks.values())
+        )
 
 
 class SessionPerfLedger:
@@ -99,7 +120,7 @@ class SessionPerfLedger:
         self.max_spans_per_chunk = max(1, int(max_spans_per_chunk))
         self.dropped_turns = 0
         self.dropped_spans = 0
-        # Insertion order is turn order; eviction takes the oldest finished turn.
+        # Insertion order is turn order; eviction takes the oldest final or cancelled turn.
         self._turns: dict[tuple[int, int], TurnPerfRecord] = {}
         self._chunk_turns: dict[tuple[int, int], tuple[int, int]] = {}
         self._response_turns: dict[str, tuple[int, int]] = {}
@@ -111,26 +132,21 @@ class SessionPerfLedger:
     # Recording                                                          #
     # ------------------------------------------------------------------ #
 
-    def open_chunk(
-        self,
-        *,
-        epoch: int,
-        seq: int,
-        turn_id: int,
-        turn_seq: int,
-        submitted_ns: int,
-    ) -> None:
-        turn = self._turn(epoch, turn_id, create=True)
-        if turn is None:
-            return
+    def open_chunk(self, *, epoch: int, seq: int, turn_id: int, turn_seq: int, submitted_ns: int) -> None:
+        turn = self._turn(epoch, turn_id)
         turn.chunks[seq] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, submitted_ns=submitted_ns)
         self._chunk_turns[(epoch, seq)] = turn.key
 
     def record_stage_work(self, rows: Iterable[Sequence[int]]) -> None:
         """Add ``(stage_id, epoch, seq, start_ns, duration_ns)`` spans; unknown chunks are ignored."""
         for stage_id, epoch, seq, start_ns, duration_ns in rows:
-            chunk = self._chunk(epoch, seq)
-            if chunk is None:
+            found = self._chunk(epoch, seq)
+            if found is None:
+                continue
+            turn, chunk = found
+            if turn.final:
+                # Reported numbers must not move; count the span instead.
+                turn.late_spans += 1
                 continue
             if chunk.num_spans >= self.max_spans_per_chunk:
                 chunk.truncated = True
@@ -148,47 +164,52 @@ class SessionPerfLedger:
     def mark_handled(self, chunks: Iterable[tuple[int, int]]) -> None:
         now = self._clock()
         for epoch, seq in chunks:
-            chunk = self._chunk(epoch, seq)
-            if chunk is not None and (chunk.handled_ns is None or now > chunk.handled_ns):
+            found = self._chunk(epoch, seq)
+            if found is None or found[0].final:
+                continue
+            chunk = found[1]
+            if chunk.handled_ns is None or now > chunk.handled_ns:
                 chunk.handled_ns = now
 
-    def record_audio(self, *, response_id: str, duration_ms: float, emitted_ns: int | None = None) -> None:
+    def record_audio(self, *, response_id: str, duration_ms: float) -> None:
         """Add one emitted audio delta to the turn its response belongs to."""
         turn_key = self._response_turns.get(response_id)
         turn = self._turns.get(turn_key) if turn_key is not None else None
-        if turn is None or duration_ms <= 0:
+        if turn is None or turn.final or duration_ms <= 0:
             return
-        turn.audio.append(
-            AudioPiece(
-                response_id=response_id,
-                emitted_ns=self._clock() if emitted_ns is None else emitted_ns,
-                duration_ms=float(duration_ms),
-            )
-        )
+        turn.audio.append(AudioPiece(response_id=response_id, emitted_ns=self._clock(), duration_ms=float(duration_ms)))
 
     def bind_response(self, *, epoch: int, turn_id: int, response_id: str) -> None:
-        turn = self._turn(epoch, turn_id, create=True)
-        if turn is not None and response_id not in turn.response_ids:
+        turn = self._turn(epoch, turn_id)
+        if response_id not in turn.response_ids:
             turn.response_ids.append(response_id)
+            turn.open_responses.add(response_id)
             self._response_turns[response_id] = turn.key
 
+    def end_response(self, response_id: str) -> None:
+        """The response finished (``response.done``); its turn may now become final."""
+        turn_key = self._response_turns.get(response_id)
+        turn = self._turns.get(turn_key) if turn_key is not None else None
+        if turn is not None:
+            turn.open_responses.discard(response_id)
+
     def close_turns(self, *, epoch: int, up_to_turn_id: int) -> None:
-        """Close every open turn of ``epoch`` up to ``up_to_turn_id`` (the model turn completed)."""
+        """The model turn completed: close every open turn of ``epoch`` up to ``up_to_turn_id``."""
         for turn in self._turns.values():
-            if turn.epoch == epoch and turn.turn_id <= up_to_turn_id and not turn.finished:
-                self._close(turn, TURN_DONE if turn.audio else TURN_LISTEN)
+            if turn.epoch == epoch and turn.turn_id <= up_to_turn_id:
+                turn.closed = True
 
     def cancel_epoch(self, epoch: int) -> None:
-        """Barge-in: every open turn of the old epoch ends cancelled."""
+        """Barge-in: every turn of the old epoch that is not final yet ends cancelled."""
         for turn in self._turns.values():
-            if turn.epoch == epoch and not turn.finished:
-                self._close(turn, TURN_CANCELLED)
+            if turn.epoch == epoch and not turn.final:
+                turn.cancelled = True
 
     def close_all(self) -> None:
-        """Session close: nothing more will run, so open turns end where they are."""
+        """Session close: every turn that is not final yet ends cancelled."""
         for turn in self._turns.values():
-            if not turn.finished:
-                self._close(turn, TURN_CANCELLED)
+            if not turn.final:
+                turn.cancelled = True
 
     # ------------------------------------------------------------------ #
     # Query                                                              #
@@ -202,7 +223,7 @@ class SessionPerfLedger:
             "clock": {"source": "CLOCK_MONOTONIC", "unit": "ns", "origin": "session_opened"},
             "generated_at_ns": self._clock() - origin,
             "stages": [{"stage_id": stage_id, "name": name} for stage_id, name in self.stages],
-            "turns": [self._turn_document(turn, origin) for turn in self._turns.values()],
+            "turns": [_turn_document(turn, origin) for turn in self._turns.values()],
             "dropped_turns": self.dropped_turns,
             "dropped_spans": self.dropped_spans,
         }
@@ -211,28 +232,24 @@ class SessionPerfLedger:
     # Internals                                                          #
     # ------------------------------------------------------------------ #
 
-    def _turn(self, epoch: int, turn_id: int, *, create: bool) -> TurnPerfRecord | None:
+    def _turn(self, epoch: int, turn_id: int) -> TurnPerfRecord:
         key = (int(epoch), int(turn_id))
         turn = self._turns.get(key)
-        if turn is None and create:
+        if turn is None:
             if len(self._turns) >= self.max_turns:
                 self._evict()
             turn = TurnPerfRecord(epoch=key[0], turn_id=key[1])
             self._turns[key] = turn
         return turn
 
-    def _chunk(self, epoch: int, seq: int) -> ChunkPerfRecord | None:
+    def _chunk(self, epoch: int, seq: int) -> tuple[TurnPerfRecord, ChunkPerfRecord] | None:
         turn_key = self._chunk_turns.get((int(epoch), int(seq)))
         turn = self._turns.get(turn_key) if turn_key is not None else None
-        return turn.chunks.get(int(seq)) if turn is not None else None
-
-    def _close(self, turn: TurnPerfRecord, status: str) -> None:
-        turn.status = status
-        for chunk in turn.chunks.values():
-            chunk.complete = True
+        chunk = turn.chunks.get(int(seq)) if turn is not None else None
+        return (turn, chunk) if turn is not None and chunk is not None else None
 
     def _evict(self) -> None:
-        victim = next((turn for turn in self._turns.values() if turn.finished), None)
+        victim = next((turn for turn in self._turns.values() if turn.final or turn.cancelled), None)
         if victim is None:
             victim = next(iter(self._turns.values()))
         del self._turns[victim.key]
@@ -244,33 +261,36 @@ class SessionPerfLedger:
                 del self._response_turns[response_id]
         self.dropped_turns += 1
 
-    @staticmethod
-    def _turn_document(turn: TurnPerfRecord, origin: int) -> dict[str, object]:
-        return {
-            "epoch": turn.epoch,
-            "turn_id": turn.turn_id,
-            "response_ids": list(turn.response_ids),
-            "status": turn.status,
-            "chunks": [_chunk_document(chunk, origin) for chunk in turn.chunks.values()],
-            "audio": [
-                {
-                    "response_id": piece.response_id,
-                    "emitted_ns": piece.emitted_ns - origin,
-                    "duration_ms": piece.duration_ms,
-                }
-                for piece in turn.audio
-            ],
-        }
+
+def _turn_document(turn: TurnPerfRecord, origin: int) -> dict[str, object]:
+    final = turn.final
+    return {
+        "epoch": turn.epoch,
+        "turn_id": turn.turn_id,
+        "response_ids": list(turn.response_ids),
+        "status": turn.status,
+        "final": final,
+        "late_spans": turn.late_spans,
+        "chunks": [_chunk_document(chunk, origin, final=final) for chunk in turn.chunks.values()],
+        "audio": [
+            {
+                "response_id": piece.response_id,
+                "emitted_ns": piece.emitted_ns - origin,
+                "duration_ms": piece.duration_ms,
+            }
+            for piece in turn.audio
+        ],
+    }
 
 
-def _chunk_document(chunk: ChunkPerfRecord, origin: int) -> dict[str, object]:
-    done_ns = chunk.done_ns()
+def _chunk_document(chunk: ChunkPerfRecord, origin: int, *, final: bool) -> dict[str, object]:
+    done_ns = chunk.done_ns() if final else None
     return {
         "seq": chunk.seq,
         "turn_seq": chunk.turn_seq,
         "submitted_ns": chunk.submitted_ns - origin,
         "done_ns": None if done_ns is None else done_ns - origin,
-        "complete": chunk.complete,
+        "complete": final,
         "truncated": chunk.truncated,
         "stage_work": [
             {"stage_id": stage_id, "spans": [[start - origin, duration] for start, duration in spans]}

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm_omni.core.sched import duplex_stage_work
 from vllm_omni.core.sched.duplex_stage_work import (
     DuplexStageWorkRecorder,
     parse_perf_chunk,
@@ -17,6 +18,12 @@ from vllm_omni.core.sched.duplex_stage_work import (
 from vllm_omni.engine import OmniEngineCoreOutput, OmniEngineCoreOutputs
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+@pytest.fixture(autouse=True)
+def _no_chunk_seen_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The flag is per process; reset it so each test starts like a fresh stage.
+    monkeypatch.setattr(duplex_stage_work, "_perf_chunk_seen", False)
 
 
 class _Clock:
@@ -32,8 +39,15 @@ def _request(request_id: str, chunk: list[int] | None) -> SimpleNamespace:
     return SimpleNamespace(request_id=request_id, model_intermediate_buffer={"duplex": duplex})
 
 
+def _scheduled(*request_ids: str, new: tuple[str, ...] = ()) -> SimpleNamespace:
+    return SimpleNamespace(
+        num_scheduled_tokens={request_id: 1 for request_id in request_ids},
+        scheduled_new_reqs=[SimpleNamespace(req_id=request_id) for request_id in new],
+    )
+
+
 def _step(recorder, clock, requests, *, begin: int, end: int, emit: tuple[str, ...]):
-    scheduler_output = SimpleNamespace(num_scheduled_tokens={request_id: 1 for request_id in requests})
+    scheduler_output = _scheduled(*requests, new=tuple(requests))
     clock.now = begin
     recorder.step_begin(scheduler_output, requests)
     clock.now = end
@@ -103,8 +117,8 @@ def test_async_scheduling_attributes_each_update_to_the_step_it_scheduled() -> N
     recorder = DuplexStageWorkRecorder(clock=clock)
     request = _request("r", [0, 1])
     requests = {"r": request}
-    first = SimpleNamespace(num_scheduled_tokens={"r": 1})
-    second = SimpleNamespace(num_scheduled_tokens={"r": 1})
+    first = _scheduled("r", new=("r",))
+    second = _scheduled("r")
 
     clock.now = 0
     recorder.step_begin(first, requests)
@@ -120,6 +134,45 @@ def test_async_scheduling_attributes_each_update_to_the_step_it_scheduled() -> N
 
     assert out_first[0].outputs[0].stage_work == [[0, 1, 0, 20]]
     assert out_second[0].outputs[0].stage_work == [[0, 2, 5, 25]]
+
+
+def test_a_stage_that_never_saw_a_chunk_id_only_checks_new_requests() -> None:
+    clock = _Clock()
+    recorder = DuplexStageWorkRecorder(clock=clock)
+    unmeasured = {"a": _request("a", None)}
+
+    # Collection off: the running request is not even looked up.
+    recorder.step_begin(_scheduled("a", "missing"), unmeasured)
+    assert recorder._in_flight == {}
+
+    # A measured request admitted later switches the stage on for good.
+    requests = {**unmeasured, "m": _request("m", [0, 1])}
+    recorder.step_begin(_scheduled("a", "m", new=("m",)), requests)
+    assert len(recorder._in_flight) == 1
+
+
+def test_an_update_carrying_a_chunk_id_also_switches_the_stage_on() -> None:
+    clock = _Clock()
+    recorder = DuplexStageWorkRecorder(clock=clock)
+    request = _request("r", None)
+    set_request_perf_chunk(request, (0, 3))
+    outputs = _step(recorder, clock, {"r": request}, begin=0, end=4, emit=("r",))
+    assert outputs["r"].stage_work == [[0, 3, 0, 4]]
+
+
+def test_step_chunk_is_the_chunk_scheduled_even_after_a_queued_update_lands() -> None:
+    clock = _Clock()
+    recorder = DuplexStageWorkRecorder(clock=clock)
+    talker = _request("talker", [0, 1])
+    scheduler_output = _scheduled("talker", new=("talker",))
+    recorder.step_begin(scheduler_output, {"talker": talker})
+    # A resumable stop applies the queued chunk-2 update inside update_from_output,
+    # before the chunk-1 output is saved for the connector.
+    set_request_perf_chunk(talker, (0, 2))
+    assert request_perf_chunk(talker) == (0, 2)
+    assert recorder.step_chunk(scheduler_output, "talker") == (0, 1)
+    assert recorder.step_chunk(scheduler_output, "unknown") is None
+    assert recorder.step_chunk(_scheduled(), "talker") is None
 
 
 def test_stage_work_rows_drop_malformed_rows() -> None:

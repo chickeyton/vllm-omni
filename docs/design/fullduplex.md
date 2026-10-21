@@ -471,8 +471,12 @@ for queue updates and the final validity check before delivery.
   response it belongs to; turns close on model-turn completion, barge-in or
   close. The runner answers `session.stats.get` from the ledger on
   the ordered mailbox; clients derive busy RTF and stall ratio
-  (`vllm_omni.benchmarks.duplex_session_metrics`). With the flag off nothing
-  is stamped, recorded or attached.
+  (`vllm_omni.benchmarks.duplex_session_metrics`). A turn is reported final
+  only after the model turn completed, its responses ended and every chunk was
+  handled; cancelled turns never become final, and later spans are counted in
+  `late_spans`. With the flag off nothing is stamped or attached, and stage
+  schedulers check only newly scheduled requests. Single-host only: the API and
+  stage processes must share one `CLOCK_MONOTONIC`.
 
 ### Semantic turn decisions
 

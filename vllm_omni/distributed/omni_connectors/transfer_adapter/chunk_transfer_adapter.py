@@ -397,6 +397,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         confirmed_num_computed_tokens: int | None = None,
         segment_generation: int | None = None,
         force_request_finished: bool = False,
+        duplex_perf_chunk: tuple[int, int] | None = None,
     ):
         """Build and enqueue one chunk for asynchronous sending.
 
@@ -426,6 +427,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
                 the terminal has to be enqueued before ``finish_requests``,
                 because ``finish_requests`` skips requests that already report
                 ``is_finished()``. See ``_finish_parked_streaming_session``.
+            duplex_perf_chunk: the duplex chunk the producing step worked on
+                (RFC #8325), captured before a queued update can replace it;
+                defaults to the request's current chunk.
         """
         task = self._admit_save(
             multimodal_output,
@@ -436,6 +440,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             segment_generation,
             force_request_finished,
             snapshot=self.custom_process_next_stage_input_func is not None,
+            duplex_perf_chunk=duplex_perf_chunk,
         )
         if task is not None:
             self._pending_save_reqs.append(task)
@@ -470,6 +475,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         force_request_finished: bool = False,
         *,
         snapshot: bool,
+        duplex_perf_chunk: tuple[int, int] | None = None,
     ) -> dict[str, Any] | None:
         """Per-request admission of a chunk; returns the task to queue, or None."""
         is_finished = force_request_finished or (request.is_finished() and not request.resumable)
@@ -506,7 +512,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             "new_token_ids": tuple(int(token_id) for token_id in (new_token_ids or ())),
             "segment_generation": generation,
             # Captured on the scheduler thread: the save loop may run after the next chunk's update.
-            "duplex_perf_chunk": request_perf_chunk(request),
+            "duplex_perf_chunk": duplex_perf_chunk if duplex_perf_chunk is not None else request_perf_chunk(request),
         }
 
         reject_reason = None

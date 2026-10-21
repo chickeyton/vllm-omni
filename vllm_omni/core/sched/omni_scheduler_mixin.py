@@ -722,6 +722,10 @@ class OmniSchedulerMixin(_SchedulerMixinBase):
         """Close this step's duplex work spans and attach them to its outputs (RFC #8325)."""
         OmniSchedulerMixin._duplex_stage_work_recorder(self).step_end(scheduler_output, engine_core_outputs)
 
+    def _duplex_step_chunk(self, scheduler_output: SchedulerOutput, req_id: str) -> tuple[int, int] | None:
+        """The duplex chunk ``req_id`` worked on in this step (RFC #8325), or None."""
+        return OmniSchedulerMixin._duplex_stage_work_recorder(self).step_chunk(scheduler_output, req_id)
+
     def _rewrap_scheduled_new_reqs(self, scheduler_output: SchedulerOutput) -> None:
         """Attach Omni payloads without reconstructing existing Omni entries."""
         scheduler_output.scheduled_new_reqs = [  # type: ignore[assignment]

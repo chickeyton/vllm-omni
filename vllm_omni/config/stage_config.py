@@ -710,6 +710,7 @@ class DuplexSessionRuntimeConfig:
     warmup_frames: int = 0
     # Record per-turn stage work and emitted audio and answer the client's
     # ``session.stats.get`` (RFC #8325). Off: nothing is recorded or attached.
+    # Single-host only: stage and API timestamps share one CLOCK_MONOTONIC.
     collect_stats: bool = False
 
     def __post_init__(self) -> None:
