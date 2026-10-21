@@ -110,7 +110,7 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
     """Busy RTF and stall ratio of one ``session.stats`` turn (RFC #8325 §1.3).
 
     ``busy RTF = G / A``: ``G`` is the union of every stage's work spans over all
-    of the turn's chunks, ``A`` the audio the turn emitted. The stall time
+    of the turn's chunks, ``A`` the audio the turn emitted (``turn["audio"]``). The stall time
     ``W - G`` is the part of the turn span ``W`` (the union of each chunk's
     ``[submitted_ns, done_ns]``) in which no stage worked on the turn. A turn
     that is not final yet returns ``{"final": False}`` and no numbers: a queued
@@ -121,13 +121,13 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
         return {"final": False, "epoch": turn.get("epoch"), "turn_id": turn.get("turn_id")}
     all_spans: list[Sequence[int]] = []
     in_engine: list[tuple[int, int]] = []
-    audio_ms = 0.0
     for chunk in chunks:
         for work in chunk.get("stage_work") or ():
             all_spans.extend(work.get("spans") or ())
         submitted_ns = int(chunk["submitted_ns"])
         in_engine.append((submitted_ns, int(chunk["done_ns"]) - submitted_ns))
-        audio_ms += sum(float(piece.get("duration_ms") or 0.0) for piece in chunk.get("audio") or ())
+    audio = turn.get("audio")
+    audio_ms = sum(float(piece.get("duration_ms") or 0.0) for piece in audio) if isinstance(audio, list) else 0.0
     generation_ms = union_ns(all_spans) / 1e6
     turn_span_ms = union_ns(in_engine) / 1e6
     stall_ms = max(0.0, turn_span_ms - generation_ms)

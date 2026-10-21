@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Per-session record of stage work and emitted audio, by turn and chunk (RFC #8325).
+"""Per-session record of stage work and emitted audio, by turn (RFC #8325).
 
-The ledger keeps raw data only: the stage processes' step spans, each chunk's
-acceptance and handling times, and the audio each chunk produced. Clients derive
+The ledger keeps raw data only: each chunk's acceptance and handling times and
+the stage processes' step spans, and each turn's emitted audio. Clients derive
 busy RTF and the stall ratio from a ``session.stats`` snapshot
 (``vllm_omni.benchmarks.duplex_session_metrics``).
 
@@ -29,9 +29,6 @@ TURN_DONE = "done"
 TURN_CANCELLED = "cancelled"
 TURN_LISTEN = "listen"
 
-CHUNK_INPUT = "input"
-CHUNK_SILENCE_CONTINUATION = "silence_continuation"
-
 
 @dataclass
 class AudioPiece:
@@ -44,26 +41,24 @@ class AudioPiece:
 class ChunkPerfRecord:
     seq: int
     turn_seq: int
-    kind: str
     submitted_ns: int
     # stage_id -> [[start_ns, duration_ns], ...], absolute monotonic time
     stage_work: dict[int, list[list[int]]] = field(default_factory=dict)
-    audio: list[AudioPiece] = field(default_factory=list)
-    # Latest time the API process finished handling a stage output of this chunk.
+    # Latest time the API process finished handling a stage output of this chunk,
+    # including emitting its audio.
     handled_ns: int | None = None
     complete: bool = False
     truncated: bool = False
     num_spans: int = 0
 
     def done_ns(self) -> int | None:
-        """End of the in-engine interval: the last handling, span end or audio emission."""
+        """End of the in-engine interval: the last handling or span end."""
         if not self.complete:
             return None
         ends = [self.submitted_ns]
         if self.handled_ns is not None:
             ends.append(self.handled_ns)
         ends.extend(start + duration for spans in self.stage_work.values() for start, duration in spans)
-        ends.extend(piece.emitted_ns for piece in self.audio)
         return max(ends)
 
 
@@ -74,6 +69,7 @@ class TurnPerfRecord:
     status: str = TURN_OPEN
     response_ids: list[str] = field(default_factory=list)
     chunks: dict[int, ChunkPerfRecord] = field(default_factory=dict)
+    audio: list[AudioPiece] = field(default_factory=list)
 
     @property
     def key(self) -> tuple[int, int]:
@@ -106,6 +102,7 @@ class SessionPerfLedger:
         # Insertion order is turn order; eviction takes the oldest finished turn.
         self._turns: dict[tuple[int, int], TurnPerfRecord] = {}
         self._chunk_turns: dict[tuple[int, int], tuple[int, int]] = {}
+        self._response_turns: dict[str, tuple[int, int]] = {}
 
     def now_ns(self) -> int:
         return self._clock()
@@ -121,13 +118,12 @@ class SessionPerfLedger:
         seq: int,
         turn_id: int,
         turn_seq: int,
-        kind: str,
         submitted_ns: int,
     ) -> None:
         turn = self._turn(epoch, turn_id, create=True)
         if turn is None:
             return
-        turn.chunks[seq] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, kind=kind, submitted_ns=submitted_ns)
+        turn.chunks[seq] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, submitted_ns=submitted_ns)
         self._chunk_turns[(epoch, seq)] = turn.key
 
     def record_stage_work(self, rows: Iterable[Sequence[int]]) -> None:
@@ -149,37 +145,20 @@ class SessionPerfLedger:
             spans.append([int(start_ns), int(duration_ns)])
             chunk.num_spans += 1
 
-    def mark_handled(self, chunks: Iterable[tuple[int, int]], handled_ns: int | None = None) -> None:
-        now = self._clock() if handled_ns is None else handled_ns
+    def mark_handled(self, chunks: Iterable[tuple[int, int]]) -> None:
+        now = self._clock()
         for epoch, seq in chunks:
             chunk = self._chunk(epoch, seq)
             if chunk is not None and (chunk.handled_ns is None or now > chunk.handled_ns):
                 chunk.handled_ns = now
 
-    def record_audio(
-        self,
-        chunk_key: tuple[int, int] | None,
-        *,
-        response_id: str | None,
-        duration_ms: float,
-        emitted_ns: int | None = None,
-        fallback_turn: tuple[int, int] | None = None,
-    ) -> None:
-        """Attribute one audio delta to the chunk whose step produced it.
-
-        Output that carried no step span (e.g. out-of-band first audio) falls back
-        to the latest chunk of ``fallback_turn``.
-        """
-        if duration_ms <= 0:
+    def record_audio(self, *, response_id: str, duration_ms: float, emitted_ns: int | None = None) -> None:
+        """Add one emitted audio delta to the turn its response belongs to."""
+        turn_key = self._response_turns.get(response_id)
+        turn = self._turns.get(turn_key) if turn_key is not None else None
+        if turn is None or duration_ms <= 0:
             return
-        chunk = self._chunk(*chunk_key) if chunk_key is not None else None
-        if chunk is None and fallback_turn is not None:
-            turn = self._turns.get(fallback_turn)
-            if turn is not None and turn.chunks:
-                chunk = turn.chunks[max(turn.chunks)]
-        if chunk is None:
-            return
-        chunk.audio.append(
+        turn.audio.append(
             AudioPiece(
                 response_id=response_id,
                 emitted_ns=self._clock() if emitted_ns is None else emitted_ns,
@@ -191,12 +170,13 @@ class SessionPerfLedger:
         turn = self._turn(epoch, turn_id, create=True)
         if turn is not None and response_id not in turn.response_ids:
             turn.response_ids.append(response_id)
+            self._response_turns[response_id] = turn.key
 
     def close_turns(self, *, epoch: int, up_to_turn_id: int) -> None:
         """Close every open turn of ``epoch`` up to ``up_to_turn_id`` (the model turn completed)."""
         for turn in self._turns.values():
             if turn.epoch == epoch and turn.turn_id <= up_to_turn_id and not turn.finished:
-                self._close(turn, TURN_DONE if _has_audio(turn) else TURN_LISTEN)
+                self._close(turn, TURN_DONE if turn.audio else TURN_LISTEN)
 
     def cancel_epoch(self, epoch: int) -> None:
         """Barge-in: every open turn of the old epoch ends cancelled."""
@@ -214,7 +194,7 @@ class SessionPerfLedger:
     # Query                                                              #
     # ------------------------------------------------------------------ #
 
-    def snapshot(self, *, turn_ids: Sequence[int] | None = None, epoch: int | None = None) -> dict[str, object]:
+    def snapshot(self) -> dict[str, object]:
         """The ``session.stats`` document (RFC #8325 §3.3), times relative to the session open."""
         origin = self.opened_at_ns
         return {
@@ -222,29 +202,14 @@ class SessionPerfLedger:
             "clock": {"source": "CLOCK_MONOTONIC", "unit": "ns", "origin": "session_opened"},
             "generated_at_ns": self._clock() - origin,
             "stages": [{"stage_id": stage_id, "name": name} for stage_id, name in self.stages],
-            "turns": [self._turn_document(turn, origin) for turn in self._select(turn_ids, epoch)],
+            "turns": [self._turn_document(turn, origin) for turn in self._turns.values()],
             "dropped_turns": self.dropped_turns,
             "dropped_spans": self.dropped_spans,
         }
 
-    def clear_finished(self, *, turn_ids: Sequence[int] | None = None, epoch: int | None = None) -> None:
-        for turn in list(self._select(turn_ids, epoch)):
-            if turn.finished:
-                self._drop(turn)
-
     # ------------------------------------------------------------------ #
     # Internals                                                          #
     # ------------------------------------------------------------------ #
-
-    def _select(self, turn_ids: Sequence[int] | None, epoch: int | None) -> list[TurnPerfRecord]:
-        if turn_ids is None and epoch is None:
-            return list(self._turns.values())
-        wanted = None if turn_ids is None else {int(turn_id) for turn_id in turn_ids}
-        return [
-            turn
-            for turn in self._turns.values()
-            if (epoch is None or turn.epoch == epoch) and (wanted is None or turn.turn_id in wanted)
-        ]
 
     def _turn(self, epoch: int, turn_id: int, *, create: bool) -> TurnPerfRecord | None:
         key = (int(epoch), int(turn_id))
@@ -270,14 +235,14 @@ class SessionPerfLedger:
         victim = next((turn for turn in self._turns.values() if turn.finished), None)
         if victim is None:
             victim = next(iter(self._turns.values()))
-        self._drop(victim)
+        del self._turns[victim.key]
+        for seq in victim.chunks:
+            if self._chunk_turns.get((victim.epoch, seq)) == victim.key:
+                del self._chunk_turns[(victim.epoch, seq)]
+        for response_id in victim.response_ids:
+            if self._response_turns.get(response_id) == victim.key:
+                del self._response_turns[response_id]
         self.dropped_turns += 1
-
-    def _drop(self, turn: TurnPerfRecord) -> None:
-        self._turns.pop(turn.key, None)
-        for seq in turn.chunks:
-            if self._chunk_turns.get((turn.epoch, seq)) == turn.key:
-                del self._chunk_turns[(turn.epoch, seq)]
 
     @staticmethod
     def _turn_document(turn: TurnPerfRecord, origin: int) -> dict[str, object]:
@@ -287,6 +252,14 @@ class SessionPerfLedger:
             "response_ids": list(turn.response_ids),
             "status": turn.status,
             "chunks": [_chunk_document(chunk, origin) for chunk in turn.chunks.values()],
+            "audio": [
+                {
+                    "response_id": piece.response_id,
+                    "emitted_ns": piece.emitted_ns - origin,
+                    "duration_ms": piece.duration_ms,
+                }
+                for piece in turn.audio
+            ],
         }
 
 
@@ -295,7 +268,6 @@ def _chunk_document(chunk: ChunkPerfRecord, origin: int) -> dict[str, object]:
     return {
         "seq": chunk.seq,
         "turn_seq": chunk.turn_seq,
-        "kind": chunk.kind,
         "submitted_ns": chunk.submitted_ns - origin,
         "done_ns": None if done_ns is None else done_ns - origin,
         "complete": chunk.complete,
@@ -303,14 +275,6 @@ def _chunk_document(chunk: ChunkPerfRecord, origin: int) -> dict[str, object]:
         "stage_work": [
             {"stage_id": stage_id, "spans": [[start - origin, duration] for start, duration in spans]}
             for stage_id, spans in sorted(chunk.stage_work.items())
-        ],
-        "audio": [
-            {
-                "response_id": piece.response_id,
-                "emitted_ns": piece.emitted_ns - origin,
-                "duration_ms": piece.duration_ms,
-            }
-            for piece in chunk.audio
         ],
     }
 
@@ -328,7 +292,3 @@ def with_perf_chunk(prompt: dict[str, object], chunk: tuple[int, int]) -> dict[s
         **prompt,
         "model_intermediate_buffer": {**buffer, "duplex": {**duplex, PERF_CHUNK_KEY: [int(chunk[0]), int(chunk[1])]}},
     }
-
-
-def _has_audio(turn: TurnPerfRecord) -> bool:
-    return any(chunk.audio for chunk in turn.chunks.values())

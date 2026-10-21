@@ -248,7 +248,6 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
             segment_token_ids=tuple(segment.token_ids),
             segment_output_metadata=segment.output_metadata,
             stage_work=self._take_stage_work(req_state, stage_id),
-            output_chunk=req_state.stage_output_chunks.get(stage_id),
         )
         return runner.on_stage_output(
             stage_id,

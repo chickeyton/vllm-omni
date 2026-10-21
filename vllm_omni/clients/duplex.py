@@ -921,14 +921,7 @@ class DuplexClientBase(ABC):
 
     # -- server-side stats -----------------------------------------------------
 
-    async def get_session_stats(
-        self,
-        *,
-        turn_ids: Sequence[int] | None = None,
-        epoch: int | None = None,
-        clear_finished: bool = False,
-        timeout_s: float = 10.0,
-    ) -> dict[str, object]:
+    async def get_session_stats(self, *, timeout_s: float = 10.0) -> dict[str, object]:
         """Fetch the server's per-turn stage work and audio (``session.stats``, RFC #8325).
 
         Needs ``capabilities.supports_session_stats`` (``duplex_session.collect_stats``
@@ -936,17 +929,10 @@ class DuplexClientBase(ABC):
         document by ``vllm_omni.benchmarks.duplex_session_metrics``.
         """
         event_id = f"evt_{uuid4().hex}"
-        event: dict[str, object] = {"type": "session.stats.get", "event_id": event_id}
-        if turn_ids is not None:
-            event["turn_ids"] = [int(turn_id) for turn_id in turn_ids]
-        if epoch is not None:
-            event["epoch"] = int(epoch)
-        if clear_finished:
-            event["clear_finished"] = True
         # Subscribe before sending: the reply can arrive before send() returns.
         queue = self._add_subscriber()
         try:
-            await self.send(event)
+            await self.send({"type": "session.stats.get", "event_id": event_id})
             deadline = time.monotonic() + timeout_s
             while True:
                 remaining = deadline - time.monotonic()
