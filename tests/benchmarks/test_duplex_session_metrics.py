@@ -148,7 +148,11 @@ def test_report_and_console_expose_the_flat_latency_keys(capsys):
 _MS = 1_000_000
 
 
-def _stats_chunk(seq, submitted, done, spans_by_stage, audio_ms, *, complete=True, truncated=False):
+def _audio(duration_ms):
+    return {"response_id": "r", "emitted_ns": 0, "duration_ms": duration_ms}
+
+
+def _stats_chunk(seq, submitted, done, spans_by_stage, *, complete=True, truncated=False):
     return {
         "seq": seq,
         "submitted_ns": submitted * _MS,
@@ -159,7 +163,6 @@ def _stats_chunk(seq, submitted, done, spans_by_stage, audio_ms, *, complete=Tru
             {"stage_id": stage_id, "spans": [[start * _MS, length * _MS] for start, length in spans]}
             for stage_id, spans in spans_by_stage.items()
         ],
-        "audio": [{"response_id": "r", "emitted_ns": 0, "duration_ms": ms} for ms in audio_ms],
     }
 
 
@@ -177,9 +180,10 @@ def test_turn_metrics_union_pipelined_chunks_and_skip_input_waits() -> None:
         "turn_id": 3,
         "status": "done",
         "chunks": [
-            _stats_chunk(1, 0, 100, {0: [(10, 40)], 1: [(40, 50)]}, [500.0]),
-            _stats_chunk(2, 1000, 1070, {0: [(1010, 50)]}, [500.0]),
+            _stats_chunk(1, 0, 100, {0: [(10, 40)], 1: [(40, 50)]}),
+            _stats_chunk(2, 1000, 1070, {0: [(1010, 50)]}),
         ],
+        "audio": [_audio(500.0), _audio(500.0)],
     }
 
     metrics = session_stats_turn_metrics(turn)
@@ -196,10 +200,10 @@ def test_turn_metrics_union_pipelined_chunks_and_skip_input_waits() -> None:
 @pytest.mark.parametrize(
     "turn",
     [
-        {"status": "open", "chunks": [_stats_chunk(1, 0, 10, {}, [])]},
+        {"status": "open", "chunks": [_stats_chunk(1, 0, 10, {})]},
         # A queued chunk without spans keeps the turn from being final.
-        {"status": "done", "chunks": [_stats_chunk(1, 0, None, {}, [], complete=False)]},
-        {"status": "done", "chunks": [_stats_chunk(1, 0, 10, {0: [(0, 5)]}, [100.0], truncated=True)]},
+        {"status": "done", "chunks": [_stats_chunk(1, 0, None, {}, complete=False)]},
+        {"status": "done", "chunks": [_stats_chunk(1, 0, 10, {0: [(0, 5)]}, truncated=True)], "audio": [_audio(100.0)]},
     ],
 )
 def test_turn_metrics_are_withheld_until_final(turn: dict[str, object]) -> None:
@@ -208,6 +212,12 @@ def test_turn_metrics_are_withheld_until_final(turn: dict[str, object]) -> None:
 
 
 def test_listen_turn_has_stall_time_but_no_ratios() -> None:
-    turn = {"epoch": 0, "turn_id": 0, "status": "listen", "chunks": [_stats_chunk(1, 0, 30, {0: [(10, 10)]}, [])]}
+    turn = {
+        "epoch": 0,
+        "turn_id": 0,
+        "status": "listen",
+        "chunks": [_stats_chunk(1, 0, 30, {0: [(10, 10)]})],
+        "audio": [],
+    }
     metrics = session_stats_turn_metrics(turn)
     assert (metrics["busy_rtf"], metrics["stall_ratio"], metrics["stall_ms"]) == (None, None, 20.0)

@@ -136,11 +136,6 @@ class GetSessionStats(RealtimeCommand):
     """Ask for the session's server-side performance stats (answered by ``session.stats``)."""
 
     wire_type: ClassVar[str] = "session.stats.get"
-    #: Only these turns (by turn_id, of ``epoch`` or else the current epoch); None = all retained turns.
-    turn_ids: tuple[int, ...] | None = None
-    epoch: int | None = None
-    #: Drop the returned finished turns from the server ledger after replying.
-    clear_finished: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

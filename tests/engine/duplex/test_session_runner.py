@@ -194,7 +194,6 @@ class Harness:
         epoch: int | None = None,
         metrics: Any = None,
         stage_work: Sequence[tuple[int, int, int, int, int]] = (),
-        output_chunk: tuple[int, int] | None = None,
     ) -> bool:
         session = self.session
         fence = session.fence if epoch is None else session.fence.__class__(SESSION_ID, epoch=epoch)
@@ -205,7 +204,6 @@ class Harness:
             segment_token_ids=tuple(segment_token_ids),
             segment_output_metadata=dict(segment_output_metadata or {}),
             stage_work=tuple(stage_work),
-            output_chunk=output_chunk,
         )
         request_id = getattr(output, "request_id", None)
         if not isinstance(request_id, str):
@@ -318,7 +316,7 @@ async def test_session_stats_report_each_chunks_stage_work_and_audio_by_turn() -
         assert types(before) == ["session.stats"]
         (turn,) = before[0].stats["turns"]
         (chunk,) = turn["chunks"]
-        assert (turn["status"], chunk["seq"], chunk["kind"], chunk["complete"]) == ("open", 1, "input", False)
+        assert (turn["status"], chunk["seq"], chunk["complete"]) == ("open", 1, False)
         assert chunk["done_ns"] is None
         assert session_stats_turn_metrics(turn) == {"final": False, "epoch": 0, "turn_id": 0}
 
@@ -326,9 +324,7 @@ async def test_session_stats_report_each_chunks_stage_work_and_audio_by_turn() -
         ms = 1_000_000
         request_id = h.stage0_request_id()
         stage_work = ((0, 0, 1, start + 10 * ms, 50 * ms), (1, 0, 1, start + 40 * ms, 100 * ms))
-        await h.deliver_and_settle(
-            tts_output(request_id, samples=24000, text="hello"), stage_work=stage_work, output_chunk=(0, 1)
-        )
+        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hello"), stage_work=stage_work)
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hello", turn_end=True))
         done = find(events, "response.done")
 
@@ -346,8 +342,8 @@ async def test_session_stats_report_each_chunks_stage_work_and_audio_by_turn() -
             {"stage_id": 0, "spans": [[chunk["submitted_ns"] + 10 * ms, 50 * ms]]},
             {"stage_id": 1, "spans": [[chunk["submitted_ns"] + 40 * ms, 100 * ms]]},
         ]
-        assert sum(piece["duration_ms"] for piece in chunk["audio"]) == 1000
-        assert all(piece["response_id"] == done.response_id for piece in chunk["audio"])
+        assert sum(piece["duration_ms"] for piece in turn["audio"]) == 1000
+        assert all(piece["response_id"] == done.response_id for piece in turn["audio"])
 
         metrics = session_stats_turn_metrics(turn)
         assert metrics["final"] is True
@@ -355,9 +351,6 @@ async def test_session_stats_report_each_chunks_stage_work_and_audio_by_turn() -
         assert metrics["generation_ms"] == 130.0
         assert metrics["busy_rtf"] == 0.13
         assert metrics["stall_ratio"] == pytest.approx(metrics["stall_ms"] / 1000.0)
-
-        await h.run(commands.GetSessionStats(event_id="evt_clear", clear_finished=True))
-        assert ledger.snapshot()["turns"] == []
     finally:
         await close_harness(h)
 

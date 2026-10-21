@@ -71,40 +71,6 @@ def test_every_realtime_command_type_has_a_mapping_case():
     assert set(_MINIMAL_PAYLOADS) == set(REALTIME_COMMAND_TYPES)
 
 
-def test_session_stats_get_decodes_its_filters():
-    command = command_from_realtime(
-        {"type": "session.stats.get", "event_id": "evt_42", "turn_ids": [1, 3], "epoch": 2, "clear_finished": True}
-    )
-
-    assert command == GetSessionStats(event_id="evt_42", turn_ids=(1, 3), epoch=2, clear_finished=True)
-    assert command.payload() == {
-        "type": "session.stats.get",
-        "realtime_event_id": "evt_42",
-        "turn_ids": [1, 3],
-        "epoch": 2,
-        "clear_finished": True,
-    }
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"turn_ids": 3},
-        {"turn_ids": [1, -1]},
-        {"turn_ids": [True]},
-        {"epoch": "0"},
-        {"epoch": -1},
-        {"clear_finished": "yes"},
-    ],
-)
-def test_session_stats_get_rejects_malformed_filters(body: dict[str, object]):
-    with pytest.raises(DuplexCommandError) as excinfo:
-        command_from_realtime({"type": "session.stats.get", "event_id": "evt_bad", **body})
-
-    assert excinfo.value.code == "bad_event"
-    assert excinfo.value.event_id == "evt_bad"
-
-
 @pytest.mark.parametrize("event_type", sorted(REALTIME_COMMAND_TYPES))
 def test_command_from_realtime_maps_each_type_to_its_dataclass_and_propagates_event_id(event_type: str):
     body, expected_cls = _MINIMAL_PAYLOADS[event_type]

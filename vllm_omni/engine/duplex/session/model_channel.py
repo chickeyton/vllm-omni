@@ -22,7 +22,6 @@ tracked task, and aborting a stage request in the background.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import copy
 import json
 import time
@@ -55,7 +54,7 @@ from vllm_omni.engine.duplex.session.context import CommittedInputContinuation, 
 from vllm_omni.engine.duplex.session.emitter import SessionEmitter
 from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
-from vllm_omni.engine.duplex.session.perf_ledger import CHUNK_INPUT, CHUNK_SILENCE_CONTINUATION, with_perf_chunk
+from vllm_omni.engine.duplex.session.perf_ledger import with_perf_chunk
 from vllm_omni.engine.duplex.session.tool_calls import ToolCallOrigin, ToolCallRegistrationError
 from vllm_omni.metrics.stats import OrchestratorAggregator, StageRequestStats
 from vllm_omni.outputs import OmniRequestOutput
@@ -65,18 +64,6 @@ if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
 
 logger = init_logger(__name__)
-
-# Session stats: the chunk whose step produced the stage output being handled.
-_PERF_OUTPUT_CHUNK: contextvars.ContextVar[tuple[int, int] | None] = contextvars.ContextVar(
-    "duplex_perf_output_chunk", default=None
-)
-
-
-def _perf_chunks(context: DuplexOutputContext) -> set[tuple[int, int]]:
-    chunks = {(row[1], row[2]) for row in context.stage_work}
-    if context.output_chunk is not None:
-        chunks.add(context.output_chunk)
-    return chunks
 
 
 def _response_awaits_playback_ack(session, response_id, *, should_commit: bool, committed_message) -> bool:
@@ -266,7 +253,6 @@ class ModelChannel:
         input_audio_part: dict[str, object] | None = None,
         input_audio_parts: dict[str, dict[str, object] | None] | None = None,
         on_append_accepted: Callable[[float], None] | None = None,
-        silence_continuation: bool = False,
     ) -> tuple[bool, bool]:
         session = self._ctx.session
         if not session.capabilities.supports_input_append:
@@ -287,7 +273,6 @@ class ModelChannel:
                 operation_id=operation_id,
                 expected_epoch=expected_epoch,
                 input_audio_part=input_audio_part,
-                perf_chunk_kind=CHUNK_SILENCE_CONTINUATION if silence_continuation else CHUNK_INPUT,
                 remaining_transcription_input=(
                     CommittedInputContinuation(remaining_input, input_audio_parts or {})
                     if remaining_input is not None
@@ -339,7 +324,6 @@ class ModelChannel:
         operation_id: str | None,
         expected_epoch: int | None,
         input_audio_part: dict[str, object] | None,
-        perf_chunk_kind: str = CHUNK_INPUT,
         remaining_transcription_input: CommittedInputContinuation | None = None,
     ) -> dict[str, object] | None:
         """Submit one planned append to the stage port and bind the resulting stage request."""
@@ -500,7 +484,6 @@ class ModelChannel:
                         seq=update.seq,
                         turn_id=update.turn_id,
                         turn_seq=update.turn_seq,
-                        kind=perf_chunk_kind,
                         submitted_ns=accepted_ns,
                     )
                 session.bind_stage_request(stage_id, request_id, fence=fence)
@@ -730,30 +713,12 @@ class ModelChannel:
 
     async def on_stage_output_item(self, item: StageOutput) -> CommittedInputContinuation | None:
         perf = self._ctx.session.perf
-        if perf is None:
-            return await self._on_stage_output_item(item)
-        # A context variable, not an attribute: append tasks emitting meanwhile
-        # must not attribute their audio to this output's chunk.
-        token = _PERF_OUTPUT_CHUNK.set(item.context.output_chunk)
         try:
             return await self._on_stage_output_item(item)
         finally:
-            _PERF_OUTPUT_CHUNK.reset(token)
-            # Handling (projection, audio encoding, emission) is part of the chunk's in-engine time.
-            perf.mark_handled(_perf_chunks(item.context))
-
-    def _record_perf_audio(self, response_id: str | None, duration_ms: float) -> None:
-        """Attribute one emitted audio delta to the chunk whose step produced it (RFC #8325)."""
-        session = self._ctx.session
-        if session.perf is None or duration_ms <= 0:
-            return
-        turn_id = session.active_response_turn_id
-        session.perf.record_audio(
-            _PERF_OUTPUT_CHUNK.get(),
-            response_id=response_id,
-            duration_ms=duration_ms,
-            fallback_turn=(session.epoch, turn_id) if turn_id is not None else None,
-        )
+            if perf is not None:
+                # Handling (projection, audio encoding, emission) is part of the chunk's in-engine time.
+                perf.mark_handled({(row[1], row[2]) for row in item.context.stage_work})
 
     async def _on_stage_output_item(self, item: StageOutput) -> CommittedInputContinuation | None:
         session = self._ctx.session
@@ -1417,11 +1382,8 @@ class ModelChannel:
             response_request_metrics=response_request_metrics,
         )
         self._out.emit(payload)
-        if mark_duration_ms is not None:
-            self._record_perf_audio(
-                response_id if isinstance(response_id, str) else None,
-                mark_duration_ms - previous_sent_ms,
-            )
+        if session.perf is not None and mark_duration_ms is not None and isinstance(response_id, str):
+            session.perf.record_audio(response_id=response_id, duration_ms=mark_duration_ms - previous_sent_ms)
         if self._ctx.run.closing:
             return close_reason, emitted_response
         if (

@@ -73,8 +73,6 @@ class AppendAttempt:
     on_append_accepted: Callable[[float], None] | None = None
     #: Last chance to call the append off, checked once the predecessor is done.
     before_append: Callable[[], bool] | None = None
-    #: Runner-generated silence unit rather than client input (session stats kind).
-    silence_continuation: bool = False
 
     # ------------------------------------------------------------------ #
     # Compensation                                                       #
@@ -211,7 +209,6 @@ class AppendAttempt:
                 input_audio_part=self.input_audio_part,
                 input_audio_parts=self.input_audio_parts,
                 on_append_accepted=self.on_append_accepted,
-                silence_continuation=self.silence_continuation,
             )
             if append_ok:
                 model_state.context_locked = True

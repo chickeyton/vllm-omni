@@ -31,7 +31,6 @@ def _open(ledger: SessionPerfLedger, *, seq: int, turn_id: int = 0, epoch: int =
         seq=seq,
         turn_id=turn_id,
         turn_seq=seq,
-        kind="input",
         submitted_ns=ledger.opened_at_ns + at,
     )
 
@@ -43,7 +42,7 @@ def test_snapshot_is_session_relative_and_keeps_turn_and_chunk_structure() -> No
     ledger.record_stage_work([(0, 0, 1, origin + 6 * MS, 4 * MS), (1, 0, 1, origin + 8 * MS, 10 * MS)])
     ledger.bind_response(epoch=0, turn_id=0, response_id="resp-1")
     clock.now = origin + 20 * MS
-    ledger.record_audio((0, 1), response_id="resp-1", duration_ms=480.0)
+    ledger.record_audio(response_id="resp-1", duration_ms=480.0)
     clock.now = origin + 21 * MS
     ledger.mark_handled([(0, 1)])
 
@@ -58,7 +57,7 @@ def test_snapshot_is_session_relative_and_keeps_turn_and_chunk_structure() -> No
         {"stage_id": 0, "spans": [[6 * MS, 4 * MS]]},
         {"stage_id": 1, "spans": [[8 * MS, 10 * MS]]},
     ]
-    assert chunk["audio"] == [{"response_id": "resp-1", "emitted_ns": 20 * MS, "duration_ms": 480.0}]
+    assert turn["audio"] == [{"response_id": "resp-1", "emitted_ns": 20 * MS, "duration_ms": 480.0}]
     # Not final until the turn closes.
     assert (chunk["complete"], chunk["done_ns"]) == (False, None)
 
@@ -91,16 +90,14 @@ def test_late_spans_of_an_old_epoch_land_on_that_epochs_chunk() -> None:
     assert by_epoch == {0: [{"stage_id": 1, "spans": [[MS, MS]]}], 1: [{"stage_id": 0, "spans": [[3 * MS, MS]]}]}
 
 
-def test_spans_for_unknown_chunks_and_audio_without_a_chunk_use_the_fallback_turn() -> None:
+def test_spans_of_unknown_chunks_and_audio_of_unbound_responses_are_ignored() -> None:
     ledger, _ = _ledger()
     _open(ledger, seq=1)
-    _open(ledger, seq=2)
     ledger.record_stage_work([(0, 0, 99, 0, MS)])
-    ledger.record_audio(None, response_id="r", duration_ms=100.0, fallback_turn=(0, 0))
-    ledger.record_audio(None, response_id="r", duration_ms=100.0)
-    chunks = ledger.snapshot()["turns"][0]["chunks"]
-    assert [len(chunk["audio"]) for chunk in chunks] == [0, 1]
-    assert all(chunk["stage_work"] == [] for chunk in chunks)
+    ledger.record_audio(response_id="unbound", duration_ms=100.0)
+    (turn,) = ledger.snapshot()["turns"]
+    assert turn["chunks"][0]["stage_work"] == []
+    assert turn["audio"] == []
 
 
 def test_touching_spans_coalesce_across_flushes() -> None:
@@ -135,18 +132,6 @@ def test_retention_evicts_the_oldest_finished_turn_first() -> None:
     assert stats["dropped_turns"] == 1
     # The evicted turn's chunk is no longer addressable.
     ledger.record_stage_work([(0, 0, 1, 0, MS)])
-
-
-def test_filters_and_clear_finished_touch_only_the_selected_finished_turns() -> None:
-    ledger, _ = _ledger()
-    _open(ledger, seq=1, turn_id=0)
-    _open(ledger, seq=2, turn_id=1)
-    _open(ledger, seq=3, turn_id=2)
-    ledger.close_turns(epoch=0, up_to_turn_id=1)
-    assert [turn["turn_id"] for turn in ledger.snapshot(turn_ids=[1], epoch=0)["turns"]] == [1]
-    assert ledger.snapshot(turn_ids=[1], epoch=5)["turns"] == []
-    ledger.clear_finished(turn_ids=[1, 2], epoch=0)
-    assert [turn["turn_id"] for turn in ledger.snapshot()["turns"]] == [0, 2]
 
 
 def test_with_perf_chunk_copies_the_envelope_and_skips_prompts_without_one() -> None:

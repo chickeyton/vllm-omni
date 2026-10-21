@@ -327,7 +327,7 @@ class DuplexSessionRunner:
     ) -> bool:
         """Accept one stage output (orchestrator loop); return True when it must not be forwarded."""
         perf = self.session.perf
-        if perf is not None and (context.stage_work or context.output_chunk is not None):
+        if perf is not None and context.stage_work:
             # Recorded here, not on the mailbox: forwarded outputs never reach it.
             perf.record_stage_work(context.stage_work)
             perf.mark_handled({(row[1], row[2]) for row in context.stage_work})
@@ -883,13 +883,7 @@ class DuplexSessionRunner:
                 event_id=command.event_id,
             )
             return
-        epoch = command.epoch
-        if epoch is None and command.turn_ids is not None:
-            epoch = self.session.epoch
-        stats = perf.snapshot(turn_ids=command.turn_ids, epoch=epoch)
-        if command.clear_finished:
-            perf.clear_finished(turn_ids=command.turn_ids, epoch=epoch)
-        self._emit_events([SessionStats(request_event_id=command.event_id, stats=stats)])
+        self._emit_events([SessionStats(request_event_id=command.event_id, stats=perf.snapshot())])
 
     def _on_heartbeat(self, command: Heartbeat) -> None:
         try:
@@ -1589,7 +1583,6 @@ class DuplexSessionRunner:
             input_audio_parts=input_audio_parts,
             on_append_accepted=on_append_accepted,
             before_append=before_append,
-            silence_continuation=silence_continuation,
         )
 
         self._reset_failed_append_tail()

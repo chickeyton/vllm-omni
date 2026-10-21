@@ -467,8 +467,9 @@ for queue updates and the final validity check before delivery.
   every step of a request that carries a chunk and return the spans on
   `OmniEngineCoreOutput.stage_work`. `DuplexEngineSession.perf`
   (`SessionPerfLedger`) groups chunks by turn with their acceptance and done
-  times, spans and emitted audio; turns close on model-turn completion,
-  barge-in or close. The runner answers `session.stats.get` from the ledger on
+  times and spans, and records each turn's emitted audio through the
+  response it belongs to; turns close on model-turn completion, barge-in or
+  close. The runner answers `session.stats.get` from the ledger on
   the ordered mailbox; clients derive busy RTF and stall ratio
   (`vllm_omni.benchmarks.duplex_session_metrics`). With the flag off nothing
   is stamped, recorded or attached.
