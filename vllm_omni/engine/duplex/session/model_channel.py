@@ -271,8 +271,6 @@ class ModelChannel:
         session = self._ctx.session
         if not session.capabilities.supports_input_append:
             return True, False
-        # Session stats: the chunk's in-engine interval starts at acceptance.
-        accepted_ns = session.perf.now_ns() if session.perf is not None else None
         if expected_epoch is not None and session.epoch != expected_epoch:
             return True, False
         # Anchor the submission time before the RPC; the acceptance callback
@@ -290,7 +288,6 @@ class ModelChannel:
                 expected_epoch=expected_epoch,
                 input_audio_part=input_audio_part,
                 perf_chunk_kind=CHUNK_SILENCE_CONTINUATION if silence_continuation else CHUNK_INPUT,
-                perf_accepted_ns=accepted_ns,
                 remaining_transcription_input=(
                     CommittedInputContinuation(remaining_input, input_audio_parts or {})
                     if remaining_input is not None
@@ -343,11 +340,12 @@ class ModelChannel:
         expected_epoch: int | None,
         input_audio_part: dict[str, object] | None,
         perf_chunk_kind: str = CHUNK_INPUT,
-        perf_accepted_ns: int | None = None,
         remaining_transcription_input: CommittedInputContinuation | None = None,
     ) -> dict[str, object] | None:
         """Submit one planned append to the stage port and bind the resulting stage request."""
         session = self._ctx.session
+        # Session stats: the chunk's in-engine interval starts when its append is taken up.
+        accepted_ns = session.perf.now_ns() if session.perf is not None else 0
         if self._ctx.stage_port.stage_count == 0:
             raise RuntimeError("duplex_data_plane_has_no_stage")
         fence = helpers.append_fence(session, payload)
@@ -503,7 +501,7 @@ class ModelChannel:
                         turn_id=update.turn_id,
                         turn_seq=update.turn_seq,
                         kind=perf_chunk_kind,
-                        submitted_ns=perf_accepted_ns if perf_accepted_ns is not None else session.perf.now_ns(),
+                        submitted_ns=accepted_ns,
                     )
                 session.bind_stage_request(stage_id, request_id, fence=fence)
                 self._ctx.plugin.commit_append_plan(request_id)
