@@ -194,6 +194,7 @@ class Harness:
         epoch: int | None = None,
         metrics: Any = None,
         stage_work: Sequence[tuple[int, int, int, int, int]] = (),
+        output_chunk: tuple[int, int] | None = None,
     ) -> bool:
         session = self.session
         fence = session.fence if epoch is None else session.fence.__class__(SESSION_ID, epoch=epoch)
@@ -204,6 +205,7 @@ class Harness:
             segment_token_ids=tuple(segment_token_ids),
             segment_output_metadata=dict(segment_output_metadata or {}),
             stage_work=tuple(stage_work),
+            output_chunk=output_chunk,
         )
         request_id = getattr(output, "request_id", None)
         if not isinstance(request_id, str):
@@ -356,6 +358,24 @@ async def test_session_stats_report_each_chunks_stage_work_and_audio_by_turn() -
 
 
 @pytest.mark.asyncio
+async def test_an_output_without_spans_still_marks_its_chunk_handled() -> None:
+    h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
+    try:
+        ledger = h.session.perf
+        assert ledger is not None
+        await h.run(append_audio())
+        start = ledger.opened_at_ns + ledger.snapshot()["turns"][0]["chunks"][0]["submitted_ns"]
+        request_id = h.stage0_request_id()
+        # The step's spans left with an earlier output; the audio output carries none.
+        h.deliver(listen_output(request_id), stage_id=0, stage_work=((0, 0, 1, start, 1),), output_chunk=(0, 1))
+        first = ledger._chunk(0, 1)[1].handled_ns
+        await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"), output_chunk=(0, 1))
+        assert ledger._chunk(0, 1)[1].handled_ns > first
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
 async def test_session_stats_mark_barge_in_turns_cancelled() -> None:
     h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
     try:
@@ -363,8 +383,9 @@ async def test_session_stats_mark_barge_in_turns_cancelled() -> None:
         assert h.session.perf is not None
         h.session.barge_in()
         (turn,) = h.session.perf.snapshot()["turns"]
-        assert (turn["epoch"], turn["status"]) == (0, "cancelled")
-        assert turn["chunks"][0]["complete"] is True
+        # No abort-completion signal: a cancelled turn reports raw data but never numbers.
+        assert (turn["epoch"], turn["status"], turn["final"]) == (0, "cancelled", False)
+        assert turn["chunks"][0]["complete"] is False
     finally:
         await close_harness(h)
 

@@ -93,16 +93,12 @@ def union_ns(spans: Sequence[Sequence[int]]) -> int:
 
 
 def turn_is_final(turn: Mapping[str, object]) -> bool:
-    """A turn's metrics are final once it is closed and every chunk is complete and untruncated."""
+    """Whether the server marked the turn final: its work and measurements have drained."""
     chunks = turn.get("chunks")
-    if turn.get("status") == "open" or not isinstance(chunks, list):
-        return False
-    return all(
-        isinstance(chunk, Mapping)
-        and chunk.get("complete") is True
-        and chunk.get("truncated") is not True
-        and isinstance(chunk.get("done_ns"), int)
-        for chunk in chunks
+    return (
+        turn.get("final") is True
+        and isinstance(chunks, list)
+        and all(isinstance(chunk, Mapping) and isinstance(chunk.get("done_ns"), int) for chunk in chunks)
     )
 
 

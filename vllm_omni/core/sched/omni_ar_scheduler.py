@@ -1374,6 +1374,11 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                     "new_token_ids": new_token_ids,
                     "confirmed_num_computed_tokens": confirmed_num_computed_tokens,
                 }
+                # Fixed at schedule(): a resumable stop may already have applied the
+                # next chunk's update to the request (duplex session stats only).
+                perf_chunk = OmniSchedulerMixin._duplex_step_chunk(self, scheduler_output, req_id)
+                if isinstance(perf_chunk, tuple):
+                    save_kwargs["duplex_perf_chunk"] = perf_chunk
                 if is_segment_finished:
                     save_kwargs["segment_generation"] = boundary_generation
                 if batch_saves is not None:
