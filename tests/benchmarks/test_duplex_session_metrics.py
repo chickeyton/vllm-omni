@@ -10,7 +10,6 @@ from vllm_omni.benchmarks.duplex_session_metrics import (
     collect_duplex_session_metrics,
     duplex_response_latency_metrics,
     print_duplex_response_latency_metrics,
-    session_stats_metrics,
     session_stats_turn_metrics,
     union_ns,
 )
@@ -210,5 +209,5 @@ def test_turn_metrics_are_withheld_until_final(turn: dict[str, object]) -> None:
 
 def test_listen_turn_has_stall_time_but_no_ratios() -> None:
     turn = {"epoch": 0, "turn_id": 0, "status": "listen", "chunks": [_stats_chunk(1, 0, 30, {0: [(10, 10)]}, [])]}
-    metrics = session_stats_metrics({"turns": [turn]})[0]
+    metrics = session_stats_turn_metrics(turn)
     assert (metrics["busy_rtf"], metrics["stall_ratio"], metrics["stall_ms"]) == (None, None, 20.0)

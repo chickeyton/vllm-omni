@@ -145,16 +145,6 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def session_stats_metrics(stats: Mapping[str, object]) -> list[dict[str, object]]:
-    """Per-turn metrics of every turn in a ``session.stats`` document."""
-    turns = stats.get("turns")
-    return (
-        [session_stats_turn_metrics(turn) for turn in turns if isinstance(turn, Mapping)]
-        if isinstance(turns, list)
-        else []
-    )
-
-
 def _client_response_latencies(
     collector: EventCollector,
     response_id: str,

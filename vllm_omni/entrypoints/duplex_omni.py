@@ -199,24 +199,6 @@ class DuplexSessionHandle:
     async def heartbeat(self) -> None:
         await self.submit(duplex_commands.Heartbeat())
 
-    async def request_stats(
-        self,
-        *,
-        turn_ids: Sequence[int] | None = None,
-        epoch: int | None = None,
-        clear_finished: bool = False,
-        event_id: str | None = None,
-    ) -> None:
-        """Ask for ``session.stats``; the reply arrives on this handle's event stream."""
-        await self.submit(
-            duplex_commands.GetSessionStats(
-                event_id=event_id,
-                turn_ids=tuple(turn_ids) if turn_ids is not None else None,
-                epoch=epoch,
-                clear_finished=clear_finished,
-            )
-        )
-
     async def create_item(self, item: Mapping[str, object], *, previous_item_id: str | None = None) -> None:
         await self.submit(duplex_commands.CreateItem(item=dict(item), previous_item_id=previous_item_id))
 
