@@ -3178,6 +3178,36 @@ class TestPlatformOverrides:
             assert all(not stage.yaml_engine_args["enable_prefix_caching"] for stage in stages)
             assert all(not stage.yaml_runtime.get("env") for stage in stages)
 
+    @pytest.mark.parametrize("platform", ["cuda", "npu", "xpu", "rocm", "musa"])
+    def test_minicpmo_mps_profile_adds_cuda_mps_and_code2wav_options(self, platform):
+        pipeline = resolve_pipeline_config("minicpmo_4_5")
+        base = _apply_platform_overrides(
+            load_deploy_config(Path(get_deploy_config_path("minicpmo_4_5.yaml"))), platform=platform
+        )
+        mps = _apply_platform_overrides(
+            load_deploy_config(Path(get_deploy_config_path("minicpmo_4_5_mps.yaml"))), platform=platform
+        )
+        is_cuda = platform == "cuda"
+        assert base.cuda_mps is False
+        assert mps.cuda_mps is is_cuda
+        base_stages = merge_pipeline_deploy(pipeline, base)
+        mps_stages = merge_pipeline_deploy(pipeline, mps)
+        assert all(stage.yaml_runtime.get("cuda_mps", False) is is_cuda for stage in mps_stages)
+        # Stage engine args are inherited unchanged from the default profile.
+        assert [s.yaml_engine_args for s in mps_stages] == [s.yaml_engine_args for s in base_stages]
+        # The Code2Wav connector gains exactly the measured options; the rest is inherited.
+        base_extra = base.connectors["connector_of_shared_memory"]["extra"]
+        mps_extra = mps.connectors["connector_of_shared_memory"]["extra"]
+        added = {"token2wav_async_ref_prepare": True, "micro_batch_size": 8, "cfm_onset_merge": True}
+        assert mps_extra == {**base_extra, **added}
+        assert base_extra.get("micro_batch_size") == 4
+        assert (
+            mps.connectors["connector_of_shared_memory"]["name"]
+            == base.connectors["connector_of_shared_memory"]["name"]
+        )
+        assert mps.session_mode == base.session_mode
+        assert mps.duplex_session == base.duplex_session
+
     def test_moss_local_first_audio_preserves_prefix_cache_and_runner_options(self):
         pipeline = resolve_pipeline_config("moss_tts_local")
         path = get_deploy_config_path("moss_tts_local.yaml")

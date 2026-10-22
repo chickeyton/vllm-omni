@@ -35,6 +35,8 @@ also provided.
   `hf_config.version="4.5"`):
     - Default single-GPU compatibility layout (auto-loaded):
     [`vllm_omni/deploy/minicpmo_4_5.yaml`](../../vllm_omni/deploy/minicpmo_4_5.yaml)
+    - Opt-in single-GPU layout with a private NVIDIA MPS daemon (CUDA only):
+    [`vllm_omni/deploy/minicpmo_4_5_mps.yaml`](../../vllm_omni/deploy/minicpmo_4_5_mps.yaml)
     - Recommended 2-GPU continuous-batching layout:
     [`vllm_omni/deploy/minicpmo_4_5_2gpu.yaml`](../../vllm_omni/deploy/minicpmo_4_5_2gpu.yaml),
     - 3-GPU layout:
@@ -120,6 +122,23 @@ device memory is left available for runtime workspaces such as the HiFi-GAN
 vocoder's cuDNN kernels. All stages admit
 up to four sequences. Startup video profiling is bounded to 32 frames per
 video. Use the two-GPU profile for production throughput.
+
+On CUDA, `--deploy-config vllm_omni/deploy/minicpmo_4_5_mps.yaml` keeps this
+layout and starts a private NVIDIA MPS daemon, so the three co-located stages
+can run kernels concurrently instead of time-slicing the GPU. It requires
+`nvidia-cuda-mps-control` on `PATH`. On one L20X with Seed-TTS voice cloning
+through `/v1/chat/completions`, MPS alone raised codec throughput by about 13%
+at concurrency 8 and 17% at concurrency 32. The profile also prepares each new
+request's reference voice before its first audio chunk arrives and solves
+Code2Wav rows in larger batches (`token2wav_async_ref_prepare`,
+`micro_batch_size: 8`, `cfm_onset_merge`). Together these raised throughput by
+about 26% more at concurrency 32 (1319 codec frames/s) and 22% at
+concurrency 16. Concurrency 1 and duplex mean first-audio latency were
+unchanged. Seed-TTS WER spread more across runs (1.44-2.24% vs 1.55-1.67%
+without these options), because two borderline utterances failed in some runs. Every stage on that GPU
+is a client of the same MPS server, so a fatal GPU fault in one stage can also
+stop the others. A graceful shutdown stops the daemon; after a hard kill, stop
+the leftover daemon as described in the profile's header comment.
 
 #### Environment
 
