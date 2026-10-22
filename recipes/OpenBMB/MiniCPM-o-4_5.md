@@ -134,8 +134,8 @@ Code2Wav rows in larger batches (`token2wav_async_ref_prepare`,
 `micro_batch_size: 8`, `cfm_onset_merge`). Together these raised throughput by
 about 26% more at concurrency 32 (1319 codec frames/s) and 22% at
 concurrency 16. Concurrency 1 and duplex mean first-audio latency were
-unchanged. Seed-TTS WER spread more across runs (1.44-2.24% vs 1.55-1.67%
-without these options), because two borderline utterances failed in some runs. Every stage on that GPU
+unchanged. Seed-TTS WER on the full English set was also unchanged: 2.18%
+against 2.24% without these options. Every stage on that GPU
 is a client of the same MPS server, so a fatal GPU fault in one stage can also
 stop the others. A graceful shutdown stops the daemon; after a hard kill, stop
 the leftover daemon as described in the profile's header comment.

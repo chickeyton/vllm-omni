@@ -20,10 +20,10 @@
 # /v1/chat/completions, 16 requests per concurrency slot), against the same
 # profile with only cuda_mps: 1046 -> 1319 codec frames/s at C=32 (+26%),
 # 834 -> 1018 at C=16 (+22%), 762 -> 869 at C=8 (+14%); C=1 unchanged.
-# Seed-TTS WER (128 utterances, C=8): 1.55-1.67% over 5 runs without the
-# Code2Wav options, 1.44-2.24% over 9 runs with them. Two borderline utterances
-# failed in 3 of 6 runs, which fits the batching options changing rounding;
-# validate on a larger set before relying on it. Duplex
+# Seed-TTS WER on the full en set (1088 utterances, C=8): 2.24% with only
+# cuda_mps and 2.18% with this profile; paired per utterance, 19 worse and
+# 19 better (95% CI of the difference -0.28..+0.13 points). Each option alone
+# was also within run-to-run variation. Duplex
 # mean first audio at C=1/4/8 was unchanged; the C=8 p95 was about 9% higher
 # in two runs.
 # Upstream's opt-in cfm_float16 on top: +9% at C=32, WER within spread, but one
