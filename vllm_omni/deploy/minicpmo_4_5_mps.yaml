@@ -24,8 +24,9 @@
 # cuda_mps and 2.18% with this profile; paired per utterance, 19 worse and
 # 19 better (95% CI of the difference -0.28..+0.13 points). Each option alone
 # was also within run-to-run variation. Duplex
-# mean first audio at C=1/4/8 was unchanged; the C=8 p95 was about 9% higher
-# in two runs.
+# first audio was not slower: over three C=8 runs per config, mean 467 -> 433
+# ms and p95 580 -> 513 ms; C=1/4 unchanged. Duplex sessions send no prewarm
+# payload, so there only the batching options apply.
 # Upstream's opt-in cfm_float16 on top: +9% at C=32, WER within spread, but one
 # duplex C=4 run was 20% slower.
 #
