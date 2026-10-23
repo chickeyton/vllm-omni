@@ -36,7 +36,7 @@ also provided.
     - Default single-GPU compatibility layout (auto-loaded):
     [`vllm_omni/deploy/minicpmo_4_5.yaml`](../../vllm_omni/deploy/minicpmo_4_5.yaml)
     - Opt-in single-GPU layout with a private NVIDIA MPS daemon (CUDA only):
-    [`vllm_omni/deploy/minicpmo_4_5_mps.yaml`](../../vllm_omni/deploy/minicpmo_4_5_mps.yaml)
+    [`vllm_omni/deploy/minicpmo_4_5_high_concurrency.yaml`](../../vllm_omni/deploy/minicpmo_4_5_high_concurrency.yaml)
     - Recommended 2-GPU continuous-batching layout:
     [`vllm_omni/deploy/minicpmo_4_5_2gpu.yaml`](../../vllm_omni/deploy/minicpmo_4_5_2gpu.yaml),
     - 3-GPU layout:
@@ -123,22 +123,17 @@ vocoder's cuDNN kernels. All stages admit
 up to four sequences. Startup video profiling is bounded to 32 frames per
 video. Use the two-GPU profile for production throughput.
 
-On CUDA, `--deploy-config vllm_omni/deploy/minicpmo_4_5_mps.yaml` keeps this
-layout and starts a private NVIDIA MPS daemon, so the three co-located stages
-can run kernels concurrently instead of time-slicing the GPU. It requires
-`nvidia-cuda-mps-control` on `PATH`. On one L20X with Seed-TTS voice cloning
-through `/v1/chat/completions`, MPS alone raised codec throughput by about 13%
-at concurrency 8 and 17% at concurrency 32. The profile also prepares each new
-request's reference voice before its first audio chunk arrives and solves
-Code2Wav rows in larger batches (`token2wav_async_ref_prepare`,
-`micro_batch_size: 8`, `cfm_onset_merge`). Together these raised throughput by
-about 26% more at concurrency 32 (1319 codec frames/s) and 22% at
-concurrency 16. Concurrency 1 and duplex first-audio latency were
-unchanged. Seed-TTS WER on the full English set was also unchanged: 2.18%
-against 2.24% without these options. Every stage on that GPU
-is a client of the same MPS server, so a fatal GPU fault in one stage can also
-stop the others. A graceful shutdown stops the daemon; after a hard kill, stop
-the leftover daemon as described in the profile's header comment.
+On CUDA, `--deploy-config vllm_omni/deploy/minicpmo_4_5_high_concurrency.yaml`
+keeps this layout, including the default profile's MPS setting, and tunes
+Code2Wav for many concurrent voices. It prepares each new request's reference
+voice before its first audio chunk arrives and solves Code2Wav rows in larger
+batches (`token2wav_async_ref_prepare`, `micro_batch_size: 8`,
+`cfm_onset_merge`). On one L20X with Seed-TTS voice cloning through
+`/v1/chat/completions`, codec throughput rose by about 22% at concurrency 32
+(1326 codec frames/s), 19% at 16 and 11% at 8. Concurrency 1 and duplex
+first-audio latency at concurrency 8 were unchanged. Seed-TTS WER on the full
+English set was also unchanged: 2.68% against 2.73% without these options. GPU
+memory after startup is about 2.6 GiB higher.
 
 #### Environment
 
