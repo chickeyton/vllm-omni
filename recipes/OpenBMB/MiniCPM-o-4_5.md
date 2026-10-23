@@ -133,7 +133,7 @@ request's reference voice before its first audio chunk arrives and solves
 Code2Wav rows in larger batches (`token2wav_async_ref_prepare`,
 `micro_batch_size: 8`, `cfm_onset_merge`). Together these raised throughput by
 about 26% more at concurrency 32 (1319 codec frames/s) and 22% at
-concurrency 16. Concurrency 1 and duplex mean first-audio latency were
+concurrency 16. Concurrency 1 and duplex first-audio latency were
 unchanged. Seed-TTS WER on the full English set was also unchanged: 2.18%
 against 2.24% without these options. Every stage on that GPU
 is a client of the same MPS server, so a fatal GPU fault in one stage can also
