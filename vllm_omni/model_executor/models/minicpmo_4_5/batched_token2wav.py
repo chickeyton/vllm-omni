@@ -660,14 +660,11 @@ class BatchedToken2Wav(nn.Module):
             try:
                 torch.set_default_dtype(torch.float32)
                 with _autocast_disabled(self.speech_window.device):
-                    if hasattr(self._token2wav, "_prepare_prompt_device"):
-                        # Pinned copies: the inline path must not wait for the
-                        # device work already queued in this step.
-                        values = self._token2wav._prepare_prompt_device(
-                            self._token2wav._prepare_prompt_host(prompt_wav), non_blocking=True
-                        )
-                    else:
-                        values = self._token2wav._prepare_prompt(prompt_wav)
+                    # Pinned copies: the inline path must not wait for the
+                    # device work already queued in this step.
+                    values = self._token2wav._prepare_prompt_device(
+                        self._token2wav._prepare_prompt_host(prompt_wav), non_blocking=True
+                    )
             finally:
                 torch.set_default_dtype(previous_dtype)
             cached = PromptFeatures(
