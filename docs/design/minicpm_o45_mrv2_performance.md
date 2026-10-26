@@ -285,7 +285,11 @@ main stream.
 
 Prompt features stay keyed by content and equal those of inline preparation.
 A reference that is not ready by chunk 0 is prepared inline, and the late
-result is dropped. The option replaces the idle prefetch while active. Duplex
+result is dropped. A job whose request finishes after its worker started is
+kept until it settles; its prompt WAV then joins the runtime-prompt cache as
+the next eviction candidate, unless another request already tracks it. A
+failed job's WAV is handled the same way. The option replaces the idle
+prefetch while active. Duplex
 sessions (no prewarm payload), the MRv2 generation runner and NPU keep the
 existing behavior. The CFM setup solve still runs at chunk 0.
 

@@ -351,6 +351,18 @@ class _PreparedReference:
     host: PromptHostFeatures | None
 
 
+class _ReferenceJobError(Exception):
+    """A reference job failed after writing its prompt WAV.
+
+    Carries the written prompt so the forward thread can hand the file to the
+    runtime-prompt cache, which evicts it like any unowned prompt.
+    """
+
+    def __init__(self, reference: _PreparedReference):
+        super().__init__(f"reference preparation failed for {reference.path}")
+        self.reference = reference
+
+
 # How often the reference-preparation counters are logged, in seconds.
 _REF_STATS_LOG_INTERVAL_S = 30.0
 
@@ -462,6 +474,10 @@ class MiniCPMO45Code2Wav(nn.Module):
             raise ValueError("token2wav_async_ref_workers must be >= 1")
         self._ref_executor: ThreadPoolExecutor | None = None
         self._ref_jobs: dict[str, Future[_PreparedReference]] = {}
+        # Jobs of finished requests that were already running or done, so
+        # Future.cancel() could not stop them. They are kept until they settle,
+        # because only the forward thread can hand their WAV to the cache.
+        self._abandoned_ref_jobs: list[Future[_PreparedReference]] = []
         self._ref_stream: torch.cuda.Stream | None = None
         # Prompt key -> event recorded after its device half on the side stream.
         self._prepared_events: dict[tuple[str, str], torch.cuda.Event] = {}
@@ -1480,8 +1496,8 @@ class MiniCPMO45Code2Wav(nn.Module):
             state_id = str(request_id)
             self._states.pop(state_id, None)
             job = self._ref_jobs.pop(state_id, None)
-            if job is not None:
-                job.cancel()
+            if job is not None and not job.cancel():
+                self._abandoned_ref_jobs.append(job)
             self._release_request_prompt(state_id)
             self._drop_prefetch(state_id)
 
@@ -1677,7 +1693,13 @@ class MiniCPMO45Code2Wav(nn.Module):
         with torch.inference_mode():
             cache_key, cache_id, path, waveform, sample_rate_hz = self._runtime_prompt_identity(ref_audio, sample_rate)
             self._write_runtime_prompt(path, waveform, sample_rate_hz)
-            host = None if self.backend.has_prompt_features(cache_id, path) else self.backend.prepare_prompt_host(path)
+            written = _PreparedReference(cache_key=cache_key, cache_id=cache_id, path=path, host=None)
+            try:
+                if self.backend.has_prompt_features(cache_id, path):
+                    return written
+                host = self.backend.prepare_prompt_host(path)
+            except Exception as exc:
+                raise _ReferenceJobError(written) from exc
         return _PreparedReference(cache_key=cache_key, cache_id=cache_id, path=path, host=host)
 
     def _pump_reference_jobs(self) -> bool:
@@ -1688,7 +1710,7 @@ class MiniCPMO45Code2Wav(nn.Module):
         request until chunk 0 commits it, as an idle prefetch is. Returns
         whether any device work was queued.
         """
-        if not self._ref_jobs or self.backend is None:
+        if self.backend is None or not (self._ref_jobs or self._abandoned_ref_jobs):
             return False
         installed: list[tuple[str, str]] = []
         stream: torch.cuda.Stream | None = None
@@ -1698,17 +1720,20 @@ class MiniCPMO45Code2Wav(nn.Module):
             del self._ref_jobs[state_id]
             try:
                 prepared = job.result()
-            except Exception:
+            except Exception as exc:
                 self._ref_stats["async_failed"] += 1
                 logger.warning(
                     "MiniCPM-o Code2Wav reference preparation failed for request %s; chunk 0 will prepare it inline",
                     state_id,
                     exc_info=True,
                 )
+                if isinstance(exc, _ReferenceJobError):
+                    self._adopt_unowned_reference(exc.reference)
                 continue
             if state_id in self._states or state_id in self._request_prompt_keys:
                 # Chunk 0 already prepared this reference inline.
                 self._ref_stats["async_late"] += 1
+                self._adopt_unowned_reference(prepared)
                 continue
             entry = self._runtime_prompt_entry(prepared.cache_key, prepared.cache_id, prepared.path)
             entry.pins.add(state_id)
@@ -1728,8 +1753,44 @@ class MiniCPMO45Code2Wav(nn.Module):
                 for key in installed:
                     self._prepared_events[key] = event
             self._ref_stats["async_installed"] += len(installed)
+        # After this pump's pins, so a reference shared with a live request is
+        # already pinned and stays.
+        self._reclaim_abandoned_ref_jobs()
         self._trim_runtime_prompts()
         return bool(installed)
+
+    def _reclaim_abandoned_ref_jobs(self) -> None:
+        """Hand the WAVs of settled abandoned jobs to the runtime-prompt cache."""
+        if not self._abandoned_ref_jobs:
+            return
+        pending: list[Future[_PreparedReference]] = []
+        for job in self._abandoned_ref_jobs:
+            if not job.done():
+                pending.append(job)
+                continue
+            try:
+                prepared = job.result()
+            except _ReferenceJobError as exc:
+                prepared = exc.reference
+            except Exception:
+                # Failed before writing its WAV: nothing to reclaim.
+                continue
+            self._ref_stats["async_abandoned"] += 1
+            self._adopt_unowned_reference(prepared)
+        self._abandoned_ref_jobs = pending
+
+    def _adopt_unowned_reference(self, prepared: _PreparedReference) -> None:
+        """Track a written prompt WAV that no request uses, as the next eviction candidate.
+
+        A prompt already tracked (shared with another request, or chunk 0 has
+        materialized it) keeps its entry, owners and pins.
+        """
+        if prepared.cache_key in self._runtime_prompts:
+            return
+        self._runtime_prompts[prepared.cache_key] = _RuntimePrompt(
+            cache_id=prepared.cache_id, path=prepared.path, owners=set()
+        )
+        self._runtime_prompts.move_to_end(prepared.cache_key, last=False)
 
     def _reference_stream(self) -> torch.cuda.Stream | None:
         """The side stream for the device half of prepared references.

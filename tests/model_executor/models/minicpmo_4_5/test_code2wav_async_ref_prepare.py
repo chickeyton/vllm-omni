@@ -193,6 +193,72 @@ def test_finishing_before_chunk0_cancels_the_job_and_releases_the_pin(cuda_platf
     _assert_no_pins(model)
 
 
+def _block_host(token2wav: _SplitFakeToken2Wav, monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Hold the worker inside the host half, after it has written the WAV."""
+    entered, release = threading.Event(), threading.Event()
+    original = token2wav._prepare_prompt_host
+
+    def blocked_host(prompt_wav):
+        entered.set()
+        release.wait(timeout=10)
+        return original(prompt_wav)
+
+    monkeypatch.setattr(token2wav, "_prepare_prompt_host", blocked_host)
+    return entered, release
+
+
+@pytest.mark.parametrize("job_state", ["running", "done", "failed"])
+def test_finishing_after_the_job_started_reclaims_its_wav(cuda_platform, monkeypatch, job_state):
+    # Capacity 0: every unowned, unpinned prompt is evicted at once.
+    model, token2wav = _model(capacity=0)
+    entered, release = _block_host(token2wav, monkeypatch)
+    token2wav.fail_host = job_state == "failed"
+    model.on_requests_added([_prewarm("req-a")])
+    (job,) = model._ref_jobs.values()
+    assert entered.wait(timeout=10)
+    if job_state != "running":
+        release.set()
+        job.exception(timeout=10)
+    wavs = list(Path(model._runtime_prompt_dir.name).glob("minicpmo45_ref_*.wav"))
+    assert len(wavs) == 1
+
+    # Future.cancel() cannot stop a started job, so the model keeps it.
+    model.on_requests_finished(["req-a"])
+    assert not model._ref_jobs
+    assert model._abandoned_ref_jobs == [job]
+    release.set()
+    job.exception(timeout=10)
+    model.run_idle_prefetch()
+
+    assert not model._abandoned_ref_jobs
+    assert model._ref_stats["async_abandoned"] == 1
+    assert not wavs[0].exists()
+    assert not model._runtime_prompts
+    _assert_no_pins(model)
+    assert token2wav.device_calls == 0
+
+
+def test_reclaiming_an_abandoned_job_keeps_a_shared_reference(cuda_platform, monkeypatch):
+    model, token2wav = _model(capacity=0)
+    entered, release = _block_host(token2wav, monkeypatch)
+    model.on_requests_added([_prewarm("req-a"), _prewarm("req-b")])
+    assert entered.wait(timeout=10)
+    model.on_requests_finished(["req-a"])
+    assert len(model._abandoned_ref_jobs) == 1
+    release.set()
+    model._abandoned_ref_jobs[0].exception(timeout=10)
+    _finish_jobs(model)
+    model.run_idle_prefetch()
+
+    # req-a's WAV is req-b's prompt too: it stays, pinned by req-b.
+    assert not model._abandoned_ref_jobs
+    assert model._ref_stats["async_abandoned"] == 1
+    (entry,) = model._runtime_prompts.values()
+    assert (entry.owners, entry.pins) == (set(), {"req-b"})
+    assert Path(entry.path).is_file()
+    assert model.backend.has_prompt_features(entry.cache_id, entry.path)
+
+
 def test_shared_reference_installs_once_and_pins_per_request(cuda_platform):
     model, token2wav = _model()
     model.on_requests_added([_prewarm("req-a"), _prewarm("req-b")])
