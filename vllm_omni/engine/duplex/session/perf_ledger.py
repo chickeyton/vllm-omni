@@ -51,20 +51,24 @@ class ChunkPerfRecord:
     seq: int
     turn_seq: int
     submitted_ns: int
-    # stage_id -> [[start_ns, duration_ns], ...], absolute monotonic time
+    # stage_id -> [[start_ns, duration_ns], ...] sorted by start, absolute monotonic time
     stage_work: dict[int, list[list[int]]] = field(default_factory=dict)
-    # Latest time the API process finished handling a stage output of this chunk,
-    # including emitting its audio. None while the chunk is still queued.
+    # Latest time the API process handled a stage output of this chunk. It only
+    # gates finality: None while the chunk is still queued.
     handled_ns: int | None = None
     truncated: bool = False
     num_spans: int = 0
 
     def done_ns(self) -> int | None:
-        """End of the in-engine interval: the last handling or span end; None until handled."""
+        """End of the in-engine interval: the last span end; None until handled.
+
+        API-side handling is left out: a paced input's output is often handled
+        only after the next input arrives, and that wait is not engine time.
+        """
         if self.handled_ns is None:
             return None
         span_ends = (start + duration for spans in self.stage_work.values() for start, duration in spans)
-        return max(self.handled_ns, self.submitted_ns, *span_ends)
+        return max(self.submitted_ns, *span_ends)
 
 
 @dataclass
@@ -137,6 +141,16 @@ class SessionPerfLedger:
         turn.chunks[seq] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, submitted_ns=submitted_ns)
         self._chunk_turns[(epoch, seq)] = turn.key
 
+    def drop_chunk(self, *, epoch: int, seq: int) -> None:
+        """Forget a chunk whose submission was compensated; its seq will be reused."""
+        turn_key = self._chunk_turns.pop((int(epoch), int(seq)), None)
+        turn = self._turns.get(turn_key) if turn_key is not None else None
+        if turn is None:
+            return
+        turn.chunks.pop(int(seq), None)
+        if not turn.chunks and not turn.response_ids:
+            del self._turns[turn.key]
+
     def record_stage_work(self, rows: Iterable[Sequence[int]]) -> None:
         """Add ``(stage_id, epoch, seq, start_ns, duration_ns)`` spans; unknown chunks are ignored."""
         for stage_id, epoch, seq, start_ns, duration_ns in rows:
@@ -152,14 +166,11 @@ class SessionPerfLedger:
                 chunk.truncated = True
                 self.dropped_spans += 1
                 continue
-            spans = chunk.stage_work.setdefault(int(stage_id), [])
-            if spans and start_ns <= spans[-1][0] + spans[-1][1]:
-                # The recorder coalesces within a flush; join across flushes too.
-                last = spans[-1]
-                last[1] = max(last[1], start_ns + duration_ns - last[0])
-                continue
-            spans.append([int(start_ns), int(duration_ns)])
-            chunk.num_spans += 1
+            spans = chunk.stage_work.get(int(stage_id), [])
+            before = len(spans)
+            merged = _merge_span(spans, int(start_ns), int(start_ns) + int(duration_ns))
+            chunk.stage_work[int(stage_id)] = merged
+            chunk.num_spans += len(merged) - before
 
     def mark_handled(self, chunks: Iterable[tuple[int, int]]) -> None:
         now = self._clock()
@@ -260,6 +271,23 @@ class SessionPerfLedger:
             if self._response_turns.get(response_id) == victim.key:
                 del self._response_turns[response_id]
         self.dropped_turns += 1
+
+
+def _merge_span(spans: list[list[int]], start_ns: int, end_ns: int) -> list[list[int]]:
+    """Add ``[start_ns, end_ns)`` to start-sorted ``spans``, joining only spans it overlaps.
+
+    Spans arrive in flush order, which need not be start order.
+    """
+    if not spans or start_ns > spans[-1][0] + spans[-1][1]:
+        spans.append([start_ns, end_ns - start_ns])
+        return spans
+    merged: list[list[int]] = []
+    for span_start, span_end in sorted([(s, s + d) for s, d in spans] + [(start_ns, end_ns)]):
+        if merged and span_start <= merged[-1][0] + merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], span_end - merged[-1][0])
+        else:
+            merged.append([span_start, span_end - span_start])
+    return merged
 
 
 def _turn_document(turn: TurnPerfRecord, origin: int) -> dict[str, object]:

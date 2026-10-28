@@ -3254,8 +3254,15 @@ class _RealtimeTTSProbe:
                 ),
                 None,
             )
-            metrics = session_stats_turn_metrics(turn) if turn is not None else {"final": False}
-            if metrics.get("final"):
+            stages = stats.get("stages")
+            stage_ids = (
+                [stage["stage_id"] for stage in stages if isinstance(stage, Mapping)]
+                if isinstance(stages, list)
+                else None
+            )
+            metrics = session_stats_turn_metrics(turn, stage_ids=stage_ids) if turn is not None else {"final": False}
+            if metrics.get("final") or metrics.get("missing_stage_ids"):
+                # Missing stages will not report later: the turn is already final.
                 break
             await asyncio.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         chunks = turn.get("chunks") if turn is not None else None
@@ -3275,6 +3282,7 @@ class _RealtimeTTSProbe:
             "server_stall_ms": metrics.get("stall_ms"),
             "server_audio_ms": metrics.get("audio_ms"),
             "server_stats_final": bool(metrics.get("final")),
+            "server_missing_stage_ids": metrics.get("missing_stage_ids", []),
             # Stages that reported work for the turn: shows the chunk id reached each stage.
             "server_stage_ids": stage_ids,
         }

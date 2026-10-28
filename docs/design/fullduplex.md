@@ -466,9 +466,10 @@ for queue updates and the final validity check before delivery.
   producing step's chunk into forwarded updates and the chunk transfer adapter
   into connector payloads. Stage schedulers (`DuplexStageWorkRecorder`) time
   every step of a request that carries a chunk and return the spans on
-  `OmniEngineCoreOutput.stage_work`. `DuplexEngineSession.perf`
-  (`SessionPerfLedger`) groups chunks by turn with their acceptance and done
-  times and spans, and records each turn's emitted audio through the
+  `OmniEngineCoreOutput.stage_work`, which the orchestrator hands to the
+  session as it collects them. `DuplexEngineSession.perf`
+  (`SessionPerfLedger`) groups chunks by turn with their acceptance times and
+  spans (a chunk is done at its last span end), and records each turn's emitted audio through the
   response it belongs to; turns close on model-turn completion, barge-in or
   close. The runner answers `session.stats.get` from the ledger on
   the ordered mailbox; clients derive busy RTF and stall ratio

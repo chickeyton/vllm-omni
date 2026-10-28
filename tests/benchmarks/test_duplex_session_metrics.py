@@ -224,3 +224,25 @@ def test_listen_turn_has_stall_time_but_no_ratios() -> None:
     }
     metrics = session_stats_turn_metrics(turn)
     assert (metrics["busy_rtf"], metrics["stall_ratio"], metrics["stall_ms"]) == (None, None, 20.0)
+
+
+def test_an_audio_turn_missing_a_stages_spans_gets_no_numbers() -> None:
+    turn = {
+        "epoch": 0,
+        "turn_id": 0,
+        "status": "done",
+        "final": True,
+        "chunks": [_stats_chunk(1, 0, 100, {0: [(10, 40)], 1: [(40, 50)]})],
+        "audio": [_audio(500.0)],
+    }
+    # Busy RTF without the vocoder's work would read low.
+    assert session_stats_turn_metrics(turn, stage_ids=[0, 1, 2]) == {
+        "final": False,
+        "epoch": 0,
+        "turn_id": 0,
+        "missing_stage_ids": [2],
+    }
+    assert session_stats_turn_metrics(turn, stage_ids=[0, 1])["busy_rtf"] == 0.16
+    # A listen turn needs no work from the speaking stages.
+    listen = {**turn, "status": "listen", "audio": []}
+    assert session_stats_turn_metrics(listen, stage_ids=[0, 1, 2])["final"] is True

@@ -68,8 +68,8 @@ def test_snapshot_is_session_relative_and_final_after_turn_and_responses_end() -
     ledger.end_response("resp-1")
     turn = _turn(ledger)
     assert (turn["status"], turn["final"]) == ("done", True)
-    # done_ns covers the API-side handling after the last span.
-    assert turn["chunks"][0]["done_ns"] == 21 * MS
+    # done_ns is the last span end; the API-side handling after it is not engine time.
+    assert turn["chunks"][0]["done_ns"] == 18 * MS
 
 
 def test_draining_tts_keeps_the_turn_open_and_late_spans_do_not_move_final_numbers() -> None:
@@ -94,7 +94,7 @@ def test_draining_tts_keeps_the_turn_open_and_late_spans_do_not_move_final_numbe
     assert after["final"] is True
     metrics = session_stats_turn_metrics(after)
     assert metrics["generation_ms"] == 30.0
-    assert after["chunks"][0]["done_ns"] == 55 * MS
+    assert after["chunks"][0]["done_ns"] == 50 * MS
 
     # Anything later is counted, not applied.
     ledger.record_stage_work([(1, 0, 1, origin + 80 * MS, 5 * MS)])
@@ -123,10 +123,12 @@ def test_a_queued_chunk_of_a_cancelled_turn_never_reports_numbers(cancel: str) -
 
 def test_a_closed_turn_waits_for_its_queued_chunk_and_keeps_its_wait() -> None:
     ledger, clock = _ledger()
+    origin = ledger.opened_at_ns
     _open(ledger, seq=1, at=0)
     ledger.close_turns(epoch=0, up_to_turn_id=0)
     assert _turn(ledger)["final"] is False
-    _handle(ledger, clock, (0, 1), at=300 * MS)
+    ledger.record_stage_work([(0, 0, 1, origin + 290 * MS, 10 * MS)])
+    _handle(ledger, clock, (0, 1), at=320 * MS)
     turn = _turn(ledger)
     assert (turn["status"], turn["final"]) == ("listen", True)
     # The queueing time stays inside the chunk's in-engine interval.
@@ -145,9 +147,26 @@ def test_chunks_done_long_before_the_turn_closes_keep_their_own_end() -> None:
     clock.now = origin + 5000 * MS
     ledger.close_turns(epoch=0, up_to_turn_id=0)
     turn = _turn(ledger)
-    assert [chunk["done_ns"] for chunk in turn["chunks"]] == [10 * MS, 1010 * MS]
+    assert [chunk["done_ns"] for chunk in turn["chunks"]] == [6 * MS, 1006 * MS]
     # Waiting for input between the chunks and before the close is not counted.
-    assert session_stats_turn_metrics(turn)["turn_span_ms"] == 20.0
+    assert session_stats_turn_metrics(turn)["turn_span_ms"] == 12.0
+
+
+def test_a_paced_chunk_handled_after_the_next_input_ends_at_its_last_span() -> None:
+    ledger, clock = _ledger()
+    origin = ledger.opened_at_ns
+    _open(ledger, seq=1, at=0)
+    ledger.record_stage_work([(0, 0, 1, origin + MS, 50 * MS)])
+    _open(ledger, seq=2, at=1000 * MS)
+    # The listen output of chunk 1 is handled only after chunk 2 arrived.
+    _handle(ledger, clock, (0, 1), at=1030 * MS)
+    ledger.record_stage_work([(0, 0, 2, origin + 1001 * MS, 50 * MS)])
+    _handle(ledger, clock, (0, 2), at=2030 * MS)
+    ledger.close_turns(epoch=0, up_to_turn_id=0)
+    turn = _turn(ledger)
+    assert [chunk["done_ns"] for chunk in turn["chunks"]] == [51 * MS, 1051 * MS]
+    # The wait for the next input is not engine time.
+    assert session_stats_turn_metrics(turn)["turn_span_ms"] == 102.0
 
 
 def test_late_spans_of_an_old_epoch_land_on_that_epochs_chunk() -> None:
@@ -179,6 +198,45 @@ def test_touching_spans_coalesce_across_flushes() -> None:
     ledger.record_stage_work([(0, 0, 1, origin + 10, 5)])
     ledger.record_stage_work([(0, 0, 1, origin + 30, 5)])
     assert _turn(ledger)["chunks"][0]["stage_work"][0]["spans"] == [[0, 15], [30, 5]]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((5, 20), (0, 20), [[0, 25]]),  # later flush, earlier start, overlapping
+        ((100, 5), (0, 10), [[0, 10], [100, 5]]),  # later flush, earlier start, disjoint
+        ((0, 10), (2, 3), [[0, 10]]),  # contained
+    ],
+)
+def test_spans_arriving_out_of_start_order_keep_their_union(
+    first: tuple[int, int], second: tuple[int, int], expected: list[list[int]]
+) -> None:
+    ledger, _ = _ledger()
+    origin = ledger.opened_at_ns
+    _open(ledger, seq=1)
+    ledger.record_stage_work([(0, 0, 1, origin + first[0], first[1])])
+    ledger.record_stage_work([(0, 0, 1, origin + second[0], second[1])])
+    assert _turn(ledger)["chunks"][0]["stage_work"][0]["spans"] == expected
+
+
+def test_out_of_order_spans_bridge_the_spans_they_overlap() -> None:
+    ledger, _ = _ledger()
+    origin = ledger.opened_at_ns
+    _open(ledger, seq=1)
+    ledger.record_stage_work([(0, 0, 1, origin + start, 5) for start in (0, 20, 40)])
+    ledger.record_stage_work([(0, 0, 1, origin + 3, 20)])
+    assert _turn(ledger)["chunks"][0]["stage_work"][0]["spans"] == [[0, 25], [40, 5]]
+
+
+def test_a_dropped_chunk_frees_its_seq_and_its_empty_turn() -> None:
+    ledger, _ = _ledger()
+    origin = ledger.opened_at_ns
+    _open(ledger, seq=1)
+    ledger.drop_chunk(epoch=0, seq=1)
+    assert ledger.snapshot()["turns"] == []
+    ledger.record_stage_work([(0, 0, 1, origin, MS)])  # a stale span of the aborted submit
+    _open(ledger, seq=1, at=2 * MS)
+    assert _turn(ledger)["chunks"][0]["stage_work"] == []
 
 
 def test_span_cap_marks_the_chunk_truncated_and_the_turn_never_final() -> None:

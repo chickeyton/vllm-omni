@@ -462,7 +462,22 @@ class ModelChannel:
             )
             if remaining_transcription_input is not None:
                 self._input_transcriptions[request_id] = remaining_transcription_input
-            submission_result = await self._ctx.stage_port.submit(submission)
+            perf_chunk = (fence.epoch, reservation.update.seq)
+            if session.perf is not None:
+                # Before submit: a live resumable request can report spans while it awaits.
+                session.perf.open_chunk(
+                    epoch=fence.epoch,
+                    seq=reservation.update.seq,
+                    turn_id=reservation.update.turn_id,
+                    turn_seq=reservation.update.turn_seq,
+                    submitted_ns=accepted_ns,
+                )
+            try:
+                submission_result = await self._ctx.stage_port.submit(submission)
+            except BaseException:
+                if session.perf is not None:
+                    session.perf.drop_chunk(epoch=perf_chunk[0], seq=perf_chunk[1])
+                raise
             try:
                 if submission_result.request_id != request_id or submission_result.stage_id != stage_id:
                     raise RuntimeError("duplex stage adapter returned a mismatched submission result")
@@ -487,17 +502,11 @@ class ModelChannel:
                         if bound is not None:
                             session.replace_runtime_config(bound)
                 update = session.commit_append(reservation)
-                if session.perf is not None:
-                    session.perf.open_chunk(
-                        epoch=fence.epoch,
-                        seq=update.seq,
-                        turn_id=update.turn_id,
-                        turn_seq=update.turn_seq,
-                        submitted_ns=accepted_ns,
-                    )
                 session.bind_stage_request(stage_id, request_id, fence=fence)
                 self._ctx.plugin.commit_append_plan(request_id)
             except BaseException:
+                if session.perf is not None:
+                    session.perf.drop_chunk(epoch=perf_chunk[0], seq=perf_chunk[1])
                 try:
                     await self._ctx.stage_port.cleanup([request_id], abort=True)
                 except Exception as cleanup_exc:
@@ -742,8 +751,8 @@ class ModelChannel:
             return await self._on_stage_output_item(item)
         finally:
             if perf is not None:
-                # Handling (projection, audio encoding, emission) is part of the chunk's in-engine time.
-                perf.mark_handled(item.context.perf_chunks())
+                # A chunk's turn cannot be final before its outputs are handled.
+                perf.mark_handled(item.context.perf_chunks)
 
     async def _on_stage_output_item(self, item: StageOutput) -> CommittedInputContinuation | None:
         session = self._ctx.session

@@ -30,6 +30,7 @@ from vllm_omni.engine.duplex import commands
 from vllm_omni.engine.duplex.commands import DuplexCommand
 from vllm_omni.engine.duplex.config import DuplexSessionConfig, DuplexSessionState
 from vllm_omni.engine.duplex.contracts import (
+    DuplexFence,
     DuplexOutputContext,
     DuplexRequestIdentity,
     DuplexStagePort,
@@ -208,12 +209,13 @@ class Harness:
             segment_finished=segment_finished,
             segment_token_ids=tuple(segment_token_ids),
             segment_output_metadata=dict(segment_output_metadata or {}),
-            stage_work=tuple(stage_work),
-            output_chunk=output_chunk,
+            perf_chunks={(row[1], row[2]) for row in stage_work} | ({output_chunk} if output_chunk else set()),
         )
         request_id = getattr(output, "request_id", None)
         if not isinstance(request_id, str):
             raise AssertionError("stage output is missing request_id")
+        # The orchestrator hands spans over with the raw output, before the session output.
+        self.runner.on_stage_work(stage_work)
         return self.runner.on_stage_output(stage_id, output, metrics, request_id=request_id, context=context)
 
     async def deliver_and_settle(self, output: SimpleNamespace, **kwargs: Any) -> list[DuplexEvent]:
@@ -376,6 +378,71 @@ async def test_an_output_without_spans_still_marks_its_chunk_handled() -> None:
         await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"), output_chunk=(0, 1))
         assert ledger._chunk(0, 1)[1].handled_ns > first
     finally:
+        await close_harness(h)
+
+
+def test_output_context_keeps_an_immutable_snapshot_of_the_segment_metadata() -> None:
+    metadata = {"meta.listen_token_id": 1}
+    context = DuplexOutputContext(
+        identity=DuplexRequestIdentity(session_id=SESSION_ID, fence=DuplexFence(SESSION_ID)),
+        final_stage_id=1,
+        segment_finished=False,
+        segment_output_metadata=metadata,
+        perf_chunks={(0, 1)},
+    )
+    metadata["meta.listen_token_id"] = 2
+    assert context.segment_output_metadata["meta.listen_token_id"] == 1
+    with pytest.raises(TypeError):
+        context.segment_output_metadata["meta.listen_token_id"] = 3  # type: ignore[index]
+    assert context.perf_chunks == frozenset({(0, 1)})
+
+
+@pytest.mark.asyncio
+async def test_spans_reported_while_the_append_submit_awaits_are_kept() -> None:
+    h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
+    try:
+        ledger = h.session.perf
+        assert ledger is not None
+        submit = h.port.submit
+
+        async def submit_and_report(submission: DuplexStageSubmission) -> DuplexStageSubmissionResult:
+            # A live resumable request steps on the update before submit returns.
+            h.runner.on_stage_work([(0, 0, 1, ledger.now_ns(), 1_000_000)])
+            return await submit(submission)
+
+        h.port.submit = submit_and_report  # type: ignore[method-assign]
+        await h.run(append_audio())
+        (turn,) = ledger.snapshot()["turns"]
+        assert [work["stage_id"] for work in turn["chunks"][0]["stage_work"]] == [0]
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_append_submit_leaves_no_chunk_behind() -> None:
+    h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
+    try:
+        assert h.session.perf is not None
+        h.port.fail_submit = RuntimeError("stage down")
+        await h.run(append_audio())
+        assert h.session.perf.snapshot()["turns"] == []
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_session_stats_get_is_still_answered_while_the_session_closes() -> None:
+    h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
+    try:
+        await h.run(append_audio())
+        # Queued before the close began (later ones get ``session_closed`` at admission).
+        h.runner.run.closing = True
+        h.runner.submit(commands.GetSessionStats(event_id="evt_closing"))
+        events = await h.settle()
+        assert types(events) == ["session.stats"]
+        assert events[0].request_event_id == "evt_closing"
+    finally:
+        h.runner.run.closing = False
         await close_harness(h)
 
 

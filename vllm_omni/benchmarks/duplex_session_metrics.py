@@ -102,7 +102,11 @@ def turn_is_final(turn: Mapping[str, object]) -> bool:
     )
 
 
-def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
+def session_stats_turn_metrics(
+    turn: Mapping[str, object],
+    *,
+    stage_ids: Sequence[int] | None = None,
+) -> dict[str, object]:
     """Busy RTF and stall ratio of one ``session.stats`` turn (RFC #8325 §1.3).
 
     ``busy RTF = G / A``: ``G`` is the union of every stage's work spans over all
@@ -111,10 +115,27 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
     ``[submitted_ns, done_ns]``) in which no stage worked on the turn. A turn
     that is not final yet returns ``{"final": False}`` and no numbers: a queued
     chunk has no spans, and counting it anyway would hide its wait.
+
+    With ``stage_ids`` (the snapshot's stages), a final turn that emitted audio
+    but has no spans from one of them also gets no numbers; ``missing_stage_ids``
+    names them. Busy RTF without a stage's work would read low, e.g. when the
+    chunk id cannot reach that stage.
     """
     chunks = turn.get("chunks")
     if not turn_is_final(turn) or not isinstance(chunks, list):
         return {"final": False, "epoch": turn.get("epoch"), "turn_id": turn.get("turn_id")}
+    audio = turn.get("audio")
+    if stage_ids is not None and isinstance(audio, list) and audio:
+        reported = {
+            work.get("stage_id") for chunk in chunks for work in chunk.get("stage_work") or () if work.get("spans")
+        }
+        if missing := sorted(set(stage_ids) - reported):
+            return {
+                "final": False,
+                "epoch": turn.get("epoch"),
+                "turn_id": turn.get("turn_id"),
+                "missing_stage_ids": missing,
+            }
     all_spans: list[Sequence[int]] = []
     in_engine: list[tuple[int, int]] = []
     for chunk in chunks:
@@ -122,7 +143,6 @@ def session_stats_turn_metrics(turn: Mapping[str, object]) -> dict[str, object]:
             all_spans.extend(work.get("spans") or ())
         submitted_ns = int(chunk["submitted_ns"])
         in_engine.append((submitted_ns, int(chunk["done_ns"]) - submitted_ns))
-    audio = turn.get("audio")
     audio_ms = sum(float(piece.get("duration_ms") or 0.0) for piece in audio) if isinstance(audio, list) else 0.0
     generation_ms = union_ns(all_spans) / 1e6
     turn_span_ms = union_ns(in_engine) / 1e6

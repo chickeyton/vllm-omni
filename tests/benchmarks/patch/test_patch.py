@@ -2447,6 +2447,17 @@ async def test_turn_session_stats_polls_until_final_and_reports_the_stages() -> 
 
 
 @pytest.mark.asyncio
+async def test_turn_session_stats_stops_without_numbers_when_a_stage_reported_no_work() -> None:
+    reply = {"stages": [{"stage_id": stage_id} for stage_id in (0, 1, 2)], "turns": [_stats_turn("r1")]}
+    client = _StatsClient([reply])
+    stats = await _probe(client).turn_session_stats("r1", timeout_s=2.0)
+    assert (stats["server_stats_final"], stats["busy_rtf"]) == (False, None)
+    assert stats["server_missing_stage_ids"] == [1, 2]
+    # The turn is already final, so polling stops at once.
+    assert len(client.timeouts) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [

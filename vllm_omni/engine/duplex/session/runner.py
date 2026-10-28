@@ -24,7 +24,7 @@ import asyncio
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -318,6 +318,15 @@ class DuplexSessionRunner:
             self._pending_input_appends += 1
         self._mailbox.put_nowait(command)
 
+    def on_stage_work(self, rows: Sequence[tuple[int, int, int, int, int]]) -> None:
+        """Record ``(stage_id, epoch, seq, start_ns, duration_ns)`` step spans (orchestrator loop).
+
+        Spans arrive with the raw stage output, not with a session output: a step
+        whose output never reaches the session still did work for its chunk.
+        """
+        if self.session.perf is not None:
+            self.session.perf.record_stage_work(rows)
+
     def on_stage_output(
         self,
         stage_id: int,
@@ -331,10 +340,9 @@ class DuplexSessionRunner:
     ) -> bool:
         """Accept one stage output (orchestrator loop); return True when it must not be forwarded."""
         perf = self.session.perf
-        if perf is not None and (context.stage_work or context.output_chunk is not None):
-            # Recorded here, not on the mailbox: forwarded outputs never reach it.
-            perf.record_stage_work(context.stage_work)
-            perf.mark_handled(context.perf_chunks())
+        if perf is not None and context.perf_chunks:
+            # Marked here, not on the mailbox: forwarded outputs never reach it.
+            perf.mark_handled(context.perf_chunks)
         if self.memory.on_output(request_id, output, finished=context.segment_finished):
             return True
         if self.model.is_input_transcription(request_id):
@@ -651,6 +659,10 @@ class DuplexSessionRunner:
             elif isinstance(item, AppendAudio):
                 admission = len(item.audio) + sum(len(frame) for frame in item.video_frames)
                 session.release_input_bytes(admission, queued=True)
+            elif isinstance(item, GetSessionStats):
+                # Still answered, so the client need not time out: final turns
+                # keep their numbers and the rest read as cancelled.
+                self._on_get_session_stats(item)
             return
         await self._on_command(item)
 

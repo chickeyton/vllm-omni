@@ -2050,6 +2050,11 @@ def summarize_session_request_metrics(
     for name in ("busy_rtf", "stall_ratio"):
         if (distribution := distribution_summary(_finite_metric_values(request_metrics, name), digits=6)) is not None:
             summary[name] = distribution
+    if any("server_stats_final" in metrics for metrics in request_metrics):
+        # Those means cover final turns only; report how many of the audio turns that is.
+        summary["server_stats_final_count"] = sum(
+            1 for metrics in request_metrics if metrics.get("server_stats_final") is True
+        )
     if (tpot := distribution_summary(_finite_metric_values(request_metrics, "tpot_ms", positive=True))) is not None:
         summary["tpot_ms"] = tpot
     if (stages := summarize_stage_metrics(request_metrics)) is not None:

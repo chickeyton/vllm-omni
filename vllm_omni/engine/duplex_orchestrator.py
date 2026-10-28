@@ -65,9 +65,9 @@ class DuplexOrchestratorRequestState(OrchestratorRequestState):
     fence: DuplexFence | None = None
     stage_fences: dict[int, DuplexFence] = field(default_factory=dict)
     config_generation: int = -1
-    # Session stats (RFC #8325): spans not yet handed to the runner, and the chunk
-    # of each stage's latest producing step.
-    pending_stage_work: list[tuple[int, int, int, int, int]] = field(default_factory=list)
+    # Session stats (RFC #8325): per stage, the chunks with spans since its last
+    # session output, and the chunk of its latest producing step.
+    pending_perf_chunks: dict[int, set[tuple[int, int]]] = field(default_factory=dict)
     stage_output_chunks: dict[int, tuple[int, int]] = field(default_factory=dict)
 
 
@@ -248,8 +248,7 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
             segment_finished=finished,
             segment_token_ids=tuple(segment.token_ids),
             segment_output_metadata=segment.output_metadata,
-            stage_work=self._take_stage_work(req_state, stage_id),
-            output_chunk=req_state.stage_output_chunks.get(stage_id),
+            perf_chunks=self._take_perf_chunks(req_state, stage_id),
         )
         return runner.on_stage_output(
             stage_id,
@@ -272,20 +271,26 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
         rows = stage_work_rows(eco.stage_work)
         if not rows:
             return
-        req_state.pending_stage_work.extend((stage_id, *row) for row in rows)
+        runner = self.session_manager.runners.get(req_state.session_id)
+        if runner is not None:
+            # Now, not with a later session output: the step may never produce one.
+            runner.on_stage_work([(stage_id, *row) for row in rows])
+        req_state.pending_perf_chunks.setdefault(stage_id, set()).update((row[0], row[1]) for row in rows)
         # The recorder puts the producing step's chunk last.
         req_state.stage_output_chunks[stage_id] = (rows[-1][0], rows[-1][1])
 
     @staticmethod
-    def _take_stage_work(
-        req_state: DuplexOrchestratorRequestState,
-        stage_id: int,
-    ) -> tuple[tuple[int, int, int, int, int], ...]:
-        """Drain the spans of ``stage_id``; outputs and raw outputs need not pair one to one."""
-        taken = tuple(row for row in req_state.pending_stage_work if row[0] == stage_id)
-        if taken:
-            req_state.pending_stage_work = [row for row in req_state.pending_stage_work if row[0] != stage_id]
-        return taken
+    def _take_perf_chunks(req_state: DuplexOrchestratorRequestState, stage_id: int) -> frozenset[tuple[int, int]]:
+        """The chunks a session output of ``stage_id`` finishes handling for.
+
+        Those with spans since the stage's last output, plus its producing chunk:
+        outputs and raw outputs need not pair one to one.
+        """
+        chunks = req_state.pending_perf_chunks.pop(stage_id, set())
+        output_chunk = req_state.stage_output_chunks.get(stage_id)
+        if output_chunk is not None:
+            chunks.add(output_chunk)
+        return frozenset(chunks)
 
     def _annotate_next_stage_inputs(
         self,
