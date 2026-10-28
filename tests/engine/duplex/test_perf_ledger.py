@@ -228,15 +228,23 @@ def test_out_of_order_spans_bridge_the_spans_they_overlap() -> None:
     assert _turn(ledger)["chunks"][0]["stage_work"][0]["spans"] == [[0, 25], [40, 5]]
 
 
-def test_a_dropped_chunk_frees_its_seq_and_its_empty_turn() -> None:
+def test_a_dropped_chunk_frees_its_empty_turn_and_its_retry_gets_a_fresh_id() -> None:
     ledger, _ = _ledger()
     origin = ledger.opened_at_ns
     _open(ledger, seq=1)
-    ledger.drop_chunk(epoch=0, seq=1)
+    ledger.drop_chunk((0, 1))
     assert ledger.snapshot()["turns"] == []
-    ledger.record_stage_work([(0, 0, 1, origin, MS)])  # a stale span of the aborted submit
-    _open(ledger, seq=1, at=2 * MS)
+    retry = ledger.open_chunk(epoch=0, seq=1, turn_id=0, turn_seq=1, submitted_ns=origin + 2 * MS)
+    assert retry != (0, 1)
+    # The aborted submit's spans arrive after the retry opened and are ignored.
+    ledger.record_stage_work([(0, 0, 1, origin + 3 * MS, MS)])
     assert _turn(ledger)["chunks"][0]["stage_work"] == []
+    ledger.record_stage_work([(0, *retry, origin + 4 * MS, MS)])
+    (chunk,) = _turn(ledger)["chunks"]
+    assert (chunk["seq"], chunk["stage_work"]) == (1, [{"stage_id": 0, "spans": [[4 * MS, MS]]}])
+    # A retry that fails again does not hand its id to the next one.
+    ledger.drop_chunk(retry)
+    assert ledger.open_chunk(epoch=0, seq=1, turn_id=0, turn_seq=1, submitted_ns=origin) not in {(0, 1), retry}
 
 
 def test_span_cap_marks_the_chunk_truncated_and_the_turn_never_final() -> None:

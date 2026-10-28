@@ -431,6 +431,26 @@ async def test_a_failed_append_submit_leaves_no_chunk_behind() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_retried_append_does_not_take_the_failed_submits_spans() -> None:
+    h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
+    try:
+        ledger = h.session.perf
+        assert ledger is not None
+        h.port.fail_submit = RuntimeError("stage down")
+        await h.run(append_audio())
+        h.port.fail_submit = None
+        await h.run(append_audio())
+        retry = h.port.submissions[-1].prompt["model_intermediate_buffer"]["duplex"]["perf_chunk"]
+        assert retry != [0, 1]
+        # A late span of the failed submit still carries the old id.
+        h.runner.on_stage_work([(0, 0, 1, ledger.now_ns(), 1_000_000)])
+        (turn,) = ledger.snapshot()["turns"]
+        assert [(chunk["seq"], chunk["stage_work"]) for chunk in turn["chunks"]] == [(1, [])]
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
 async def test_session_stats_get_is_still_answered_while_the_session_closes() -> None:
     h = await open_harness(runtime_config=DuplexSessionRuntimeConfig(collect_stats=True))
     try:

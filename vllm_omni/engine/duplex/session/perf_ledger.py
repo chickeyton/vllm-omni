@@ -126,7 +126,10 @@ class SessionPerfLedger:
         self.dropped_spans = 0
         # Insertion order is turn order; eviction takes the oldest final or cancelled turn.
         self._turns: dict[tuple[int, int], TurnPerfRecord] = {}
+        # Chunk id -> turn. A chunk's id is its (epoch, seq) unless that seq was dropped before.
         self._chunk_turns: dict[tuple[int, int], tuple[int, int]] = {}
+        self._dropped_chunks: set[tuple[int, int]] = set()
+        self._next_retry_id = -1
         self._response_turns: dict[str, tuple[int, int]] = {}
 
     def now_ns(self) -> int:
@@ -136,18 +139,31 @@ class SessionPerfLedger:
     # Recording                                                          #
     # ------------------------------------------------------------------ #
 
-    def open_chunk(self, *, epoch: int, seq: int, turn_id: int, turn_seq: int, submitted_ns: int) -> None:
-        turn = self._turn(epoch, turn_id)
-        turn.chunks[seq] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, submitted_ns=submitted_ns)
-        self._chunk_turns[(epoch, seq)] = turn.key
+    def open_chunk(self, *, epoch: int, seq: int, turn_id: int, turn_seq: int, submitted_ns: int) -> tuple[int, int]:
+        """Register a chunk and return the id its append carries as ``perf_chunk``.
 
-    def drop_chunk(self, *, epoch: int, seq: int) -> None:
-        """Forget a chunk whose submission was compensated; its seq will be reused."""
-        turn_key = self._chunk_turns.pop((int(epoch), int(seq)), None)
+        The id is ``(epoch, seq)``. A seq reused after :meth:`drop_chunk` gets a
+        fresh negative id instead, so late spans of the aborted submit, still
+        stamped with the old id, cannot land on the retry.
+        """
+        chunk_id = (int(epoch), int(seq))
+        if chunk_id in self._dropped_chunks:
+            chunk_id = (chunk_id[0], self._next_retry_id)
+            self._next_retry_id -= 1
+        turn = self._turn(epoch, turn_id)
+        turn.chunks[chunk_id[1]] = ChunkPerfRecord(seq=seq, turn_seq=turn_seq, submitted_ns=submitted_ns)
+        self._chunk_turns[chunk_id] = turn.key
+        return chunk_id
+
+    def drop_chunk(self, chunk_id: tuple[int, int]) -> None:
+        """Forget a chunk whose submission was compensated; its spans are ignored from now on."""
+        chunk_id = (int(chunk_id[0]), int(chunk_id[1]))
+        self._dropped_chunks.add(chunk_id)
+        turn_key = self._chunk_turns.pop(chunk_id, None)
         turn = self._turns.get(turn_key) if turn_key is not None else None
         if turn is None:
             return
-        turn.chunks.pop(int(seq), None)
+        turn.chunks.pop(chunk_id[1], None)
         if not turn.chunks and not turn.response_ids:
             del self._turns[turn.key]
 
@@ -264,9 +280,9 @@ class SessionPerfLedger:
         if victim is None:
             victim = next(iter(self._turns.values()))
         del self._turns[victim.key]
-        for seq in victim.chunks:
-            if self._chunk_turns.get((victim.epoch, seq)) == victim.key:
-                del self._chunk_turns[(victim.epoch, seq)]
+        for chunk_seq in victim.chunks:
+            if self._chunk_turns.get((victim.epoch, chunk_seq)) == victim.key:
+                del self._chunk_turns[(victim.epoch, chunk_seq)]
         for response_id in victim.response_ids:
             if self._response_turns.get(response_id) == victim.key:
                 del self._response_turns[response_id]

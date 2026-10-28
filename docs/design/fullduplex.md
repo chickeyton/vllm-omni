@@ -462,7 +462,8 @@ for queue updates and the final validity check before delivery.
   wire keep their meaning.
 - **Session stats (busy RTF, RFC #8325).** Opt-in with
   `duplex_session.collect_stats`. `ModelChannel` stamps each Stage-0 append's
-  envelope with `duplex.perf_chunk = [epoch, seq]`; the orchestrator copies the
+  envelope with `duplex.perf_chunk = [epoch, seq]` (a seq retried after a failed
+  submit gets a fresh id, so the aborted submit's late spans are ignored); the orchestrator copies the
   producing step's chunk into forwarded updates and the chunk transfer adapter
   into connector payloads. Stage schedulers (`DuplexStageWorkRecorder`) time
   every step of a request that carries a chunk and return the spans on

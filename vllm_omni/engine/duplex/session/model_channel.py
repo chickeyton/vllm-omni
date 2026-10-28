@@ -451,32 +451,31 @@ class ModelChannel:
             if on_append_prepared is not None:
                 on_append_prepared()
             prompt = dict(append_plan.prompt)
-            if session.perf is not None:
-                prompt = with_perf_chunk(prompt, (fence.epoch, reservation.update.seq))
-            runtime_patch = self._ctx.plugin.runtime_patch_for_submitted_prompt(prompt)
-            submission = DuplexStageSubmission(
-                context=request_context,
-                prompt=prompt,
-                already_submitted=already_submitted,
-                resumable=resumable,
-            )
-            if remaining_transcription_input is not None:
-                self._input_transcriptions[request_id] = remaining_transcription_input
-            perf_chunk = (fence.epoch, reservation.update.seq)
-            if session.perf is not None:
+            perf, perf_chunk = session.perf, None
+            if perf is not None:
                 # Before submit: a live resumable request can report spans while it awaits.
-                session.perf.open_chunk(
+                perf_chunk = perf.open_chunk(
                     epoch=fence.epoch,
                     seq=reservation.update.seq,
                     turn_id=reservation.update.turn_id,
                     turn_seq=reservation.update.turn_seq,
                     submitted_ns=accepted_ns,
                 )
+                prompt = with_perf_chunk(prompt, perf_chunk)
             try:
+                runtime_patch = self._ctx.plugin.runtime_patch_for_submitted_prompt(prompt)
+                submission = DuplexStageSubmission(
+                    context=request_context,
+                    prompt=prompt,
+                    already_submitted=already_submitted,
+                    resumable=resumable,
+                )
+                if remaining_transcription_input is not None:
+                    self._input_transcriptions[request_id] = remaining_transcription_input
                 submission_result = await self._ctx.stage_port.submit(submission)
             except BaseException:
-                if session.perf is not None:
-                    session.perf.drop_chunk(epoch=perf_chunk[0], seq=perf_chunk[1])
+                if perf is not None and perf_chunk is not None:
+                    perf.drop_chunk(perf_chunk)
                 raise
             try:
                 if submission_result.request_id != request_id or submission_result.stage_id != stage_id:
@@ -505,8 +504,8 @@ class ModelChannel:
                 session.bind_stage_request(stage_id, request_id, fence=fence)
                 self._ctx.plugin.commit_append_plan(request_id)
             except BaseException:
-                if session.perf is not None:
-                    session.perf.drop_chunk(epoch=perf_chunk[0], seq=perf_chunk[1])
+                if perf is not None and perf_chunk is not None:
+                    perf.drop_chunk(perf_chunk)
                 try:
                     await self._ctx.stage_port.cleanup([request_id], abort=True)
                 except Exception as cleanup_exc:
