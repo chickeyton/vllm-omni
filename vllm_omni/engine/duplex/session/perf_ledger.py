@@ -68,7 +68,7 @@ class ChunkPerfRecord:
         if self.handled_ns is None:
             return None
         span_ends = (start + duration for spans in self.stage_work.values() for start, duration in spans)
-        return max(self.submitted_ns, *span_ends)
+        return max([self.submitted_ns, *span_ends])
 
 
 @dataclass
@@ -128,6 +128,7 @@ class SessionPerfLedger:
         self._turns: dict[tuple[int, int], TurnPerfRecord] = {}
         # Chunk id -> turn. A chunk's id is its (epoch, seq) unless that seq was dropped before.
         self._chunk_turns: dict[tuple[int, int], tuple[int, int]] = {}
+        # Dropped (epoch, seq) of the latest epoch; older epochs never reuse a seq.
         self._dropped_chunks: set[tuple[int, int]] = set()
         self._next_retry_id = -1
         self._response_turns: dict[str, tuple[int, int]] = {}
@@ -147,6 +148,7 @@ class SessionPerfLedger:
         stamped with the old id, cannot land on the retry.
         """
         chunk_id = (int(epoch), int(seq))
+        self._prune_dropped(chunk_id[0])
         if chunk_id in self._dropped_chunks:
             chunk_id = (chunk_id[0], self._next_retry_id)
             self._next_retry_id -= 1
@@ -158,7 +160,9 @@ class SessionPerfLedger:
     def drop_chunk(self, chunk_id: tuple[int, int]) -> None:
         """Forget a chunk whose submission was compensated; its spans are ignored from now on."""
         chunk_id = (int(chunk_id[0]), int(chunk_id[1]))
-        self._dropped_chunks.add(chunk_id)
+        if chunk_id[1] >= 0:  # a retry id is never opened again
+            self._prune_dropped(chunk_id[0])
+            self._dropped_chunks.add(chunk_id)
         turn_key = self._chunk_turns.pop(chunk_id, None)
         turn = self._turns.get(turn_key) if turn_key is not None else None
         if turn is None:
@@ -268,6 +272,10 @@ class SessionPerfLedger:
             turn = TurnPerfRecord(epoch=key[0], turn_id=key[1])
             self._turns[key] = turn
         return turn
+
+    def _prune_dropped(self, epoch: int) -> None:
+        if any(dropped_epoch < epoch for dropped_epoch, _ in self._dropped_chunks):
+            self._dropped_chunks = {key for key in self._dropped_chunks if key[0] >= epoch}
 
     def _chunk(self, epoch: int, seq: int) -> tuple[TurnPerfRecord, ChunkPerfRecord] | None:
         turn_key = self._chunk_turns.get((int(epoch), int(seq)))

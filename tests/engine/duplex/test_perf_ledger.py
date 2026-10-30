@@ -169,6 +169,16 @@ def test_a_paced_chunk_handled_after_the_next_input_ends_at_its_last_span() -> N
     assert session_stats_turn_metrics(turn)["turn_span_ms"] == 102.0
 
 
+def test_a_final_chunk_without_spans_ends_at_its_submission() -> None:
+    ledger, clock = _ledger()
+    _open(ledger, seq=1, at=3 * MS)
+    _handle(ledger, clock, (0, 1), at=10 * MS)
+    ledger.close_turns(epoch=0, up_to_turn_id=0)
+    turn = _turn(ledger)
+    assert turn["final"] is True
+    assert turn["chunks"][0]["done_ns"] == 3 * MS
+
+
 def test_late_spans_of_an_old_epoch_land_on_that_epochs_chunk() -> None:
     ledger, _ = _ledger()
     origin = ledger.opened_at_ns
@@ -245,6 +255,14 @@ def test_a_dropped_chunk_frees_its_empty_turn_and_its_retry_gets_a_fresh_id() ->
     # A retry that fails again does not hand its id to the next one.
     ledger.drop_chunk(retry)
     assert ledger.open_chunk(epoch=0, seq=1, turn_id=0, turn_seq=1, submitted_ns=origin) not in {(0, 1), retry}
+
+
+def test_dropped_ids_are_forgotten_once_a_newer_epoch_opens() -> None:
+    ledger, _ = _ledger()
+    _open(ledger, seq=1)
+    ledger.drop_chunk((0, 1))
+    _open(ledger, seq=1, epoch=1, turn_id=0)
+    assert ledger._dropped_chunks == set()
 
 
 def test_span_cap_marks_the_chunk_truncated_and_the_turn_never_final() -> None:
